@@ -21,7 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "torch>=2.9",
+    "torch>=2.13.0",
     "torchvision>=0.24",
     "numpy>=2.1",
     "pydantic>=2.9",
