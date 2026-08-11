@@ -1,40 +1,69 @@
+"""Beta schedules and the derived coefficients used by DDPM/DDIM."""
+
 import math
-from __future__ import annotations
-from typing import Dict
 
 import torch
 
-def linear_beta_schedule(beta1: float, beta2: float, T: int) -> torch.Tensor:
-    """DDPM's original linear schedule. Tuned for T=1000."""
-    return torch.linspace(beta1, beta2, T, dtype=torch.float32)
 
-def cosine_beta_scheduler(T: int, s: float = 0.008) -> torch.Tensor:
-    """Nichol & Dhariwal 2021. Noticeably better than linear at low resolution."""
-    steps = torch.arange(T + 1, dtype=torch.float32) / T
+def linear_beta_schedule(beta_start: float, beta_end: float, num_timesteps: int) -> torch.Tensor:
+    """DDPM's original linear schedule. Tuned for num_timesteps=1000.
+
+    Args:
+        beta_start: beta at t=0.
+        beta_end: beta at the final step.
+        num_timesteps: length of the schedule.
+
+    Returns:
+        1-D tensor of betas, length num_timesteps.
+    """
+    return torch.linspace(beta_start, beta_end, num_timesteps, dtype=torch.float32)
+
+
+def cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> torch.Tensor:
+    """Nichol & Dhariwal 2021. Noticeably better than linear at low resolution.
+
+    Args:
+        num_timesteps: length of the schedule.
+        s: small offset preventing beta from being too small near t=0.
+
+    Returns:
+        1-D tensor of betas, length num_timesteps.
+    """
+    steps = torch.arange(num_timesteps + 1, dtype=torch.float32) / num_timesteps
     alphabar = torch.cos((steps + s) / (1 + s) * math.pi / 2) ** 2
     alphabar = alphabar / alphabar[0]
     betas = 1 - alphabar[1:] / alphabar[:-1]
     return betas.clamp(max=0.999)
 
-def ddpm_schedules(betas: torch.Tensor) -> Dict[str, torch.Tensor]:
+
+def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
     """Pre-compute every coefficient needed for training and sampling.
- 
+
     All tensors have length T and are indexed by t in [0, T-1], where t=0 is
     the first (least noisy) step. This differs from the minDiffusion
     convention of T+1 entries indexed from 1.
+
+    Args:
+        betas: 1-D tensor of betas, every entry in (0, 1).
+
+    Returns:
+        Mapping from buffer name to coefficient tensor.
+
+    Raises:
+        ValueError: if any beta falls outside (0, 1).
     """
     if not (betas > 0).all() or not (betas < 1).all():
         raise ValueError("all betas must lie in (0, 1)")
- 
+
     alpha_t = 1.0 - betas
     alphabar_t = torch.cumprod(alpha_t, dim=0)
     # alphabar_{t-1}, with alphabar_{-1} := 1 so that t=0 is noise-free.
     alphabar_prev = torch.cat([torch.ones(1), alphabar_t[:-1]])
- 
+
     # Posterior variance beta_tilde_t = beta_t * (1 - abar_{t-1}) / (1 - abar_t).
     # It is 0 at t=0, so clamp before taking a log or a sqrt.
     posterior_var = betas * (1.0 - alphabar_prev) / (1.0 - alphabar_t)
- 
+
     return {
         "betas": betas,
         "alpha_t": alpha_t,

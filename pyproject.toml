@@ -83,6 +83,7 @@ ignore = [
     "D104", # missing docstring in public package
     "D107", # missing docstring in __init__ (documented on the class)
     "ANN401", # allow Any where it is genuinely needed
+    "N812", # `import torch.nn.functional as F` is the universal PyTorch spelling
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -109,6 +110,13 @@ pretty = true
 [[tool.mypy.overrides]]
 module = ["torchvision.*", "tqdm.*", "tensorboard.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# `nn.Module.__call__` is typed as returning Any, so every `return self.layer(x)`
+# trips warn_return_any. Our own `forward` annotations are the real contract;
+# strictness stays on for everything else.
+module = ["tinydiffusion.*"]
+warn_return_any = false
 
 # ---------------------------------------------------------------------------
 # pytest
