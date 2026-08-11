@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# TinyDiffusion: training artifacts (never commit these)
+# ---------------------------------------------------------------------------
+/data/
+/datasets/
+/checkpoints/
+/outputs/
+/samples/
+/runs/
+/logs/
+/lightning_logs/
+/wandb/
+/mlruns/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx

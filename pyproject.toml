@@ -1,0 +1,146 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tinydiffusion"
+version = "0.1.0"
+description = "A PyTorch implementation of a diffusion model for image generation."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Hilthon" }]
+requires-python = ">=3.14"
+keywords = ["diffusion", "ddpm", "pytorch", "generative", "image-generation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "torch>=2.9",
+    "torchvision>=0.24",
+    "numpy>=2.1",
+    "pydantic>=2.9",
+    "tqdm>=4.67",
+]
+
+[project.optional-dependencies]
+# Optional experiment tracking / logging backends.
+tracking = ["tensorboard>=2.18"]
+
+[project.urls]
+Homepage = "https://github.com/HilthonTT/TinyDiffusion"
+Repository = "https://github.com/HilthonTT/TinyDiffusion"
+Issues = "https://github.com/HilthonTT/TinyDiffusion/issues"
+Changelog = "https://github.com/HilthonTT/TinyDiffusion/blob/main/CHANGELOG.md"
+
+[project.scripts]
+tinydiffusion = "tinydiffusion.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pre-commit>=4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tinydiffusion"]
+
+# ---------------------------------------------------------------------------
+# Ruff (lint + format)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific
+    "ANN",  # flake8-annotations
+    "D",    # pydocstyle
+]
+ignore = [
+    "D100", # missing docstring in public module
+    "D104", # missing docstring in public package
+    "D107", # missing docstring in __init__ (documented on the class)
+    "ANN401", # allow Any where it is genuinely needed
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.14"
+# Library code is strictly typed; tests are linted by ruff but not type-checked,
+# so fixtures and parametrised cases stay readable.
+files = ["src"]
+strict = true
+warn_unreachable = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["torchvision.*", "tqdm.*", "tensorboard.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+]
+markers = [
+    "slow: tests that take more than a few seconds (deselect with '-m \"not slow\"')",
+    "gpu: tests that require a CUDA device",
+]
+filterwarnings = ["error", "default::DeprecationWarning"]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/tinydiffusion"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

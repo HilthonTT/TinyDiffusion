@@ -1,0 +1,46 @@
+name: Bug report
+description: Something behaves differently than documented or expected.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the full traceback if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: A minimal command or script that triggers the problem.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: TinyDiffusion version
+      placeholder: "0.1.0 or commit sha"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Output of:
+        `python -c "import torch, platform; print(platform.platform(), platform.python_version(), torch.__version__, torch.version.cuda, torch.cuda.is_available())"`
+      render: shell
+    validations:
+      required: true

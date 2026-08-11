@@ -1,0 +1,6 @@
+# Default owner for everything in the repo.
+*                   @HilthonTT
+
+# Tooling and CI changes always get maintainer review.
+/.github/           @HilthonTT
+/pyproject.toml     @HilthonTT

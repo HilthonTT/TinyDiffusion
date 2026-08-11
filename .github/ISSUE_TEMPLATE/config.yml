@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/HilthonTT/TinyDiffusion/discussions
+    about: Ask usage questions or discuss training results here.
+  - name: Security vulnerability
+    url: https://github.com/HilthonTT/TinyDiffusion/security/advisories/new
+    about: Report vulnerabilities privately — please do not open a public issue.
