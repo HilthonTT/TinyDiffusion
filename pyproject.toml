@@ -25,7 +25,7 @@ dependencies = [
     "torchvision>=0.24",
     "numpy>=2.1",
     "pydantic>=2.9",
-    "tqdm>=4.67",
+    "tqdm>=4.70.0",
 ]
 
 [project.optional-dependencies]
