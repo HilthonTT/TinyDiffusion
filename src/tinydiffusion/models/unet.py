@@ -106,7 +106,7 @@ class UNet(nn.Module):
         self.out = nn.Sequential(
             group_norm(channels),
             nn.SiLU(),
-            zero_module(nn.Conv2d(channels, level_channels, 3, padding=1)),
+            zero_module(nn.Conv2d(channels, out_channels, 3, padding=1)),
         )
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:

@@ -18,7 +18,7 @@ class TimeEmbedding(nn.Module):
     def __init__(self, dim: int, out_dim: int) -> None:
         super().__init__()
         self.dim = dim
-        self.out_dim = dim
+        self.out_dim = out_dim
         self.mlp = nn.Sequential(
             nn.Linear(dim, out_dim),
             nn.SiLU(),
@@ -39,7 +39,7 @@ class TimeEmbedding(nn.Module):
             -math.log(10000.0) * torch.arange(half, device=x.device, dtype=torch.float32) / half
         )
         args = x.float().flatten()[:, None] * freqs[None]
-        emb = torch.cat([args.cos(), args.min()], dim=1)
+        emb = torch.cat([args.cos(), args.sin()], dim=1)
         if self.dim % 2:
             emb = F.pad(emb, (0, 1))
         return self.mlp(emb)
