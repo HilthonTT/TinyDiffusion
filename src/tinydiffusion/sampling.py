@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import torch
 from torchvision.utils import save_image
 
 from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize
@@ -11,12 +10,8 @@ from tinydiffusion.diffusion.ddpm import DDPM
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.train_mnist import build_model, read_checkpoint, restore_checkpoint
+from tinydiffusion.utils.device import resolve_device
 from tinydiffusion.utils.seed import seed_everything
-
-
-def default_device() -> str:
-    """Return ``"cuda"`` when a GPU is visible, else ``"cpu"``."""
-    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_for_sampling(checkpoint: Path, device: str | None = None) -> tuple[DDPM, EMA, TrainConfig]:
@@ -38,7 +33,7 @@ def load_for_sampling(checkpoint: Path, device: str | None = None) -> tuple[DDPM
     Raises:
         KeyError: if the checkpoint predates config provenance.
     """
-    resolved = device or default_device()
+    resolved = resolve_device(device)
     ckpt = read_checkpoint(checkpoint, device=resolved)
     if "config" not in ckpt:
         raise KeyError(f"{checkpoint} stores no config; cannot infer the architecture")

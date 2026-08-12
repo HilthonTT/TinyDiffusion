@@ -1,6 +1,6 @@
 """MNIST training loop for TinyDiffusion."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
+from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
 from tinydiffusion.utils.seed import seed_everything
 
 __all__ = [
@@ -221,6 +222,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         The trained model, with EMA weights already swapped in.
     """
     cfg = cfg or TrainConfig()
+    cfg = replace(cfg, device=resolve_device(cfg.device))
     seed_everything(cfg.seed)
 
     device_type = torch.device(cfg.device).type
@@ -228,6 +230,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     if device_type == "cuda":
         # Input shapes are fixed for the whole run, so autotuning pays off once.
         torch.backends.cudnn.benchmark = True
+        enable_tf32()
 
     ddpm = build_model(cfg).to(cfg.device)
     ema = EMA(ddpm.eps_model, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
@@ -251,7 +254,9 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     )
 
     n_params = sum(p.numel() for p in ddpm.eps_model.parameters())
-    print(f"{n_params / 1e6:.2f}M parameters | device {cfg.device} | amp {use_amp}")
+    print(
+        f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | amp {use_amp}"
+    )
 
     # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
     reference: torch.Tensor | None = None

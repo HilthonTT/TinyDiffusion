@@ -1,0 +1,340 @@
+# Usage
+
+Everything needed to install, run, and troubleshoot TinyDiffusion. For what
+the project *is*, see [README.md](README.md); for contributing, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+- [Install](#install)
+- [Using a GPU](#using-a-gpu)
+- [What gets downloaded, and where](#what-gets-downloaded-and-where)
+- [Running the CLI](#running-the-cli)
+- [Training](#training)
+- [Sampling](#sampling)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [uv command reference](#uv-command-reference)
+
+## Install
+
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync --all-extras --dev
+```
+
+That creates `.venv/` in the repo and installs the project into it in editable
+mode. On Windows this gives you a **CPU-only** PyTorch; see below to get CUDA.
+
+## Using a GPU
+
+Training picks the GPU automatically when one is visible and falls back to the
+CPU when it is not, so there is no flag to set — but the wheel has to support
+your card. Check what you have:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_arch_list())"
+```
+
+- A CPU build prints `2.13.0+cpu False []` — an empty arch list is the tell.
+- A working CUDA build prints e.g. `2.13.0+cu132 True ['sm_75', ..., 'sm_120']`.
+
+The arch list must contain your card's compute capability. Blackwell
+(RTX 50-series) is `sm_120` and needs CUDA 12.8 or newer; an older wheel such
+as `cu124` installs happily and then never sees the GPU.
+
+### Getting a CUDA build on Windows
+
+The lockfile resolves PyTorch from PyPI, whose **Windows** wheel is CPU-only —
+CUDA builds live on PyTorch's own index. (The Linux wheel on PyPI already
+bundles CUDA, so this section is Windows-only.) `--torch-backend=auto` reads
+your driver and picks a matching CUDA version:
+
+```powershell
+uv pip install --reinstall --torch-backend=auto torch torchvision
+```
+
+> **This install sits outside the lockfile.** `uv sync` — and `uv run`, which
+> syncs first — restores the locked CPU build and silently undoes it. Use
+> `.\run.ps1`, `./run.sh`, or `uv run --no-sync` day to day, and re-run the
+> command above after any deliberate `uv sync`.
+>
+> Pinning CUDA in `pyproject.toml` instead would drag multi-gigabyte wheels
+> onto the Windows CI runner, which has no GPU to use them.
+
+Once installed, the training banner names the device it is actually using:
+
+```
+2.36M parameters | device cuda (NVIDIA GeForce RTX 5060 Laptop GPU) | amp True
+```
+
+On CUDA the loop also turns on cuDNN autotuning, TF32 matmuls, and fp16
+autocast (`amp = true` in the config, ignored on CPU). Measured on an RTX 5060
+Laptop, one full epoch of `configs/smoke.toml` — training, sampling, and
+checkpointing — takes **28 s on the GPU against 206 s on the CPU**. The gap
+widens sharply for `configs/mnist.toml`, which is ~40x more compute per step.
+
+## What gets downloaded, and where
+
+| What | Size | Lands in |
+| --- | --- | --- |
+| Python deps (`uv sync`) | ~0.7 GB | `.venv/` |
+| CUDA torch + torchvision | 1.8 GB download, 2.9 GB installed | `.venv/` |
+| Cached wheels | mirrors the above | uv's cache — **not** the project |
+| MNIST, fetched on first run | 63 MB | `data/` (`data_root`) |
+| Checkpoints | ~3 MB per 0.2M params | `ckpt_dir` |
+| Sample grids | ~25 KB each, one per epoch | `out_dir` |
+
+MNIST downloads itself the first time you train and is reused afterwards.
+`data/`, `checkpoints/`, `runs/` and `*.pt` are gitignored; `contents/` — the
+default `out_dir` — is not, which is why the shipped configs write under
+`runs/` instead.
+
+### uv's cache and your disk
+
+uv caches every wheel it downloads outside the project:
+
+```powershell
+uv cache dir      # e.g. C:\Users\<you>\AppData\Local\uv\cache
+uv cache size     # bytes it is holding (experimental in uv 0.12)
+```
+
+If that cache and `.venv/` are on **different drives**, uv cannot hardlink and
+copies instead — so a CUDA torch install costs ~3 GB in the cache *and* ~3 GB
+in `.venv`, and the copy step takes minutes. uv warns when this happens:
+
+```
+warning: Failed to hardlink files; falling back to full copy.
+```
+
+Options, cheapest first:
+
+| Command | Effect |
+| --- | --- |
+| `uv cache prune` | Removes dangling entries and cached environments. Safe: keeps wheels still in use, so nothing has to be re-downloaded. Run it periodically. |
+| `uv cache clean torch torchvision` | Drops just those packages from the cache — the bulk of the space here. |
+| `uv cache clean` | Wipes the cache entirely. Frees the most, but the next install re-downloads (1.8 GB for CUDA torch). |
+| `uv cache prune --ci` | Trims the cache for CI persistence — keeps built wheels, drops what is cheap to re-fetch. Not for local use. |
+
+Add `--force` to either command if uv refuses because it thinks entries are in
+use, and never run them while an install is in flight.
+
+The real fix is to move the cache onto the same volume as `.venv/`, so uv
+hardlinks instead of copying and the duplicate gigabytes and slow copy both go
+away:
+
+```powershell
+[Environment]::SetEnvironmentVariable('UV_CACHE_DIR','D:\uv-cache','User')
+```
+
+It takes effect in a new shell, and costs one re-download. `UV_CACHE_DIR` can
+also be set per-command, or passed as `--cache-dir`.
+
+## Running the CLI
+
+The wrappers locate an interpreter that actually has the package installed and
+forward everything else to the CLI. Use `run.ps1` from PowerShell, `run.sh`
+from Git Bash, WSL, Linux, or macOS:
+
+```powershell
+.\run.ps1 train  --config configs\mnist.toml
+.\run.ps1 sample --checkpoint checkpoints\last.pt --num-images 8
+```
+
+```bash
+./run.sh train  --config configs/mnist.toml
+./run.sh sample --checkpoint checkpoints/last.pt --num-images 8
+```
+
+Set `PYTHON` to force a specific interpreter: `PYTHON=/usr/bin/python3 ./run.sh …`.
+With no arguments a wrapper prints the CLI help.
+
+Equivalent invocations, if you prefer not to use the wrappers:
+
+```bash
+uv run --no-sync tinydiffusion train --config configs/mnist.toml
+.venv/bin/python -m tinydiffusion.cli train --config configs/mnist.toml     # Unix
+.\.venv\Scripts\python.exe -m tinydiffusion.cli train --config configs\mnist.toml
+```
+
+Two invocations that do **not** work:
+
+- `python src/tinydiffusion/cli.py` — in a `src/` layout the package is
+  importable only from an environment it is installed into, and running a file
+  by path puts *that file's* directory on `sys.path` rather than `src/`.
+  Result: `ModuleNotFoundError: No module named 'tinydiffusion'`.
+- `bash .\run.sh` — bash reads the backslash as an escape and looks for a file
+  named `.run.sh`. Use `./run.sh` or `bash run.sh`.
+
+## Training
+
+Start with the smoke config. It is the same pipeline shrunk to finish an epoch
+in well under a minute on a GPU — the point is to prove the wiring works, not
+to get good digits:
+
+```bash
+./run.sh train --config configs/smoke.toml
+```
+
+Then the real run:
+
+```bash
+./run.sh train --config configs/mnist.toml
+```
+
+Each epoch writes a `sample_XXXX.png` grid to `out_dir` — generated digits
+above a strip of real ones, so contrast and stroke weight are directly
+comparable — and a resumable `last.pt` to `ckpt_dir`. The checkpoint holds the
+model, EMA shadow weights, optimiser moments, AMP scaler state, and the config,
+so a resumed run continues rather than restarts:
+
+```bash
+./run.sh train --config configs/mnist.toml --resume checkpoints/last.pt
+```
+
+Flags override the config file when passed: `--seed`, `--device`, `--epochs`.
+`--config` itself is optional — omit it to run the built-in defaults.
+
+```bash
+./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
+```
+
+## Sampling
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --num-images 16 --out contents/grid.png
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--checkpoint` | required | Checkpoint to sample from |
+| `--num-images` | 8 | How many images to generate |
+| `--steps` | the checkpoint's `sample_steps` | DDIM steps; fewer is faster, coarser |
+| `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM |
+| `--out` | `contents/samples.png` | Where to write the grid |
+| `--seed` | 0 | Seed applied before sampling |
+| `--device` | auto | `cuda`, `cpu`, `cuda:1`, … |
+
+Checkpoints embed the config they were trained with, so this reconstructs the
+architecture from the `.pt` alone — the TOML that produced it is not needed.
+Sampling always uses the EMA weights, which is what the training grids are
+drawn from.
+
+## Configuration
+
+Configs are TOML. Tables are cosmetic grouping only: every key is flattened
+into the flat `TrainConfig` namespace, so a key must name a real field and may
+appear in exactly one table. Unknown or repeated keys are errors, not silent
+no-ops — a typo fails immediately instead of wasting a training run.
+
+```toml
+[model]
+base_channels = 64
+channel_mult = [1, 2, 2]
+attn_resolutions = [16]
+
+[diffusion]
+num_timesteps = 1000
+schedule = "cosine"       # or "linear", which uses beta_start/beta_end
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `data_root` | `data` | MNIST is downloaded here on first use |
+| `image_size` | 32 | 32 keeps 28x28 digits intact and halves exactly |
+| `batch_size` | 128 | 8 GB of VRAM has room for 256 |
+| `num_workers` | 4 | 0 when debugging |
+| `base_channels` | 64 | Width; DDPM uses 128 for CIFAR-10 |
+| `channel_mult` | `[1, 2, 2]` | One entry per resolution level |
+| `num_res_blocks` | 2 | Residual blocks per level |
+| `attn_resolutions` | `[16]` | Spatial sizes that get self-attention |
+| `dropout` | 0.1 | Inside ResBlocks |
+| `num_timesteps` | 1000 | Length of the diffusion schedule |
+| `schedule` | `cosine` | `cosine` or `linear` |
+| `beta_start` / `beta_end` | 1e-4 / 0.02 | Linear schedule only |
+| `num_epochs` | 30 | |
+| `lr` | 2e-4 | Adam |
+| `grad_clip` | 1.0 | 0 disables clipping |
+| `ema_decay` | 0.9999 | Sample quality depends on this |
+| `ema_warmup` | 2000 | Steps over which the decay ramps in |
+| `seed` | 0 | Python, NumPy and torch RNGs |
+| `amp` | `true` | fp16 autocast; ignored off CUDA |
+| `sample_every` | 1 | Epochs between sample grids; 0 disables |
+| `num_samples` | 16 | Images per grid |
+| `sample_steps` | 50 | DDIM steps for those grids |
+| `out_dir` | `contents` | Sample grids |
+| `ckpt_dir` | `checkpoints` | Checkpoints |
+| `device` | auto | `cuda` when available, else `cpu` |
+
+`configs/mnist.toml` lists every field with its default;
+`TrainConfig` in `src/tinydiffusion/training/config.py` is the source of truth.
+
+## Troubleshooting
+
+**`ModuleNotFoundError: No module named 'tinydiffusion'`**
+The interpreter you used is not one the package was installed into. A second
+virtualenv in the repo is the usual culprit — `uv` manages `.venv`, so an
+activated `venv` will not have it. Use `./run.sh` / `.\run.ps1`, which pick a
+working interpreter, or install into the one you want with
+`python -m pip install -e .`.
+
+**`ModuleNotFoundError: No module named 'torch._weights_only_unpickler'`** (or
+any other missing submodule of an installed package)
+The install is corrupt, not misconfigured — typically an uninstall that was
+interrupted partway. `uv` reports the same thing as
+`Failed to uninstall … due to missing RECORD file`. Repair it by reinstalling:
+
+```powershell
+uv pip install --reinstall --torch-backend=auto torch torchvision
+```
+
+Avoid running `uv sync`/`uv run` against the project while something else is
+using `.venv`; that race is a common way to get here.
+
+**Training says `device cpu` on a machine with a GPU**
+The installed torch is a CPU-only build. See [Using a GPU](#using-a-gpu).
+
+**`no CUDA device visible, falling back to CPU`**
+`--device cuda` was asked for but torch cannot see a GPU. The run continues on
+the CPU rather than failing; same fix as above.
+
+**CUDA out of memory**
+Lower `batch_size`, then `base_channels`. Sampling `num_samples` also
+allocates a batch at once.
+
+**Windows: the install step takes minutes and disk usage doubles**
+uv's cache is on a different drive from `.venv/`. See
+[uv's cache and your disk](#uvs-cache-and-your-disk).
+
+## uv command reference
+
+Environment:
+
+| Command | What it does |
+| --- | --- |
+| `uv sync --all-extras --dev` | Create/refresh `.venv` to match `uv.lock`. **Reverts a manually installed CUDA torch.** |
+| `uv run --no-sync <cmd>` | Run inside `.venv` without syncing first — safe with a CUDA torch installed. |
+| `uv run <cmd>` | Syncs, then runs. Convenient, but undoes an out-of-lockfile install. |
+| `uv pip install -e .` | Install this project into the active environment. |
+| `uv pip install --reinstall --torch-backend=auto torch torchvision` | Fetch a CUDA build matching your driver; also the repair for a corrupt install. |
+| `uv pip list` | What is actually installed. |
+| `uv lock --upgrade` | Re-resolve dependencies and update `uv.lock`. |
+
+Cache and disk:
+
+| Command | What it does |
+| --- | --- |
+| `uv cache dir` | Where the cache lives. |
+| `uv cache size` | Bytes held. Experimental in uv 0.12; it warns unless you pass `--preview-features cache-size`. |
+| `uv cache prune` | Remove dangling entries and cached environments. Safe, keeps what is in use. |
+| `uv cache clean [PACKAGE…]` | Wipe the cache, or just the named packages. |
+| `uv cache prune --ci` | CI-oriented trim; keeps built wheels. |
+| `UV_CACHE_DIR=<path>` | Move the cache — put it on the same volume as `.venv` to enable hardlinking. |
+| `UV_LINK_MODE=copy` | Silence the hardlink warning when a cross-volume cache is intentional. |
+
+Project checks:
+
+```bash
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
+uv run mypy
+```
