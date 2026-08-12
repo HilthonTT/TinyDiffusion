@@ -79,9 +79,34 @@ class DDPM(nn.Module):
             Scalar training loss.
         """
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=x.device)
-        eps = torch.randn_like(x)
+        return self.loss_at(x, t)
+
+    def loss_at(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        model: nn.Module | None = None,
+    ) -> torch.Tensor:
+        """Score the noise estimate at explicit timesteps.
+
+        Training draws `t` at random, which makes any single loss value too
+        noisy to compare between checkpoints. Evaluation pins both `t` and the
+        noise instead, and this is the shared path for both.
+
+        Args:
+            x: (B, C, H, W) clean images in [-1, 1].
+            t: (B,) integer timesteps in [0, num_timesteps-1].
+            noise: the epsilon to add, or None to draw a fresh one.
+            model: network to score. Pass `ema.module` to use EMA weights.
+
+        Returns:
+            Scalar loss.
+        """
+        net = model if model is not None else self.eps_model
+        eps = torch.randn_like(x) if noise is None else noise
         x_t = self._extract(self.sqrtab, t, x) * x + self._extract(self.sqrtmab, t, x) * eps
-        return self.criterion(self.eps_model(x_t, t), eps)
+        return self.criterion(net(x_t, t), eps)
 
     @torch.no_grad()
     def sample(

@@ -34,7 +34,14 @@ end to end (~28 s per epoch on an RTX 5060, ~3.5 min on a CPU). The real run is
 ```
 
 MNIST (63 MB) downloads itself on first use. Each epoch writes a sample grid —
-generated digits above real ones — and a resumable checkpoint.
+generated digits above real ones — and a resumable checkpoint. Afterwards,
+`sample` generates images from any checkpoint and `eval` scores it on the
+held-out test split:
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --num-images 16
+./run.sh eval   --checkpoint checkpoints/last.pt
+```
 
 **Using a GPU:** it is automatic when a CUDA-capable torch is installed, and
 falls back to the CPU when not. On Windows the default wheel is CPU-only, so
@@ -46,7 +53,7 @@ sizes, and troubleshooting.
 
 | | |
 | --- | --- |
-| [USAGE.md](USAGE.md) | Install, GPU setup, downloads and disk use, every CLI flag, config reference, troubleshooting |
+| [USAGE.md](USAGE.md) | Install, GPU setup, downloads and disk use, training, sampling, evaluation, every CLI flag, config reference, troubleshooting |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 
@@ -69,6 +76,7 @@ sizes, and troubleshooting.
 │   ├── training/           # Config, EMA, checkpoint I/O, the MNIST loop
 │   ├── utils/              # Seeding, device selection, module state helpers
 │   ├── sampling.py         # Generate images from a checkpoint
+│   ├── evaluation.py       # Score a checkpoint on held-out data
 │   └── cli.py              # `tinydiffusion` entry point
 ├── tests/                  # Mirrors the src/ tree
 ├── run.sh                  # Runs the CLI with the project's interpreter

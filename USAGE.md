@@ -10,6 +10,7 @@ the project *is*, see [README.md](README.md); for contributing, see
 - [Running the CLI](#running-the-cli)
 - [Training](#training)
 - [Sampling](#sampling)
+- [Evaluating a checkpoint](#evaluating-a-checkpoint)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [uv command reference](#uv-command-reference)
@@ -218,6 +219,63 @@ Checkpoints embed the config they were trained with, so this reconstructs the
 architecture from the `.pt` alone — the TOML that produced it is not needed.
 Sampling always uses the EMA weights, which is what the training grids are
 drawn from.
+
+## Evaluating a checkpoint
+
+Sampling shows you what the model draws; `eval` puts a number on it, by scoring
+noise-prediction loss over the 10k held-out MNIST test split:
+
+```bash
+./run.sh eval --checkpoint checkpoints/last.pt
+```
+
+```
+checkpoints/last.pt | test split | 10000 images | ema weights
+loss 0.09984
+
+     t     loss
+     0   0.39324
+    40   0.06916
+    80   0.04649
+   119   0.03946
+   159   0.03071
+   199   0.02001
+```
+
+The training loss is drawn at a *random* timestep per image, so it is far too
+noisy to compare two checkpoints with. This pins the timesteps to a fixed grid
+and reseeds before every batch, so the only thing that varies between two runs
+is the weights — run it twice on the same checkpoint and you get the same
+number to the last digit.
+
+Read the per-timestep column as well as the headline. Loss is always highest at
+`t = 0`, where `x_t` is nearly clean and there is almost no noise left to
+identify, and falls as `t` grows. A checkpoint that improves only at high `t`
+has learned the easy end of the schedule and little else.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--checkpoint` | required | Checkpoint to score |
+| `--split` | `test` | `test` (10k held out) or `train` (60k) |
+| `--timesteps` | 10 | How many timesteps to score at |
+| `--batch-size` | the checkpoint's | Larger is faster |
+| `--data-root` | the checkpoint's | Dataset directory |
+| `--no-ema` | off | Score the raw weights instead of the EMA |
+| `--seed` | 0 | Fixes the noise; change it to resample |
+| `--device` | auto | `cuda`, `cpu`, … |
+
+Scoring both splits is how you see overfitting — a test loss that stalls or
+rises while the train loss keeps falling:
+
+```bash
+./run.sh eval --checkpoint checkpoints/last.pt --split test
+./run.sh eval --checkpoint checkpoints/last.pt --split train
+```
+
+One caveat: this is a proxy. Lower held-out loss means the network predicts
+noise better, which correlates with sample quality but does not measure it
+directly — the published metric for that is FID, which is not implemented here.
+Keep looking at the grids.
 
 ## Configuration
 
