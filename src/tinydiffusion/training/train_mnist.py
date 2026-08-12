@@ -1,9 +1,8 @@
 """MNIST training loop for TinyDiffusion."""
 
-import random
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -16,6 +15,7 @@ from tinydiffusion.diffusion.ddpm import DDPM
 from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_schedule
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.ema import EMA
+from tinydiffusion.utils.seed import seed_everything
 
 
 @dataclass(slots=True)
@@ -23,7 +23,9 @@ class TrainConfig:
     """Hyperparameters for an MNIST training run.
 
     Defaults target a single consumer GPU and reach recognisable digits within
-    a handful of epochs.
+    a handful of epochs. Field names mirror the constructor arguments of
+    :class:`~tinydiffusion.models.unet.UNet` and :class:`DDPM` so the wiring
+    below stays a rename-free pass-through.
     """
 
     # data
@@ -33,20 +35,20 @@ class TrainConfig:
     num_workers: int = 4
 
     # model
-    base: int = 64
-    ch_mult: tuple[int, ...] = (1, 2, 2)
-    n_res: int = 2
+    base_channels: int = 64
+    channel_mult: tuple[int, ...] = (1, 2, 2)
+    num_res_blocks: int = 2
     attn_resolutions: tuple[int, ...] = (16,)
     dropout: float = 0.1
 
     # diffusion
-    n_T: int = 1000
-    schedule: str = "cosine"
+    num_timesteps: int = 1000
+    schedule: Literal["cosine", "linear"] = "cosine"
     beta_start: float = 1e-4
     beta_end: float = 0.02
 
     # optimisation
-    n_epoch: int = 30
+    num_epochs: int = 30
     lr: float = 2e-4
     grad_clip: float = 1.0
     ema_decay: float = 0.9999
@@ -56,22 +58,27 @@ class TrainConfig:
     seed: int = 0
     amp: bool = True
     sample_every: int = 1
-    n_sample: int = 16
+    num_samples: int = 16
     sample_steps: int = 50
     out_dir: Path = Path("contents")
     ckpt_dir: Path = Path("checkpoints")
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
 
+    def __post_init__(self) -> None:
+        """Reject configurations that would only fail an epoch into the run.
 
-def set_seed(seed: int) -> None:
-    """Seed Python, NumPy-free torch CPU and all CUDA devices.
-
-    Args:
-        seed: value to seed every generator with.
-    """
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+        Raises:
+            ValueError: if the schedule is unknown or the sampling step count
+                cannot index the training schedule.
+        """
+        if self.schedule not in ("cosine", "linear"):
+            raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
+        if not 1 <= self.sample_steps <= self.num_timesteps:
+            raise ValueError(
+                f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
+            )
+        if self.num_samples < 1:
+            raise ValueError(f"num_samples must be positive, got {self.num_samples}")
 
 
 def build_model(cfg: TrainConfig) -> DDPM:
@@ -86,21 +93,19 @@ def build_model(cfg: TrainConfig) -> DDPM:
     net = UNet(
         in_channels=MNIST_CHANNELS,
         out_channels=MNIST_CHANNELS,
-        base=cfg.base,
-        ch_mult=cfg.ch_mult,
-        n_res=cfg.n_res,
+        base_channels=cfg.base_channels,
+        channel_mult=cfg.channel_mult,
+        num_res_blocks=cfg.num_res_blocks,
         attn_resolutions=cfg.attn_resolutions,
         dropout=cfg.dropout,
         image_size=cfg.image_size,
     )
     if cfg.schedule == "cosine":
-        betas: torch.Tensor = cosine_beta_schedule(cfg.n_T)
-    elif cfg.schedule == "linear":
-        betas = linear_beta_schedule(cfg.beta_start, cfg.beta_end, cfg.n_T)
+        betas = cosine_beta_schedule(cfg.num_timesteps)
     else:
-        raise ValueError(f"unknown schedule {cfg.schedule!r}, expected 'cosine' or 'linear'")
+        betas = linear_beta_schedule(cfg.beta_start, cfg.beta_end, cfg.num_timesteps)
 
-    return DDPM(eps_model=net, betas=betas, n_T=cfg.n_T)
+    return DDPM(eps_model=net, betas=betas, num_timesteps=cfg.num_timesteps)
 
 
 def save_checkpoint(
@@ -202,17 +207,17 @@ def save_samples(
     shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
     fake = ddim_sample(
         ddpm,
-        cfg.n_sample,
+        cfg.num_samples,
         shape,
         cfg.device,
-        n_steps=cfg.sample_steps,
+        num_steps=cfg.sample_steps,
         eta=0.0,
         model=ema.module,
     )
-    n_real = min(cfg.n_sample, real.shape[0])
-    grid = torch.cat([denormalize(fake), denormalize(real[:n_real].to(cfg.device))], dim=0)
+    reference = real[: cfg.num_samples].to(cfg.device)
+    grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    save_image(grid, cfg.out_dir / f"sample_{epoch:04d}.png", nrow=min(8, cfg.n_sample))
+    save_image(grid, cfg.out_dir / f"sample_{epoch:04d}.png", nrow=min(8, cfg.num_samples))
 
 
 def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> DDPM:
@@ -226,15 +231,19 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         The trained model, with EMA weights already swapped in.
     """
     cfg = cfg or TrainConfig()
-    set_seed(cfg.seed)
+    seed_everything(cfg.seed)
+
+    device_type = torch.device(cfg.device).type
+    use_amp = cfg.amp and device_type == "cuda"
+    if device_type == "cuda":
+        # Input shapes are fixed for the whole run, so autotuning pays off once.
+        torch.backends.cudnn.benchmark = True
 
     ddpm = build_model(cfg).to(cfg.device)
     ema = EMA(ddpm.eps_model, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
-    ema.module.to(cfg.device)
 
     optim = torch.optim.Adam(ddpm.parameters(), lr=cfg.lr)
-    use_amp = cfg.amp and cfg.device.startswith("cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     start_epoch = 0
     if resume is not None:
@@ -254,36 +263,44 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     n_params = sum(p.numel() for p in ddpm.eps_model.parameters())
     print(f"{n_params / 1e6:.2f}M parameters | device {cfg.device} | amp {use_amp}")
 
-    last_batch = torch.zeros(1, MNIST_CHANNELS, cfg.image_size, cfg.image_size)
+    # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
+    reference: torch.Tensor | None = None
 
-    for epoch in range(start_epoch, cfg.n_epoch):
+    for epoch in range(start_epoch, cfg.num_epochs):
         ddpm.train()
         loss_ema: float | None = None
-        pbar = tqdm(loader, desc=f"epoch {epoch}")
 
-        for x, _ in pbar:
-            x = x.to(cfg.device, non_blocking=True)
-            last_batch = x
+        with tqdm(loader, desc=f"epoch {epoch}") as pbar:
+            for x, _ in pbar:
+                x = x.to(cfg.device, non_blocking=True)
+                if reference is None:
+                    reference = x[: cfg.num_samples].detach().cpu()
 
-            optim.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                loss = ddpm(x)
+                optim.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type, enabled=use_amp):
+                    loss = ddpm(x)
 
-            scaler.scale(loss).backward()
-            if cfg.grad_clip > 0:
-                # Unscale first, or the clip threshold is applied to scaled grads.
-                scaler.unscale_(optim)
-                nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
-            scaler.step(optim)
-            scaler.update()
-            ema.update(ddpm.eps_model)
+                scaler.scale(loss).backward()
+                if cfg.grad_clip > 0:
+                    # Unscale first, or the clip threshold is applied to scaled grads.
+                    scaler.unscale_(optim)
+                    nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
 
-            value = loss.item()
-            loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
-            pbar.set_postfix(loss=f"{loss_ema:.4f}")
+                scale_before = scaler.get_scale()
+                scaler.step(optim)
+                scaler.update()
+                # A shrinking scale means inf/NaN grads and a skipped optimiser
+                # step; folding the unchanged weights in would still burn a step
+                # of the EMA warmup.
+                if scaler.get_scale() >= scale_before:
+                    ema.update(ddpm.eps_model)
 
-        if cfg.sample_every > 0 and (epoch + 1) % cfg.sample_every == 0:
-            save_samples(ddpm, ema, last_batch, cfg, epoch)
+                value = loss.item()
+                loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
+                pbar.set_postfix(loss=f"{loss_ema:.4f}")
+
+        if cfg.sample_every > 0 and (epoch + 1) % cfg.sample_every == 0 and reference is not None:
+            save_samples(ddpm, ema, reference, cfg, epoch)
 
         save_checkpoint(
             cfg.ckpt_dir / "last.pt",
