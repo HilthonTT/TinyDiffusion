@@ -24,14 +24,25 @@ This pulls the CPU build of PyTorch. For CUDA, set `UV_TORCH_BACKEND` (e.g.
 
 ## Usage
 
-`./run.sh` picks the project's interpreter and forwards to the CLI:
+The wrappers find an interpreter that has the package installed and forward
+everything else to the CLI. Use `run.ps1` from PowerShell and `run.sh` from
+Git Bash, WSL, Linux, or macOS:
+
+```powershell
+.\run.ps1 train  --config configs\mnist.toml
+.\run.ps1 sample --checkpoint checkpoints\last.pt --num-images 8
+```
 
 ```bash
 ./run.sh train  --config configs/mnist.toml
 ./run.sh sample --checkpoint checkpoints/last.pt --num-images 8
 ```
 
-Equivalently, without the wrapper:
+Set `PYTHON` to force a particular interpreter. Note that `bash .\run.sh` does
+not work — bash reads the backslash as an escape and looks for `run.sh` in the
+wrong place. Use `./run.sh` or `bash run.sh`.
+
+Equivalently, without the wrappers:
 
 ```bash
 uv run tinydiffusion train  --config configs/mnist.toml --seed 0
@@ -41,7 +52,12 @@ uv run tinydiffusion sample --checkpoint checkpoints/last.pt --num-images 8
 Note that `python src/tinydiffusion/cli.py` does **not** work: in a `src/`
 layout the package is importable only from an environment it is installed
 into, and running a file by path puts that file's own directory on `sys.path`
-rather than `src/`. Use `run.sh`, `uv run`, or `python -m tinydiffusion.cli`.
+rather than `src/`. Use a wrapper, `uv run`, or `python -m tinydiffusion.cli`.
+
+If an interpreter reports `ModuleNotFoundError: No module named 'tinydiffusion'`,
+it is an environment that the package was never installed into — a second venv
+in the repo is the usual culprit. `uv sync` manages `.venv`; installing into any
+other environment is `python -m pip install -e .`.
 
 ### Checking the pipeline quickly
 
@@ -114,6 +130,7 @@ drawn from.
 │   └── cli.py              # `tinydiffusion` entry point
 ├── tests/                  # Mirrors the src/ tree
 ├── run.sh                  # Runs the CLI with the project's interpreter
+├── run.ps1                 # The same, for PowerShell
 ├── pyproject.toml          # Deps + ruff/mypy/pytest/coverage config
 └── CONTRIBUTING.md
 ```

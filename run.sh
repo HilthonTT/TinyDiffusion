@@ -8,44 +8,71 @@
 # environment it has been installed into -- running the .py files by path fails
 # with ModuleNotFoundError. This script finds such an environment and hands off.
 # Override the choice with PYTHON=/path/to/python ./run.sh ...
+#
+# On Windows use PowerShell (.\run.ps1) or Git Bash. WSL cannot use a Windows
+# venv: its python.exe is a Windows binary, and WSL only runs those when
+# interop is enabled.
 
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+python_bin=""
+# Set when an interpreter runs but lacks the package, so the error message can
+# name the one worth installing into.
+runnable=""
+
+# Results come back through globals rather than stdout: a command substitution
+# would run this in a subshell, where the assignment to `runnable` would be
+# thrown away along with it.
+#
+# Candidates are probed by execution, not by a -x test: every file on a Windows
+# drive mounted into WSL reports as executable, including .exe files that WSL
+# cannot actually launch.
 find_python() {
-    if [[ -n "${PYTHON:-}" ]]; then
-        printf '%s\n' "$PYTHON"
-        return
-    fi
-    # Both Unix (bin/) and Windows (Scripts/) venv layouts, .venv before venv.
     local candidate
-    for candidate in \
-        "$root/.venv/bin/python" \
-        "$root/.venv/Scripts/python.exe" \
-        "$root/venv/bin/python" \
-        "$root/venv/Scripts/python.exe"; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return
+    for candidate in "$@"; do
+        [[ -n "$candidate" ]] || continue
+        "$candidate" -c 'pass' >/dev/null 2>&1 || continue
+        if "$candidate" -c 'import tinydiffusion' >/dev/null 2>&1; then
+            python_bin="$candidate"
+            return 0
         fi
+        [[ -n "$runnable" ]] || runnable="$candidate"
     done
-    # No project venv: fall back to whatever is on PATH and let the import
-    # check below decide whether that is good enough.
-    command -v python3 || command -v python || true
+    return 1
 }
 
-python_bin="$(find_python)"
-
-if [[ -z "$python_bin" ]]; then
-    echo "run.sh: no Python interpreter found. Try: uv sync --all-extras --dev" >&2
-    exit 1
+if [[ -n "${PYTHON:-}" ]]; then
+    candidates=("$PYTHON")
+else
+    # Unix layouts first: in WSL they are the only ones that can run.
+    candidates=(
+        "$root/.venv/bin/python"
+        "$root/venv/bin/python"
+        "$root/.venv/Scripts/python.exe"
+        "$root/venv/Scripts/python.exe"
+        "$(command -v python3 || true)"
+        "$(command -v python || true)"
+    )
 fi
 
-if ! "$python_bin" -c 'import tinydiffusion' >/dev/null 2>&1; then
-    echo "run.sh: tinydiffusion is not installed in $python_bin" >&2
-    echo "        install it with:  uv sync --all-extras --dev" >&2
-    echo "                     or:  $python_bin -m pip install -e ." >&2
+if ! find_python "${candidates[@]}"; then
+    if [[ -n "$runnable" ]]; then
+        echo "run.sh: tinydiffusion is not installed in $runnable" >&2
+        echo "        install it with:  uv sync --all-extras --dev" >&2
+        echo "                     or:  $runnable -m pip install -e ." >&2
+    else
+        echo "run.sh: found no Python that this shell can run." >&2
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+            echo "        You are in WSL, which cannot launch the Windows venv" >&2
+            echo "        under $root/.venv/Scripts/." >&2
+            echo "        Use PowerShell (.\\run.ps1) or Git Bash instead, or make" >&2
+            echo "        a Linux env here:  uv sync --all-extras --dev" >&2
+        else
+            echo "        Set one up with:  uv sync --all-extras --dev" >&2
+        fi
+    fi
     exit 1
 fi
 
