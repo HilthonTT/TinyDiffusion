@@ -31,6 +31,18 @@ __all__ = [
 ]
 
 
+def _epochs(count: int) -> str:
+    """Render an epoch count, pluralised.
+
+    Args:
+        count: number of epochs.
+
+    Returns:
+        e.g. ``"1 epoch"`` or ``"30 epochs"``.
+    """
+    return f"{count} epoch" if count == 1 else f"{count} epochs"
+
+
 def build_model(cfg: TrainConfig) -> DDPM:
     """Construct the U-Net and wrap it in the diffusion process.
 
@@ -193,7 +205,8 @@ def save_samples(
         ema: EMA weights to sample from.
         real: a batch of real images in [-1, 1] to show alongside.
         cfg: run configuration.
-        epoch: epoch index, used in the filename.
+        epoch: zero-based epoch index. The filename is one-based, matching the
+            progress bar.
     """
     shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
     fake = ddim_sample(
@@ -208,7 +221,7 @@ def save_samples(
     reference = real[: cfg.num_samples].to(cfg.device)
     grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    save_image(grid, cfg.out_dir / f"sample_{epoch:04d}.png", nrow=min(8, cfg.num_samples))
+    save_image(grid, cfg.out_dir / f"sample_{epoch + 1:04d}.png", nrow=min(8, cfg.num_samples))
 
 
 def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> DDPM:
@@ -243,7 +256,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         start_epoch = load_checkpoint(
             resume, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler, device=cfg.device
         )
-        print(f"resumed from {resume} at epoch {start_epoch}")
+        print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
     loader = mnist_dataloader(
         cfg.data_root,
@@ -254,9 +267,18 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     )
 
     n_params = sum(p.numel() for p in ddpm.eps_model.parameters())
-    print(
-        f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | amp {use_amp}"
+    remaining = cfg.num_epochs - start_epoch
+    plan = (
+        _epochs(cfg.num_epochs)
+        if start_epoch == 0
+        else f"epochs {start_epoch + 1}-{cfg.num_epochs} ({remaining} to go)"
     )
+    print(
+        f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | "
+        f"amp {use_amp} | {plan} | {len(loader)} steps/epoch"
+    )
+    if remaining <= 0:
+        print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
 
     # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
     reference: torch.Tensor | None = None
@@ -265,7 +287,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         ddpm.train()
         loss_ema: float | None = None
 
-        with tqdm(loader, desc=f"epoch {epoch}") as pbar:
+        with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
             for x, _ in pbar:
                 x = x.to(cfg.device, non_blocking=True)
                 if reference is None:
