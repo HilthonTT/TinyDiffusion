@@ -235,3 +235,5 @@ __marimo__/
 *.pth
 *.safetensors
 *.onnx
+
+contents/*

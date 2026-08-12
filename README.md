@@ -8,6 +8,14 @@
 A PyTorch implementation of a diffusion model for image generation: a DDPM
 U-Net trained on MNIST, sampled with DDIM.
 
+![Generated digits after six epochs](docs/sample-epoch-6.png)
+
+*`contents/sample_0006.png`, written automatically after the sixth epoch. The
+top half is generated, the bottom half is real MNIST — every grid pairs them so
+stroke weight and contrast are directly comparable. Six epochs is about 11
+minutes on an RTX 5060; most digits are already well formed, a few strokes are
+still breaking up.*
+
 > **Status:** early development. Training and sampling work end to end on
 > MNIST; other datasets are not wired up yet.
 
@@ -56,39 +64,6 @@ sizes, and troubleshooting.
 | [USAGE.md](USAGE.md) | Install, GPU setup, downloads and disk use, training, sampling, evaluation, every CLI flag, config reference, troubleshooting |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
-
-## Project layout
-
-```
-.
-├── .github/
-│   ├── workflows/          # CI (lint, types, test matrix, build) and release
-│   ├── ISSUE_TEMPLATE/
-│   ├── dependabot.yml
-│   └── CODEOWNERS
-├── configs/                # Training configs, versioned alongside the code
-│   ├── mnist.toml          # Full run, sized for a GPU
-│   └── smoke.toml          # Tiny run for checking the pipeline
-├── src/tinydiffusion/
-│   ├── data/               # Datasets, transforms, dataloaders
-│   ├── diffusion/          # Noise schedules, forward/reverse process, samplers
-│   ├── models/             # U-Net backbone, embeddings, blocks
-│   ├── training/           # Config, EMA, checkpoint I/O, the MNIST loop
-│   ├── utils/              # Seeding, device selection, module state helpers
-│   ├── sampling.py         # Generate images from a checkpoint
-│   ├── evaluation.py       # Score a checkpoint on held-out data
-│   └── cli.py              # `tinydiffusion` entry point
-├── tests/                  # Mirrors the src/ tree
-├── run.sh                  # Runs the CLI with the project's interpreter
-├── run.ps1                 # The same, for PowerShell
-├── pyproject.toml          # Deps + ruff/mypy/pytest/coverage config
-├── USAGE.md
-└── CONTRIBUTING.md
-```
-
-A `src/` layout means tests import the installed package, not the working
-directory — so a broken packaging config fails in CI instead of silently working
-locally.
 
 ## How it works
 
