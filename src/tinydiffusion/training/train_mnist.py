@@ -1,8 +1,8 @@
 """MNIST training loop for TinyDiffusion."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -14,71 +14,20 @@ from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.ddpm import DDPM
 from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_schedule
 from tinydiffusion.models.unet import UNet
+from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.utils.seed import seed_everything
 
-
-@dataclass(slots=True)
-class TrainConfig:
-    """Hyperparameters for an MNIST training run.
-
-    Defaults target a single consumer GPU and reach recognisable digits within
-    a handful of epochs. Field names mirror the constructor arguments of
-    :class:`~tinydiffusion.models.unet.UNet` and :class:`DDPM` so the wiring
-    below stays a rename-free pass-through.
-    """
-
-    # data
-    data_root: Path = Path("data")
-    image_size: int = 32
-    batch_size: int = 128
-    num_workers: int = 4
-
-    # model
-    base_channels: int = 64
-    channel_mult: tuple[int, ...] = (1, 2, 2)
-    num_res_blocks: int = 2
-    attn_resolutions: tuple[int, ...] = (16,)
-    dropout: float = 0.1
-
-    # diffusion
-    num_timesteps: int = 1000
-    schedule: Literal["cosine", "linear"] = "cosine"
-    beta_start: float = 1e-4
-    beta_end: float = 0.02
-
-    # optimisation
-    num_epochs: int = 30
-    lr: float = 2e-4
-    grad_clip: float = 1.0
-    ema_decay: float = 0.9999
-    ema_warmup: int = 2000
-
-    # bookkeeping
-    seed: int = 0
-    amp: bool = True
-    sample_every: int = 1
-    num_samples: int = 16
-    sample_steps: int = 50
-    out_dir: Path = Path("contents")
-    ckpt_dir: Path = Path("checkpoints")
-    device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
-
-    def __post_init__(self) -> None:
-        """Reject configurations that would only fail an epoch into the run.
-
-        Raises:
-            ValueError: if the schedule is unknown or the sampling step count
-                cannot index the training schedule.
-        """
-        if self.schedule not in ("cosine", "linear"):
-            raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
-        if not 1 <= self.sample_steps <= self.num_timesteps:
-            raise ValueError(
-                f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
-            )
-        if self.num_samples < 1:
-            raise ValueError(f"num_samples must be positive, got {self.num_samples}")
+__all__ = [
+    "TrainConfig",
+    "build_model",
+    "load_checkpoint",
+    "read_checkpoint",
+    "restore_checkpoint",
+    "save_checkpoint",
+    "save_samples",
+    "train_mnist",
+]
 
 
 def build_model(cfg: TrainConfig) -> DDPM:
@@ -159,7 +108,7 @@ def load_checkpoint(
     scaler: torch.amp.GradScaler | None = None,
     device: str = "cpu",
 ) -> int:
-    """Restore a checkpoint written by :func:`save_checkpoint`.
+    """Read and restore a checkpoint written by :func:`save_checkpoint`.
 
     Args:
         path: checkpoint file.
@@ -172,7 +121,48 @@ def load_checkpoint(
     Returns:
         The epoch index to resume from.
     """
+    ckpt = read_checkpoint(path, device=device)
+    return restore_checkpoint(ckpt, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler)
+
+
+def read_checkpoint(path: Path, *, device: str = "cpu") -> dict[str, Any]:
+    """Load a checkpoint file into memory without applying it.
+
+    Callers that need the stored config before they can build the model — the
+    sampling entry point, for one — read once through here and then apply the
+    result with :func:`restore_checkpoint`.
+
+    Args:
+        path: checkpoint file.
+        device: device to map tensors onto.
+
+    Returns:
+        The raw checkpoint mapping.
+    """
     ckpt: dict[str, Any] = torch.load(path, map_location=device, weights_only=True)
+    return ckpt
+
+
+def restore_checkpoint(
+    ckpt: dict[str, Any],
+    *,
+    ddpm: DDPM,
+    ema: EMA,
+    optim: torch.optim.Optimizer | None = None,
+    scaler: torch.amp.GradScaler | None = None,
+) -> int:
+    """Apply an already-loaded checkpoint to the training objects.
+
+    Args:
+        ckpt: mapping returned by :func:`read_checkpoint`.
+        ddpm: model to load weights into.
+        ema: EMA wrapper to load shadow weights into.
+        optim: optimiser to restore, or None to skip (e.g. sampling only).
+        scaler: AMP scaler to restore, or None to skip.
+
+    Returns:
+        The epoch index to resume from.
+    """
     ddpm.eps_model.load_state_dict(ckpt["model"])
     ema.module.load_state_dict(ckpt["ema"])
     ema.step = ckpt.get("ema_step", 0)

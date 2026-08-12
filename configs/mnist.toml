@@ -1,28 +1,41 @@
-# Example training config. Fields are indicative — the loader is not implemented yet.
+# Training config for `tinydiffusion train --config configs/mnist.toml`.
+#
+# These values are the TrainConfig defaults, written out so a run is
+# reproducible from the file alone. Tables are grouping only: every key is
+# flattened into TrainConfig, so a key must name a real field and may appear
+# in exactly one table.
 
 [data]
-dataset = "mnist"
-root = "data/"
+data_root = "data"
 image_size = 32
-channels = 1
 batch_size = 128
 num_workers = 4
 
 [model]
 base_channels = 64
-channel_multipliers = [1, 2, 2]
-attention_resolutions = [16]
+channel_mult = [1, 2, 2]
+num_res_blocks = 2
+attn_resolutions = [16]
 dropout = 0.1
 
 [diffusion]
-timesteps = 1000
-schedule = "cosine"
+num_timesteps = 1000
+schedule = "cosine"     # "cosine" or "linear"
+beta_start = 1e-4       # linear schedule only
+beta_end = 0.02         # linear schedule only
 
-[training]
-epochs = 50
-learning_rate = 2e-4
-ema_decay = 0.999
+[optimisation]
+num_epochs = 30
+lr = 2e-4
 grad_clip = 1.0
-mixed_precision = true
-checkpoint_dir = "checkpoints/"
-log_every = 100
+ema_decay = 0.9999
+ema_warmup = 2000
+
+[bookkeeping]
+seed = 0
+amp = true
+sample_every = 1
+num_samples = 16
+sample_steps = 50
+out_dir = "contents"
+ckpt_dir = "checkpoints"
