@@ -268,11 +268,13 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     n_params = sum(p.numel() for p in ddpm.eps_model.parameters())
     remaining = cfg.num_epochs - start_epoch
-    plan = (
-        _epochs(cfg.num_epochs)
-        if start_epoch == 0
-        else f"epochs {start_epoch + 1}-{cfg.num_epochs} ({remaining} to go)"
-    )
+    if start_epoch == 0:
+        plan = _epochs(cfg.num_epochs)
+    elif remaining > 0:
+        plan = f"epochs {start_epoch + 1}-{cfg.num_epochs} ({remaining} to go)"
+    else:
+        # A checkpoint past num_epochs would otherwise render as "epochs 4-2".
+        plan = f"nothing to run (checkpoint is at {_epochs(start_epoch)})"
     print(
         f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | "
         f"amp {use_amp} | {plan} | {len(loader)} steps/epoch"

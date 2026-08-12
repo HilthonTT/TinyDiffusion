@@ -73,21 +73,26 @@ def mnist_dataloader(
     num_workers: int = 4,
     download: bool = True,
     pin_memory: bool | None = None,
+    shuffle: bool | None = None,
+    drop_last: bool | None = None,
 ) -> DataLoader[tuple[torch.Tensor, int]]:
     """Build a dataloader over MNIST ready for a training loop.
 
     Args:
         root: directory holding (or receiving) the raw MNIST files.
         batch_size: samples per batch.
-        train: use the training split, which also enables shuffling and
-            dropping the final partial batch (batch-norm free, but a ragged
-            last batch still perturbs the loss average).
+        train: use the training split. Also the default for ``shuffle`` and
+            ``drop_last``, which is what a training loop wants.
         image_size: resolution passed to :func:`mnist_transform`.
         num_workers: worker processes. Set to 0 when debugging, or on Windows
             inside a notebook where process spawning is awkward.
         download: fetch the archives when they are missing from ``root``.
         pin_memory: pin host memory for faster H2D copies. Defaults to whether
             CUDA is available.
+        shuffle: shuffle each epoch, or None to follow ``train``.
+        drop_last: discard the final partial batch, or None to follow ``train``.
+            A ragged last batch perturbs the loss average during training, but
+            dropping it while scoring would silently omit images.
 
     Returns:
         A configured :class:`~torch.utils.data.DataLoader`.
@@ -103,8 +108,8 @@ def mnist_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=train,
-        drop_last=train,
+        shuffle=train if shuffle is None else shuffle,
+        drop_last=train if drop_last is None else drop_last,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available() if pin_memory is None else pin_memory,
         **loader_kwargs,

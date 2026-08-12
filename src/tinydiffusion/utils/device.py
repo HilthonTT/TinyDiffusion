@@ -17,11 +17,21 @@ def resolve_device(requested: str | None = None, *, verbose: bool = True) -> str
 
     Returns:
         A device string that is safe to allocate on.
+
+    Raises:
+        ValueError: if `requested` does not name a device torch understands.
     """
     if requested is None:
         return "cuda" if torch.cuda.is_available() else "cpu"
 
-    if torch.device(requested).type == "cuda" and not torch.cuda.is_available():
+    try:
+        # torch raises RuntimeError for a typo like "gpu", which the CLI treats
+        # as a crash rather than the user error it is.
+        device = torch.device(requested)
+    except RuntimeError as exc:
+        raise ValueError(f"unknown device {requested!r}: {exc}") from exc
+
+    if device.type == "cuda" and not torch.cuda.is_available():
         if verbose:
             print(f"no CUDA device visible, falling back to CPU (requested {requested!r})")
         return "cpu"

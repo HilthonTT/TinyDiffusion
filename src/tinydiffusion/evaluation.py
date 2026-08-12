@@ -125,6 +125,11 @@ def evaluate_checkpoint(
         train=split == "train",
         image_size=cfg.image_size,
         num_workers=cfg.num_workers,
+        # A score has to cover the whole split in a fixed order. The train
+        # split's own defaults would shuffle it and drop the ragged last
+        # batch, quietly leaving up to batch_size-1 images out of the average.
+        shuffle=False,
+        drop_last=False,
     )
 
     steps = eval_timesteps(cfg.num_timesteps, num_steps).to(cfg.device)

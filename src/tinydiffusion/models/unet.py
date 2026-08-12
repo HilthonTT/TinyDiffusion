@@ -37,6 +37,10 @@ class UNet(nn.Module):
         dropout: dropout inside ResBlocks. DDPM uses 0.1 for CIFAR-10.
         image_size: input resolution, needed to resolve attn_resolutions.
         num_heads: attention heads used by every SelfAttention layer.
+
+    Raises:
+        ValueError: if `image_size` cannot be halved once per level beyond the
+            first and still leave a bottleneck of at least 2x2.
     """
 
     def __init__(
@@ -52,6 +56,18 @@ class UNet(nn.Module):
         num_heads: int = 4,
     ) -> None:
         super().__init__()
+
+        # The decoder concatenates each skip with a nearest-neighbour upsample,
+        # which can only undo an exact halving. An image_size that does not
+        # divide evenly would otherwise fail deep inside forward() with a
+        # torch.cat size mismatch, and a 1x1 bottleneck fails in GroupNorm.
+        divisor = 2 ** (len(channel_mult) - 1)
+        if image_size % divisor or image_size // divisor < 2:
+            raise ValueError(
+                f"image_size={image_size} does not fit {len(channel_mult)} levels: it must be a "
+                f"multiple of {divisor} and leave a bottleneck of at least 2x2 "
+                f"(smallest valid size is {2 * divisor})"
+            )
 
         time_dim = base_channels * TIME_EMBED_MULT
         self.time_embed = TimeEmbedding(base_channels, time_dim)

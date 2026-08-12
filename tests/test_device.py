@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from tinydiffusion.utils.device import describe_device, resolve_device
@@ -10,6 +11,12 @@ def test_none_follows_availability():
 
 def test_cpu_is_left_alone():
     assert resolve_device("cpu") == "cpu"
+
+
+def test_an_unknown_device_is_a_user_error():
+    # torch raises RuntimeError, which the CLI would surface as a traceback.
+    with pytest.raises(ValueError, match="unknown device"):
+        resolve_device("gpu")
 
 
 def test_cuda_falls_back_when_unavailable(monkeypatch, capsys):

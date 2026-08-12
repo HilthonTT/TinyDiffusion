@@ -26,11 +26,15 @@ def uniform_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
         num_steps: number of sampling steps to actually take.
 
     Returns:
-        Long tensor of length num_steps, strictly decreasing, ending at 0.
+        Long tensor of length num_steps, strictly decreasing, starting at
+        num_timesteps - 1. Ends at 0 whenever more than one step is taken.
     """
     _check_num_steps(num_timesteps, num_steps)
-    steps = torch.linspace(0, num_timesteps - 1, num_steps).round().long()
-    return steps.flip(0)
+    # Built descending rather than ascending-then-flipped: a one-step schedule
+    # has to be [T-1], the timestep matching the pure noise the chain starts
+    # from. Ascending would collapse it to [0] and denoise as if x_T were
+    # already a clean image. The two agree for every longer schedule.
+    return torch.linspace(num_timesteps - 1, 0, num_steps).round().long()
 
 
 def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
@@ -46,7 +50,9 @@ def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
         Long tensor of descending, de-duplicated timesteps.
     """
     _check_num_steps(num_timesteps, num_steps)
-    steps = (torch.linspace(0, (num_timesteps - 1) ** 0.5, num_steps) ** 2).round().long()
+    # Descending for the same reason as `uniform_timesteps`; squaring a
+    # descending ramp gives the same set, still denser near t=0.
+    steps = (torch.linspace((num_timesteps - 1) ** 0.5, 0, num_steps) ** 2).round().long()
     return torch.unique(steps).flip(0)
 
 
