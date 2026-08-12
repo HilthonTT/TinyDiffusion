@@ -1,0 +1,38 @@
+# A deliberately tiny run for checking the pipeline end to end, not for
+# producing good digits. Sized to finish one epoch on a CPU in a few minutes:
+# quarter-width net, two resolution levels, no attention outside the
+# bottleneck, and a 200-step schedule.
+#
+#   ./run.sh train  --config configs/smoke.toml
+#   ./run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
+
+[data]
+data_root = "data"
+image_size = 32
+batch_size = 128
+num_workers = 2
+
+[model]
+base_channels = 16
+channel_mult = [1, 2]
+num_res_blocks = 1
+attn_resolutions = []
+dropout = 0.1
+
+[diffusion]
+num_timesteps = 200
+schedule = "cosine"
+
+[optimisation]
+num_epochs = 1
+lr = 2e-4
+ema_decay = 0.995
+ema_warmup = 100
+
+[bookkeeping]
+seed = 0
+sample_every = 1
+num_samples = 8
+sample_steps = 20
+out_dir = "runs/smoke/contents"
+ckpt_dir = "runs/smoke/checkpoints"
