@@ -39,3 +39,9 @@ num_samples = 16
 sample_steps = 50
 out_dir = "contents"
 ckpt_dir = "checkpoints"
+
+[tracking]
+log_dir = "runs/mnist"  # holds metrics.jsonl, and tb/ when tensorboard is on
+log_console = true      # per-epoch metrics table
+log_jsonl = true        # append metrics.jsonl
+tensorboard = false     # needs the 'tracking' extra

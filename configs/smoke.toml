@@ -36,3 +36,6 @@ num_samples = 8
 sample_steps = 20
 out_dir = "runs/smoke/contents"
 ckpt_dir = "runs/smoke/checkpoints"
+
+[tracking]
+log_dir = "runs/smoke"

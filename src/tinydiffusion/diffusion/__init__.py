@@ -5,7 +5,7 @@ from tinydiffusion.diffusion.ddim import (
     quadratic_timesteps,
     uniform_timesteps,
 )
-from tinydiffusion.diffusion.ddpm import DDPM
+from tinydiffusion.diffusion.ddpm import DDPM, LossTerms
 from tinydiffusion.diffusion.schedules import (
     cosine_beta_schedule,
     ddpm_schedules,
@@ -14,6 +14,7 @@ from tinydiffusion.diffusion.schedules import (
 
 __all__ = [
     "DDPM",
+    "LossTerms",
     "cosine_beta_schedule",
     "ddim_sample",
     "ddpm_schedules",

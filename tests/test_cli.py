@@ -3,11 +3,25 @@ from pathlib import Path
 import pytest
 
 from tinydiffusion import __version__
+from tinydiffusion import version as version_module
 from tinydiffusion.cli import build_parser, main
 
 
 def test_version_is_exposed():
     assert __version__
+    assert __version__ == version_module.__version__
+
+
+def test_the_version_flag_prints_the_version(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"tinydiffusion {__version__}"
+
+
+def test_the_short_version_flag_matches():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["-V"])
 
 
 def test_parser_requires_a_subcommand():
@@ -26,6 +40,15 @@ def test_train_overrides_default_to_none():
     args = build_parser().parse_args(["train"])
     assert args.config is None
     assert (args.seed, args.device, args.num_epochs, args.resume) == (None, None, None, None)
+    # Tracking flags too: an unpassed flag must not override the config file.
+    assert (args.log_dir, args.tensorboard, args.log_console) == (None, None, None)
+
+
+def test_train_parses_the_tracking_flags():
+    args = build_parser().parse_args(["train", "--log-dir", "runs/x", "--tensorboard", "--quiet"])
+    assert args.log_dir == Path("runs/x")
+    assert args.tensorboard is True
+    assert args.log_console is False
 
 
 def test_sample_defaults():

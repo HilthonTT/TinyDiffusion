@@ -10,7 +10,7 @@ import torch
 
 # Fields whose declared type is not what TOML (or a checkpoint's provenance
 # dict, which stringifies Paths) hands back, so they need coercing on the way in.
-_PATH_FIELDS = frozenset({"data_root", "out_dir", "ckpt_dir"})
+_PATH_FIELDS = frozenset({"data_root", "out_dir", "ckpt_dir", "log_dir"})
 _TUPLE_FIELDS = frozenset({"channel_mult", "attn_resolutions"})
 
 
@@ -61,6 +61,12 @@ class TrainConfig:
     out_dir: Path = Path("contents")
     ckpt_dir: Path = Path("checkpoints")
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
+
+    # tracking
+    log_dir: Path = Path("runs/mnist")
+    log_console: bool = True
+    log_jsonl: bool = True
+    tensorboard: bool = False
 
     def __post_init__(self) -> None:
         """Reject configurations that would only fail an epoch into the run.

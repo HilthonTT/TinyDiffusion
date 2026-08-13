@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tinydiffusion",
         description="Train and sample from a tiny diffusion model.",
     )
-    parser.add_argument("--version", action="version", version=f"tinydiffusion {__version__}")
+    parser.add_argument("-V", "--version", action="version", version=f"tinydiffusion {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -30,6 +30,21 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--seed", type=int, help="Random seed, overriding the config.")
     train.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
     train.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
+    train.add_argument("--log-dir", type=Path, help="Directory for metrics.jsonl and TB events.")
+    # store_true with default None so an unpassed flag leaves the config alone.
+    train.add_argument(
+        "--tensorboard",
+        action="store_true",
+        default=None,
+        help="Also write TensorBoard events. Needs the 'tracking' extra.",
+    )
+    train.add_argument(
+        "--quiet",
+        action="store_false",
+        default=None,
+        dest="log_console",
+        help="Do not print the per-epoch metrics table.",
+    )
 
     evaluate = subparsers.add_parser("eval", help="Score a checkpoint on held-out data.")
     evaluate.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
@@ -69,13 +84,13 @@ def _train(args: argparse.Namespace) -> int:
     # Only flags the user actually passed override the file.
     overrides = {
         name: getattr(args, name)
-        for name in ("seed", "device", "num_epochs")
+        for name in ("seed", "device", "num_epochs", "log_dir", "tensorboard", "log_console")
         if getattr(args, name) is not None
     }
     cfg = dataclasses.replace(cfg, **overrides)
 
     train_mnist(cfg, resume=args.resume)
-    print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}")
+    print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}, metrics in {cfg.log_dir}")
     return 0
 
 

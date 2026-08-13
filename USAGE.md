@@ -9,6 +9,7 @@ the project *is*, see [README.md](README.md); for contributing, see
 - [What gets downloaded, and where](#what-gets-downloaded-and-where)
 - [Running the CLI](#running-the-cli)
 - [Training](#training)
+- [Metrics and logging](#metrics-and-logging)
 - [Sampling](#sampling)
 - [Evaluating a checkpoint](#evaluating-a-checkpoint)
 - [Configuration](#configuration)
@@ -147,7 +148,16 @@ from Git Bash, WSL, Linux, or macOS:
 ```
 
 Set `PYTHON` to force a specific interpreter: `PYTHON=/usr/bin/python3 ./run.sh …`.
-With no arguments a wrapper prints the CLI help.
+With no arguments a wrapper prints the CLI help. `--version` (or `-V`) prints
+the installed version and exits:
+
+```bash
+./run.sh --version      # tinydiffusion 0.1.0
+```
+
+The number comes from `src/tinydiffusion/version.py`, which is also what
+`pyproject.toml` builds the distribution version from — so a checkout run from
+source reports the same string as an installed wheel.
 
 Equivalent invocations, if you prefer not to use the wrappers:
 
@@ -192,7 +202,8 @@ so a resumed run continues rather than restarts:
 ./run.sh train --config configs/mnist.toml --resume checkpoints/last.pt
 ```
 
-Flags override the config file when passed: `--seed`, `--device`, `--epochs`.
+Flags override the config file when passed: `--seed`, `--device`, `--epochs`,
+and the logging flags in [Metrics and logging](#metrics-and-logging).
 `--config` itself is optional — omit it to run the built-in defaults.
 
 ```bash
@@ -216,6 +227,70 @@ checkpoint saved mid-epoch records the last *completed* epoch, so resuming
 replays the interrupted one in full. A second `Ctrl+C` while the questions are
 on screen quits immediately, and a run without a terminal attached — a CI job,
 a `nohup`ed script — saves and exits without asking.
+
+## Metrics and logging
+
+Every epoch, training prints a table of what it measured and appends the same
+numbers to `log_dir/metrics.jsonl`:
+
+```text
+------------------------------------
+| step 0                           |
+------------------------------------
+| time/epoch_seconds     |  27.9143 |
+| time/images_per_second | 2148.31  |
+| train/amp_scale        | 65536.00 |
+| train/ema_decay        |   0.9950 |
+| train/grad_norm        |   0.4127 |
+| train/loss             |   0.0421 |
+| train/loss_q0          |   0.1183 |
+| train/loss_q1          |   0.0312 |
+| train/loss_q2          |   0.0208 |
+| train/loss_q3          |   0.0179 |
+| train/lr               |  2.0e-04 |
+| train/skipped_step     |   0.0000 |
+------------------------------------
+```
+
+Per-batch values (`train/loss`, `train/grad_norm`, the quartiles) are averaged
+over the epoch; states (`train/lr`, `train/amp_scale`, the timings) are recorded
+as they stood at the end of it.
+
+The quartile losses are the reason to look at this rather than just the progress
+bar. `loss_q0` covers the lowest quarter of the diffusion schedule and `loss_q3`
+the highest, so they say *where* the model is struggling: high-`t` error means
+the denoiser cannot recover structure from near-pure noise, low-`t` error means
+it cannot clean up the last little bit. The mean of the two moves for neither
+reason. They are sampled from one batch in eight — slicing by timestep costs a
+device sync, and every batch draws its timesteps independently, so the epoch
+mean is the same either way. `train/skipped_step` is the fraction of batches AMP
+threw away for inf/NaN gradients — a number that stays above zero is a reason to
+lower `lr`.
+
+`metrics.jsonl` is one JSON object per epoch, so a finished run is comparable
+against the next one without re-reading a log:
+
+```bash
+python -c "import json;[print(json.loads(l)['train/loss']) for l in open('runs/mnist/metrics.jsonl')]"
+```
+
+TensorBoard is optional and off by default. It needs the `tracking` extra
+(`uv sync --all-extras`, or `pip install 'tinydiffusion[tracking]'`) and writes
+to `log_dir/tb`:
+
+```bash
+./run.sh train --config configs/mnist.toml --tensorboard
+tensorboard --logdir runs/mnist/tb
+```
+
+| Flag | Config field | Meaning |
+| --- | --- | --- |
+| `--log-dir` | `log_dir` | Where `metrics.jsonl` and `tb/` are written |
+| `--tensorboard` | `tensorboard` | Also write TensorBoard events |
+| `--quiet` | `log_console` | Suppress the per-epoch table |
+
+An unpassed flag leaves the config file's value alone, so `--tensorboard` can
+be turned on for one run without editing the TOML.
 
 ## Sampling
 
@@ -340,6 +415,10 @@ schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 | `out_dir` | `contents` | Sample grids |
 | `ckpt_dir` | `checkpoints` | Checkpoints |
 | `device` | auto | `cuda` when available, else `cpu` |
+| `log_dir` | `runs/mnist` | `metrics.jsonl`, and `tb/` when TensorBoard is on |
+| `log_console` | `true` | Per-epoch metrics table |
+| `log_jsonl` | `true` | Append `metrics.jsonl` |
+| `tensorboard` | `false` | TensorBoard events; needs the `tracking` extra |
 
 `configs/mnist.toml` lists every field with its default;
 `TrainConfig` in `src/tinydiffusion/training/config.py` is the source of truth.

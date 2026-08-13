@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tinydiffusion"
-version = "0.1.0"
+# Read from src/tinydiffusion/version.py, so the number lives in exactly one place.
+dynamic = ["version"]
 description = "A PyTorch implementation of a diffusion model for image generation."
 readme = "README.md"
 license = "MIT"
@@ -49,6 +50,9 @@ dev = [
     "mypy>=2.3.0",
     "pre-commit>=4.0",
 ]
+
+[tool.hatch.version]
+path = "src/tinydiffusion/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tinydiffusion"]

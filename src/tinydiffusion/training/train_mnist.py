@@ -1,5 +1,6 @@
 """MNIST training loop for TinyDiffusion."""
 
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,10 @@ from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import interrupt_guard
 from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
 from tinydiffusion.utils.seed import seed_everything
+from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
 
 __all__ = [
+    "QUARTILE_EVERY",
     "TrainConfig",
     "build_model",
     "load_checkpoint",
@@ -30,6 +33,17 @@ __all__ = [
     "save_samples",
     "train_mnist",
 ]
+
+
+QUARTILE_EVERY = 8
+"""Batches between timestep-quartile samples.
+
+Slicing the loss by timestep costs a device sync per quartile, which is real
+money on a GPU when the loop is otherwise asynchronous. The quartiles are only
+ever read as an epoch mean, and every batch draws its timesteps independently,
+so sampling one batch in eight measures the same thing for an eighth of the
+overhead.
+"""
 
 
 def _epochs(count: int) -> str:
@@ -318,26 +332,41 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     reference: torch.Tensor | None = None
     cancelled = False
 
-    with interrupt_guard() as interrupts:
+    logger = RunLogger.for_run(
+        cfg.log_dir,
+        console=cfg.log_console,
+        jsonl=cfg.log_jsonl,
+        tensorboard=cfg.tensorboard,
+    )
+
+    with logger, interrupt_guard() as interrupts:
         for epoch in range(start_epoch, cfg.num_epochs):
             ddpm.train()
             loss_ema: float | None = None
+            epoch_start = time.perf_counter()
+            images = 0
 
             with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
-                for x, _ in pbar:
+                for batch, (x, _) in enumerate(pbar):
                     x = x.to(cfg.device, non_blocking=True)
                     if reference is None:
                         reference = x[: cfg.num_samples].detach().cpu()
 
                     optim.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type, enabled=use_amp):
-                        loss = ddpm(x)
+                        terms = ddpm.loss_terms(x)
+                    loss = terms.loss
 
                     scaler.scale(loss).backward()
+                    grad_norm: float | None = None
                     if cfg.grad_clip > 0:
                         # Unscale first, or the clip threshold is applied to scaled grads.
                         scaler.unscale_(optim)
-                        nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
+                        # The pre-clip norm comes back for free; it is the first
+                        # thing to look at when a loss curve goes flat or spikes.
+                        grad_norm = float(
+                            nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
+                        )
 
                     scale_before = scaler.get_scale()
                     scaler.step(optim)
@@ -345,12 +374,26 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     # A shrinking scale means inf/NaN grads and a skipped optimiser
                     # step; folding the unchanged weights in would still burn a step
                     # of the EMA warmup.
-                    if scaler.get_scale() >= scale_before:
+                    stepped = scaler.get_scale() >= scale_before
+                    if stepped:
                         ema.update(ddpm.eps_model)
 
                     value = loss.item()
                     loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
                     pbar.set_postfix(loss=f"{loss_ema:.4f}")
+
+                    images += x.shape[0]
+                    batch_metrics = {"train/loss": value, "train/skipped_step": float(not stepped)}
+                    if grad_norm is not None:
+                        batch_metrics["train/grad_norm"] = grad_norm
+                    if batch % QUARTILE_EVERY == 0:
+                        batch_metrics |= {
+                            f"train/{name}": quartile_loss
+                            for name, quartile_loss in timestep_quartile_losses(
+                                terms.per_sample.float(), terms.timesteps, cfg.num_timesteps
+                            ).items()
+                        }
+                    logger.accumulate(**batch_metrics)
 
                     if interrupts.requested:
                         # Batch boundary: model, optimiser and EMA all agree, so
@@ -374,6 +417,20 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                             print("cancelled without saving")
                         cancelled = True
                         break
+
+            elapsed = time.perf_counter() - epoch_start
+            logger.set(
+                **{
+                    "train/lr": float(optim.param_groups[0]["lr"]),
+                    "train/ema_decay": ema.current_decay,
+                    "train/amp_scale": float(scaler.get_scale()) if use_amp else 1.0,
+                    "time/epoch_seconds": elapsed,
+                    "time/images_per_second": images / elapsed if elapsed > 0 else 0.0,
+                }
+            )
+            # Flushed even for the partial epoch a Ctrl+C ends on: those batches
+            # were still work, and the record explains where the run stopped.
+            logger.flush(step=epoch)
 
             if cancelled:
                 break

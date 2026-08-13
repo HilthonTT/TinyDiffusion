@@ -1,12 +1,27 @@
 """The DDPM forward/reverse process (Ho et al. 2020, https://arxiv.org/abs/2006.11239)."""
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
 
 from tinydiffusion.diffusion.schedules import ddpm_schedules, linear_beta_schedule
 from tinydiffusion.utils.modules import eval_mode
+
+
+class LossTerms(NamedTuple):
+    """One training step's loss, broken out for logging.
+
+    Attributes:
+        loss: scalar loss to call ``backward()`` on.
+        per_sample: shape ``(B,)`` detached per-image loss, for slicing by
+            timestep. Detached because it exists only to be logged.
+        timesteps: shape ``(B,)`` timesteps the losses were drawn at.
+    """
+
+    loss: torch.Tensor
+    per_sample: torch.Tensor
+    timesteps: torch.Tensor
 
 
 class DDPM(nn.Module):
@@ -78,8 +93,29 @@ class DDPM(nn.Module):
         Returns:
             Scalar training loss.
         """
+        return self.loss_terms(x).loss
+
+    def loss_terms(self, x: torch.Tensor) -> LossTerms:
+        """Take one training step's loss, keeping the per-image breakdown.
+
+        Identical to :meth:`forward` in what it optimises — the scalar still
+        comes from ``self.criterion`` — but it also hands back the detached
+        per-image squared error and the timesteps it was drawn at, which is
+        what :func:`~tinydiffusion.utils.tracking.timestep_quartile_losses`
+        needs to show *where* in the schedule the model is struggling.
+
+        Args:
+            x: (B, C, H, W) clean images in [-1, 1].
+
+        Returns:
+            The scalar loss, the per-image loss, and the sampled timesteps.
+        """
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=x.device)
-        return self.loss_at(x, t)
+        eps = torch.randn_like(x)
+        x_t = self._extract(self.sqrtab, t, x) * x + self._extract(self.sqrtmab, t, x) * eps
+        pred = self.eps_model(x_t, t)
+        per_sample = (pred.detach() - eps).square().flatten(1).mean(dim=1)
+        return LossTerms(loss=self.criterion(pred, eps), per_sample=per_sample, timesteps=t)
 
     def loss_at(
         self,

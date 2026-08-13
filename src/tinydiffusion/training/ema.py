@@ -26,6 +26,22 @@ class EMA:
         for p in self.module.parameters():
             p.requires_grad_(False)
 
+    @property
+    def current_decay(self) -> float:
+        """The decay in force at the current step.
+
+        Ramped in over `warmup` so early averages are not dominated by the
+        random initialisation. Worth logging: an EMA still deep in its warmup
+        explains sample grids that lag the training loss.
+
+        Returns:
+            The decay that the next :meth:`update` will apply.
+        """
+        step = self.step + 1
+        if step <= self.warmup:
+            return min(self.decay, (1 + step) / (10 + step))
+        return self.decay
+
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
         """Fold one optimiser step of `model` into the averaged weights.
@@ -33,13 +49,8 @@ class EMA:
         Args:
             model: the live model, after its parameter update.
         """
+        decay = self.current_decay
         self.step += 1
-        # Ramp the decay in so early averages are not dominated by random init.
-        decay = (
-            min(self.decay, (1 + self.step) / (10 + self.step))
-            if self.step <= self.warmup
-            else self.decay
-        )
         for ema_p, p in zip(self.module.parameters(), model.parameters(), strict=True):
             ema_p.lerp_(p.detach(), 1.0 - decay)
         for ema_b, b in zip(self.module.buffers(), model.buffers(), strict=True):
