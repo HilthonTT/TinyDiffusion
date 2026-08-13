@@ -6,6 +6,18 @@ from tinydiffusion.diffusion.ddim import (
     uniform_timesteps,
 )
 from tinydiffusion.diffusion.ddpm import DDPM, LossTerms
+from tinydiffusion.diffusion.gaussian_diffusion import (
+    Diffusion,
+    GaussianDiffusion,
+    LossType,
+    ModelMeanType,
+    ModelVarType,
+)
+from tinydiffusion.diffusion.losses import (
+    discretized_gaussian_log_likelihood,
+    mean_flat,
+    normal_kl,
+)
 from tinydiffusion.diffusion.schedules import (
     cosine_beta_schedule,
     ddpm_schedules,
@@ -14,11 +26,19 @@ from tinydiffusion.diffusion.schedules import (
 
 __all__ = [
     "DDPM",
+    "Diffusion",
+    "GaussianDiffusion",
     "LossTerms",
+    "LossType",
+    "ModelMeanType",
+    "ModelVarType",
     "cosine_beta_schedule",
     "ddim_sample",
     "ddpm_schedules",
+    "discretized_gaussian_log_likelihood",
     "linear_beta_schedule",
+    "mean_flat",
+    "normal_kl",
     "quadratic_timesteps",
     "uniform_timesteps",
 ]

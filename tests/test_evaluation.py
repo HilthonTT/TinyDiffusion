@@ -26,12 +26,14 @@ TINY = TrainConfig(
 @pytest.fixture
 def checkpoint(tmp_path, monkeypatch):
     """A real checkpoint over a tiny model, plus a stand-in for MNIST."""
-    ddpm = build_model(TINY)
-    ema = EMA(ddpm.eps_model, decay=0.9, warmup=0)
-    optim = torch.optim.Adam(ddpm.parameters(), lr=1e-4)
+    diffusion = build_model(TINY)
+    ema = EMA(diffusion.net, decay=0.9, warmup=0)
+    optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler("cpu", enabled=False)
     path = tmp_path / "last.pt"
-    save_checkpoint(path, epoch=0, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler, cfg=TINY)
+    save_checkpoint(
+        path, epoch=0, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, cfg=TINY
+    )
 
     def fake_loader(*args, **kwargs):
         images = torch.randn(6, 1, TINY.image_size, TINY.image_size).clamp(-1, 1)

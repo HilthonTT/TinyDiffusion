@@ -13,6 +13,13 @@ from tqdm import tqdm
 from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize, mnist_dataloader
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.ddpm import DDPM
+from tinydiffusion.diffusion.gaussian_diffusion import (
+    Diffusion,
+    GaussianDiffusion,
+    LossType,
+    ModelMeanType,
+    ModelVarType,
+)
 from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_schedule
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.config import TrainConfig
@@ -58,18 +65,26 @@ def _epochs(count: int) -> str:
     return f"{count} epoch" if count == 1 else f"{count} epochs"
 
 
-def build_model(cfg: TrainConfig) -> DDPM:
+def build_model(cfg: TrainConfig) -> Diffusion:
     """Construct the U-Net and wrap it in the diffusion process.
+
+    The parameterisation fields pick the process:
+    :class:`~tinydiffusion.diffusion.ddpm.DDPM` for the default
+    epsilon/fixed-small/MSE combination it was written for, and
+    :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion` for
+    anything else. A learned variance also doubles the network's output
+    channels, since it emits the variance parameters alongside the mean.
 
     Args:
         cfg: run configuration.
 
     Returns:
-        An untrained :class:`DDPM` on the CPU.
+        An untrained diffusion process on the CPU.
     """
+    mean_type, var_type, loss_type = cfg.diffusion_types()
     net = UNet(
         in_channels=MNIST_CHANNELS,
-        out_channels=MNIST_CHANNELS,
+        out_channels=MNIST_CHANNELS * (2 if var_type.is_learned else 1),
         base_channels=cfg.base_channels,
         channel_mult=cfg.channel_mult,
         num_res_blocks=cfg.num_res_blocks,
@@ -82,14 +97,28 @@ def build_model(cfg: TrainConfig) -> DDPM:
     else:
         betas = linear_beta_schedule(cfg.beta_start, cfg.beta_end, cfg.num_timesteps)
 
-    return DDPM(eps_model=net, betas=betas, num_timesteps=cfg.num_timesteps)
+    if (mean_type, var_type, loss_type) == (
+        ModelMeanType.EPSILON,
+        ModelVarType.FIXED_SMALL,
+        LossType.MSE,
+    ):
+        return DDPM(eps_model=net, betas=betas, num_timesteps=cfg.num_timesteps)
+
+    return GaussianDiffusion(
+        net,
+        betas=betas,
+        num_timesteps=cfg.num_timesteps,
+        model_mean_type=mean_type,
+        model_var_type=var_type,
+        loss_type=loss_type,
+    )
 
 
 def save_checkpoint(
     path: Path,
     *,
     epoch: int,
-    ddpm: DDPM,
+    diffusion: Diffusion,
     ema: EMA,
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
@@ -103,7 +132,7 @@ def save_checkpoint(
     Args:
         path: destination file.
         epoch: index of the epoch just completed.
-        ddpm: the diffusion model.
+        diffusion: the diffusion model.
         ema: exponential moving average of the network weights.
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
@@ -114,7 +143,7 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
-            "model": ddpm.eps_model.state_dict(),
+            "model": diffusion.net.state_dict(),
             "ema": ema.module.state_dict(),
             "ema_step": ema.step,
             "optim": optim.state_dict(),
@@ -130,7 +159,7 @@ def save_checkpoint(
 def load_checkpoint(
     path: Path,
     *,
-    ddpm: DDPM,
+    diffusion: Diffusion,
     ema: EMA,
     optim: torch.optim.Optimizer | None = None,
     scaler: torch.amp.GradScaler | None = None,
@@ -140,7 +169,7 @@ def load_checkpoint(
 
     Args:
         path: checkpoint file.
-        ddpm: model to load weights into.
+        diffusion: model to load weights into.
         ema: EMA wrapper to load shadow weights into.
         optim: optimiser to restore, or None to skip (e.g. sampling only).
         scaler: AMP scaler to restore, or None to skip.
@@ -150,7 +179,7 @@ def load_checkpoint(
         The epoch index to resume from.
     """
     ckpt = read_checkpoint(path, device=device)
-    return restore_checkpoint(ckpt, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler)
+    return restore_checkpoint(ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler)
 
 
 def read_checkpoint(path: Path, *, device: str = "cpu") -> dict[str, Any]:
@@ -174,7 +203,7 @@ def read_checkpoint(path: Path, *, device: str = "cpu") -> dict[str, Any]:
 def restore_checkpoint(
     ckpt: dict[str, Any],
     *,
-    ddpm: DDPM,
+    diffusion: Diffusion,
     ema: EMA,
     optim: torch.optim.Optimizer | None = None,
     scaler: torch.amp.GradScaler | None = None,
@@ -183,7 +212,7 @@ def restore_checkpoint(
 
     Args:
         ckpt: mapping returned by :func:`read_checkpoint`.
-        ddpm: model to load weights into.
+        diffusion: model to load weights into.
         ema: EMA wrapper to load shadow weights into.
         optim: optimiser to restore, or None to skip (e.g. sampling only).
         scaler: AMP scaler to restore, or None to skip.
@@ -191,7 +220,7 @@ def restore_checkpoint(
     Returns:
         The epoch index to resume from.
     """
-    ddpm.eps_model.load_state_dict(ckpt["model"])
+    diffusion.net.load_state_dict(ckpt["model"])
     ema.module.load_state_dict(ckpt["ema"])
     ema.step = ckpt.get("ema_step", 0)
     if optim is not None and "optim" in ckpt:
@@ -203,7 +232,7 @@ def restore_checkpoint(
 
 @torch.no_grad()
 def save_samples(
-    ddpm: DDPM,
+    diffusion: Diffusion,
     ema: EMA,
     real: torch.Tensor,
     cfg: TrainConfig,
@@ -216,7 +245,7 @@ def save_samples(
     learned the data distribution or merely something digit-shaped.
 
     Args:
-        ddpm: the diffusion model, used for its schedule.
+        diffusion: the diffusion model, used for its schedule.
         ema: EMA weights to sample from.
         real: a batch of real images in [-1, 1] to show alongside.
         cfg: run configuration.
@@ -225,7 +254,7 @@ def save_samples(
     """
     shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
     fake = ddim_sample(
-        ddpm,
+        diffusion,
         cfg.num_samples,
         shape,
         cfg.device,
@@ -243,7 +272,7 @@ def _save_and_report(
     cfg: TrainConfig,
     *,
     epoch: int,
-    ddpm: DDPM,
+    diffusion: Diffusion,
     ema: EMA,
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
@@ -253,20 +282,24 @@ def _save_and_report(
     Args:
         cfg: run configuration.
         epoch: index of the last fully completed epoch, or -1 if none.
-        ddpm: the diffusion model.
+        diffusion: the diffusion model.
         ema: exponential moving average of the network weights.
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
     """
     path = cfg.ckpt_dir / "last.pt"
-    save_checkpoint(path, epoch=epoch, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler, cfg=cfg)
+    save_checkpoint(
+        path, epoch=epoch, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, cfg=cfg
+    )
     done = max(epoch + 1, 0)
     print(f"saved {path} ({_epochs(done)} complete)")
     print(f"resume with: tinydiffusion train --resume {path}")
 
 
-def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> DDPM:
-    """Train a DDPM on MNIST.
+def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusion:
+    """Train a diffusion model on MNIST.
+
+    Which process is trained follows from the config; see :func:`build_model`.
 
     Ctrl+C does not tear the run down: it is caught at the next batch boundary
     and turned into a confirmation prompt, with the option to checkpoint first
@@ -291,16 +324,16 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         torch.backends.cudnn.benchmark = True
         enable_tf32()
 
-    ddpm = build_model(cfg).to(cfg.device)
-    ema = EMA(ddpm.eps_model, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
+    diffusion = build_model(cfg).to(cfg.device)
+    ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
 
-    optim = torch.optim.Adam(ddpm.parameters(), lr=cfg.lr)
+    optim = torch.optim.Adam(diffusion.parameters(), lr=cfg.lr)
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     start_epoch = 0
     if resume is not None:
         start_epoch = load_checkpoint(
-            resume, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler, device=cfg.device
+            resume, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, device=cfg.device
         )
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
@@ -312,7 +345,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         num_workers=cfg.num_workers,
     )
 
-    n_params = sum(p.numel() for p in ddpm.eps_model.parameters())
+    n_params = sum(p.numel() for p in diffusion.net.parameters())
     remaining = cfg.num_epochs - start_epoch
     if start_epoch == 0:
         plan = _epochs(cfg.num_epochs)
@@ -341,7 +374,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     with logger, interrupt_guard() as interrupts:
         for epoch in range(start_epoch, cfg.num_epochs):
-            ddpm.train()
+            diffusion.train()
             loss_ema: float | None = None
             epoch_start = time.perf_counter()
             images = 0
@@ -354,7 +387,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
                     optim.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type, enabled=use_amp):
-                        terms = ddpm.loss_terms(x)
+                        terms = diffusion.loss_terms(x)
                     loss = terms.loss
 
                     # torch ships `Tensor.backward` unannotated, so now that the
@@ -369,7 +402,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                         # The pre-clip norm comes back for free; it is the first
                         # thing to look at when a loss curve goes flat or spikes.
                         grad_norm = float(
-                            nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
+                            nn.utils.clip_grad_norm_(diffusion.parameters(), cfg.grad_clip)
                         )
 
                     scale_before = scaler.get_scale()
@@ -380,7 +413,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     # of the EMA warmup.
                     stepped = scaler.get_scale() >= scale_before
                     if stepped:
-                        ema.update(ddpm.eps_model)
+                        ema.update(diffusion.net)
 
                     value = loss.item()
                     loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
@@ -412,7 +445,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                             _save_and_report(
                                 cfg,
                                 epoch=epoch - 1,
-                                ddpm=ddpm,
+                                diffusion=diffusion,
                                 ema=ema,
                                 optim=optim,
                                 scaler=scaler,
@@ -444,12 +477,12 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                 and (epoch + 1) % cfg.sample_every == 0
                 and reference is not None
             ):
-                save_samples(ddpm, ema, reference, cfg, epoch)
+                save_samples(diffusion, ema, reference, cfg, epoch)
 
             save_checkpoint(
                 cfg.ckpt_dir / "last.pt",
                 epoch=epoch,
-                ddpm=ddpm,
+                diffusion=diffusion,
                 ema=ema,
                 optim=optim,
                 scaler=scaler,
@@ -457,8 +490,8 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
             )
 
     # Ship the EMA weights: they are what the sample grids were drawn from.
-    ddpm.eps_model.load_state_dict(ema.module.state_dict())
-    return ddpm
+    diffusion.net.load_state_dict(ema.module.state_dict())
+    return diffusion
 
 
 if __name__ == "__main__":

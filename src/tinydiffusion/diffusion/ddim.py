@@ -2,13 +2,13 @@
 
 DDIM is a *sampler*, not a different training objective. A model trained with
 the DDPM loss can be sampled with either method, so this lives as a function
-over a trained DDPM rather than as a subclass that overrides `sample`.
+over a trained process rather than as a subclass that overrides `sample`.
 """
 
 import torch
 import torch.nn as nn
 
-from tinydiffusion.diffusion.ddpm import DDPM
+from tinydiffusion.diffusion.gaussian_diffusion import Diffusion, GaussianDiffusion
 from tinydiffusion.utils.modules import eval_mode
 
 
@@ -58,7 +58,7 @@ def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
 
 @torch.no_grad()
 def ddim_sample(
-    diffusion: DDPM,
+    diffusion: Diffusion,
     num_samples: int,
     size: tuple[int, ...],
     device: torch.device | str,
@@ -71,7 +71,7 @@ def ddim_sample(
     """Sample by running the DDIM reverse chain over a timestep subsequence.
 
     Args:
-        diffusion: a trained DDPM, used for its schedule buffers and eps_model.
+        diffusion: a trained process, used for its schedule buffers and network.
         num_samples: batch size to generate.
         size: shape of one sample, e.g. (1, 28, 28).
         device: device to generate on.
@@ -91,7 +91,7 @@ def ddim_sample(
     if not 0.0 <= eta <= 1.0:
         raise ValueError(f"eta must lie in [0, 1], got {eta}")
 
-    net = model if model is not None else diffusion.eps_model
+    net = model if model is not None else diffusion.net
 
     if timesteps is None:
         timesteps = uniform_timesteps(diffusion.num_timesteps, num_steps)
@@ -110,15 +110,26 @@ def ddim_sample(
             ab_t = alphabar[t_cur]
             ab_prev = one if t_prev < 0 else alphabar[t_prev]
 
-            t_batch = t_cur.expand(num_samples)
-            eps = net(x, t_batch)
+            t_batch = t_cur.repeat(num_samples)
 
-            x0 = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
-            if clip_denoised:
-                x0 = x0.clamp(-1.0, 1.0)
-                # Re-derive eps so the direction term stays consistent with the
-                # clamped x_0. Skipping this is a common and subtle bug.
-                eps = (x - ab_t.sqrt() * x0) / (1 - ab_t).sqrt()
+            if isinstance(diffusion, GaussianDiffusion):
+                # The network may emit 2C channels, and may not be predicting
+                # epsilon at all, so the implied x_0 has to come from the
+                # process itself. DDIM's own variance is used either way: a
+                # learned reverse variance describes the full-chain step, not
+                # this strided one.
+                *_, x0 = diffusion.p_mean_variance(
+                    x, t_batch, model=net, clip_denoised=clip_denoised
+                )
+                eps = diffusion.predict_eps_from_xstart(x, t_batch, x0)
+            else:
+                eps = net(x, t_batch)
+                x0 = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
+                if clip_denoised:
+                    x0 = x0.clamp(-1.0, 1.0)
+                    # Re-derive eps so the direction term stays consistent with
+                    # the clamped x_0. Skipping this is a common, subtle bug.
+                    eps = (x - ab_t.sqrt() * x0) / (1 - ab_t).sqrt()
 
             # sigma_t from DDIM Eq. 16.
             sigma = eta * (((1 - ab_prev) / (1 - ab_t)) * (1 - ab_t / ab_prev)).sqrt()

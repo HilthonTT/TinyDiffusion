@@ -4,6 +4,7 @@ import json
 import pytest
 import torch
 
+from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion
 from tinydiffusion.training import train_mnist as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.utils.tracking import METRICS_FILENAME
@@ -90,3 +91,17 @@ def test_a_console_table_is_printed_each_epoch(tiny_cfg, fake_loader, capsys):
     assert "train/loss" in out
     headers = [line.split("|")[1].strip() for line in out.splitlines() if line.startswith("| step")]
     assert headers == [f"step {epoch}" for epoch in range(tiny_cfg.num_epochs)]
+
+
+def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
+    """The whole loop — loss, EMA, sampling, checkpointing — on GaussianDiffusion."""
+    cfg = dataclasses.replace(
+        tiny_cfg, variance="learned_range", objective="rescaled_mse", sample_every=1
+    )
+    diffusion = train_module.train_mnist(cfg)
+
+    assert isinstance(diffusion, GaussianDiffusion)
+    assert [r["step"] for r in _records(cfg)] == [0, 1]
+    assert _records(cfg)[0]["train/loss"] > 0
+    assert (cfg.ckpt_dir / "last.pt").exists()
+    assert (cfg.out_dir / "sample_0002.png").exists()

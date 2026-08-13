@@ -73,6 +73,11 @@ sizes, and troubleshooting.
 - **Backbone** — `models/unet.py` is the DDPM U-Net: pre-activation ResBlocks
   with FiLM time conditioning at every resolution, self-attention at chosen
   scales, and a spatial bottleneck.
+- **Parameterisation** — `diffusion/gaussian_diffusion.py` makes the three
+  choices DDPM fixes — what the network predicts, where the reverse variance
+  comes from, and what is optimised — explicit, and adds the variational bound
+  they are measured against. Set `variance` and `objective` in the config to
+  train Nichol & Dhariwal's improved DDPM with a learned variance.
 - **Sampling** — `diffusion/ddim.py` runs the reverse chain over a subsequence
   of timesteps, so 50 steps stand in for 1000. `eta` interpolates between
   deterministic DDIM and ancestral DDPM.

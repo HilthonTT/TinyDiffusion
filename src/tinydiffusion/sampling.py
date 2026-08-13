@@ -6,7 +6,7 @@ from torchvision.utils import save_image
 
 from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize
 from tinydiffusion.diffusion.ddim import ddim_sample
-from tinydiffusion.diffusion.ddpm import DDPM
+from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.train_mnist import build_model, read_checkpoint, restore_checkpoint
@@ -14,7 +14,9 @@ from tinydiffusion.utils.device import resolve_device
 from tinydiffusion.utils.seed import seed_everything
 
 
-def load_for_sampling(checkpoint: Path, device: str | None = None) -> tuple[DDPM, EMA, TrainConfig]:
+def load_for_sampling(
+    checkpoint: Path, device: str | None = None
+) -> tuple[Diffusion, EMA, TrainConfig]:
     """Rebuild a model from a checkpoint and its embedded config.
 
     The architecture is taken from the config stored alongside the weights, so
@@ -39,10 +41,10 @@ def load_for_sampling(checkpoint: Path, device: str | None = None) -> tuple[DDPM
         raise KeyError(f"{checkpoint} stores no config; cannot infer the architecture")
 
     cfg = TrainConfig.from_mapping({**ckpt["config"], "device": resolved})
-    ddpm = build_model(cfg).to(resolved)
-    ema = EMA(ddpm.eps_model, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
-    restore_checkpoint(ckpt, ddpm=ddpm, ema=ema)
-    return ddpm, ema, cfg
+    diffusion = build_model(cfg).to(resolved)
+    ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
+    restore_checkpoint(ckpt, diffusion=diffusion, ema=ema)
+    return diffusion, ema, cfg
 
 
 def sample_from_checkpoint(
@@ -77,9 +79,9 @@ def sample_from_checkpoint(
     if seed is not None:
         seed_everything(seed)
 
-    ddpm, ema, cfg = load_for_sampling(checkpoint, device)
+    diffusion, ema, cfg = load_for_sampling(checkpoint, device)
     images = ddim_sample(
-        ddpm,
+        diffusion,
         num_images,
         (MNIST_CHANNELS, cfg.image_size, cfg.image_size),
         cfg.device,

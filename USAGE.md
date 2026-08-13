@@ -388,6 +388,26 @@ num_timesteps = 1000
 schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 ```
 
+### Choosing the parameterisation
+
+`predict`, `variance` and `objective` pick what the network predicts, where the
+reverse variance comes from, and what is optimised. Their defaults —
+`epsilon` / `fixed_small` / `mse` — are the DDPM baseline and build the `DDPM`
+class itself; anything else builds `GaussianDiffusion`, which implements all
+three as explicit choices. The combination worth trying is Nichol & Dhariwal's
+improved DDPM, which samples well in far fewer steps:
+
+```toml
+[diffusion]
+variance = "learned_range"   # the net emits the variance alongside the mean
+objective = "rescaled_mse"   # L_simple plus a down-weighted variational term
+```
+
+A learned variance doubles the U-Net's output channels, so a checkpoint trained
+this way is not interchangeable with a baseline one. Bad combinations — a
+learned variance under plain `mse`, which would leave the variance head
+untrained — are rejected when the config is read.
+
 | Field | Default | Notes |
 | --- | --- | --- |
 | `data_root` | `data` | MNIST is downloaded here on first use |
@@ -402,6 +422,9 @@ schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 | `num_timesteps` | 1000 | Length of the diffusion schedule |
 | `schedule` | `cosine` | `cosine` or `linear` |
 | `beta_start` / `beta_end` | 1e-4 / 0.02 | Linear schedule only |
+| `predict` | `epsilon` | Also `start_x`, `previous_x` |
+| `variance` | `fixed_small` | Also `fixed_large`, `learned_range`, `learned` |
+| `objective` | `mse` | Also `rescaled_mse` (hybrid), `kl`, `rescaled_kl` |
 | `num_epochs` | 30 | |
 | `lr` | 2e-4 | Adam |
 | `grad_clip` | 1.0 | 0 disables clipping |

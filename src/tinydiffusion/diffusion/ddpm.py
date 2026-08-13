@@ -84,6 +84,21 @@ class DDPM(nn.Module):
         for name, buffer in ddpm_schedules(beta_t).items():
             self.register_buffer(name, buffer, persistent=False)
 
+    @property
+    def net(self) -> nn.Module:
+        """The wrapped network, under the name every process shares.
+
+        :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion`
+        does not necessarily predict epsilon, so code that works with either
+        process — the training loop, DDIM, evaluation — reaches for `net`.
+        ``eps_model`` stays as the attribute, since that is what this class
+        does predict.
+
+        Returns:
+            The network passed to the constructor.
+        """
+        return self.eps_model
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Sample t and eps, build x_t, and score the network's noise estimate.
 

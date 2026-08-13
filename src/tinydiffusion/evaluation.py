@@ -23,7 +23,10 @@ class EvalResult:
         checkpoint: the file that was scored.
         split: ``"test"`` or ``"train"``.
         num_images: how many images the average covers.
-        loss: mean noise-prediction MSE over every timestep and image.
+        loss: mean training objective over every timestep and image. That is
+            noise-prediction MSE for the default parameterisation, and whatever
+            the checkpoint was trained on otherwise — so two checkpoints are
+            only comparable when they share one.
         per_timestep: ``(t, loss)`` pairs, ascending in ``t``.
         used_ema: whether the EMA weights were scored.
     """
@@ -116,8 +119,8 @@ def evaluate_checkpoint(
     if split not in ("test", "train"):
         raise ValueError(f"unknown split {split!r}, expected 'test' or 'train'")
 
-    ddpm, ema, cfg = load_for_sampling(checkpoint, device)
-    net = ema.module if use_ema else ddpm.eps_model
+    diffusion, ema, cfg = load_for_sampling(checkpoint, device)
+    net = ema.module if use_ema else diffusion.net
 
     loader = mnist_dataloader(
         data_root if data_root is not None else cfg.data_root,
@@ -145,7 +148,7 @@ def evaluate_checkpoint(
             seed_everything(seed)
             for i, step in enumerate(steps):
                 t = step.expand(x.shape[0])
-                totals[i] += ddpm.loss_at(x, t, model=net).double() * x.shape[0]
+                totals[i] += diffusion.loss_at(x, t, model=net).double() * x.shape[0]
             num_images += x.shape[0]
 
     per_step = (totals / max(num_images, 1)).tolist()

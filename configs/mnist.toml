@@ -24,6 +24,15 @@ schedule = "cosine"     # "cosine" or "linear"
 beta_start = 1e-4       # linear schedule only
 beta_end = 0.02         # linear schedule only
 
+# The parameterisation. These three defaults are the DDPM baseline, and are
+# built as the DDPM class itself; any other combination is served by
+# GaussianDiffusion. For Nichol & Dhariwal's improved DDPM — which samples well
+# in far fewer steps — set variance = "learned_range" and objective =
+# "rescaled_mse", which also doubles the U-Net's output channels.
+predict = "epsilon"       # "epsilon", "start_x" or "previous_x"
+variance = "fixed_small"  # "fixed_small", "fixed_large", "learned_range", "learned"
+objective = "mse"         # "mse", "rescaled_mse", "kl" or "rescaled_kl"
+
 [optimisation]
 num_epochs = 30
 lr = 2e-4
