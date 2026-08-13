@@ -199,6 +199,24 @@ Flags override the config file when passed: `--seed`, `--device`, `--epochs`.
 ./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
 ```
 
+### Stopping a run early
+
+`Ctrl+C` does not kill the run outright. At the next batch boundary training
+pauses and asks whether to stop, and if so whether to write `last.pt` first:
+
+```text
+stop training? [y/N] y
+save a checkpoint so training can resume later? [Y/n] y
+saved checkpoints/last.pt (3 epochs complete)
+resume with: tinydiffusion train --resume checkpoints/last.pt
+```
+
+Answering `n` to the first question resumes training where it left off. A
+checkpoint saved mid-epoch records the last *completed* epoch, so resuming
+replays the interrupted one in full. A second `Ctrl+C` while the questions are
+on screen quits immediately, and a run without a terminal attached — a CI job,
+a `nohup`ed script — saves and exits without asking.
+
 ## Sampling
 
 ```bash

@@ -16,6 +16,7 @@ from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
+from tinydiffusion.training.interrupt import interrupt_guard
 from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
 from tinydiffusion.utils.seed import seed_everything
 
@@ -224,15 +225,46 @@ def save_samples(
     save_image(grid, cfg.out_dir / f"sample_{epoch + 1:04d}.png", nrow=min(8, cfg.num_samples))
 
 
+def _save_and_report(
+    cfg: TrainConfig,
+    *,
+    epoch: int,
+    ddpm: DDPM,
+    ema: EMA,
+    optim: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+) -> None:
+    """Checkpoint a cancelled run and tell the user how to pick it up again.
+
+    Args:
+        cfg: run configuration.
+        epoch: index of the last fully completed epoch, or -1 if none.
+        ddpm: the diffusion model.
+        ema: exponential moving average of the network weights.
+        optim: optimiser whose moments should be preserved.
+        scaler: AMP gradient scaler.
+    """
+    path = cfg.ckpt_dir / "last.pt"
+    save_checkpoint(path, epoch=epoch, ddpm=ddpm, ema=ema, optim=optim, scaler=scaler, cfg=cfg)
+    done = max(epoch + 1, 0)
+    print(f"saved {path} ({_epochs(done)} complete)")
+    print(f"resume with: tinydiffusion train --resume {path}")
+
+
 def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> DDPM:
     """Train a DDPM on MNIST.
+
+    Ctrl+C does not tear the run down: it is caught at the next batch boundary
+    and turned into a confirmation prompt, with the option to checkpoint first
+    so ``--resume`` can pick the run up later.
 
     Args:
         cfg: run configuration. Defaults are used when omitted.
         resume: checkpoint to continue from, or None to start fresh.
 
     Returns:
-        The trained model, with EMA weights already swapped in.
+        The trained model, with EMA weights already swapped in. A run cancelled
+        part way through returns the model as it stood at that point.
     """
     cfg = cfg or TrainConfig()
     cfg = replace(cfg, device=resolve_device(cfg.device))
@@ -284,52 +316,84 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
     reference: torch.Tensor | None = None
+    cancelled = False
 
-    for epoch in range(start_epoch, cfg.num_epochs):
-        ddpm.train()
-        loss_ema: float | None = None
+    with interrupt_guard() as interrupts:
+        for epoch in range(start_epoch, cfg.num_epochs):
+            ddpm.train()
+            loss_ema: float | None = None
 
-        with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
-            for x, _ in pbar:
-                x = x.to(cfg.device, non_blocking=True)
-                if reference is None:
-                    reference = x[: cfg.num_samples].detach().cpu()
+            with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
+                for x, _ in pbar:
+                    x = x.to(cfg.device, non_blocking=True)
+                    if reference is None:
+                        reference = x[: cfg.num_samples].detach().cpu()
 
-                optim.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_type, enabled=use_amp):
-                    loss = ddpm(x)
+                    optim.zero_grad(set_to_none=True)
+                    with torch.amp.autocast(device_type, enabled=use_amp):
+                        loss = ddpm(x)
 
-                scaler.scale(loss).backward()
-                if cfg.grad_clip > 0:
-                    # Unscale first, or the clip threshold is applied to scaled grads.
-                    scaler.unscale_(optim)
-                    nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
+                    scaler.scale(loss).backward()
+                    if cfg.grad_clip > 0:
+                        # Unscale first, or the clip threshold is applied to scaled grads.
+                        scaler.unscale_(optim)
+                        nn.utils.clip_grad_norm_(ddpm.parameters(), cfg.grad_clip)
 
-                scale_before = scaler.get_scale()
-                scaler.step(optim)
-                scaler.update()
-                # A shrinking scale means inf/NaN grads and a skipped optimiser
-                # step; folding the unchanged weights in would still burn a step
-                # of the EMA warmup.
-                if scaler.get_scale() >= scale_before:
-                    ema.update(ddpm.eps_model)
+                    scale_before = scaler.get_scale()
+                    scaler.step(optim)
+                    scaler.update()
+                    # A shrinking scale means inf/NaN grads and a skipped optimiser
+                    # step; folding the unchanged weights in would still burn a step
+                    # of the EMA warmup.
+                    if scaler.get_scale() >= scale_before:
+                        ema.update(ddpm.eps_model)
 
-                value = loss.item()
-                loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
-                pbar.set_postfix(loss=f"{loss_ema:.4f}")
+                    value = loss.item()
+                    loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
+                    pbar.set_postfix(loss=f"{loss_ema:.4f}")
 
-        if cfg.sample_every > 0 and (epoch + 1) % cfg.sample_every == 0 and reference is not None:
-            save_samples(ddpm, ema, reference, cfg, epoch)
+                    if interrupts.requested:
+                        # Batch boundary: model, optimiser and EMA all agree, so
+                        # a checkpoint written here resumes cleanly.
+                        with tqdm.external_write_mode():
+                            choice = interrupts.resolve()
+                        if not choice.stop:
+                            continue
+                        if choice.save:
+                            # The last *completed* epoch is the one before this
+                            # partial one, so resuming replays it in full.
+                            _save_and_report(
+                                cfg,
+                                epoch=epoch - 1,
+                                ddpm=ddpm,
+                                ema=ema,
+                                optim=optim,
+                                scaler=scaler,
+                            )
+                        else:
+                            print("cancelled without saving")
+                        cancelled = True
+                        break
 
-        save_checkpoint(
-            cfg.ckpt_dir / "last.pt",
-            epoch=epoch,
-            ddpm=ddpm,
-            ema=ema,
-            optim=optim,
-            scaler=scaler,
-            cfg=cfg,
-        )
+            if cancelled:
+                break
+
+            if (
+                cfg.sample_every > 0
+                and (epoch + 1) % cfg.sample_every == 0
+                and reference is not None
+            ):
+                save_samples(ddpm, ema, reference, cfg, epoch)
+
+            save_checkpoint(
+                cfg.ckpt_dir / "last.pt",
+                epoch=epoch,
+                ddpm=ddpm,
+                ema=ema,
+                optim=optim,
+                scaler=scaler,
+                cfg=cfg,
+            )
 
     # Ship the EMA weights: they are what the sample grids were drawn from.
     ddpm.eps_model.load_state_dict(ema.module.state_dict())
