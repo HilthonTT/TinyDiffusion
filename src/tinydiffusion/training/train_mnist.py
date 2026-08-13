@@ -357,7 +357,11 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                         terms = ddpm.loss_terms(x)
                     loss = terms.loss
 
-                    scaler.scale(loss).backward()
+                    # torch ships `Tensor.backward` unannotated, so now that the
+                    # loss is a real Tensor rather than the Any that
+                    # `nn.Module.__call__` returns, strict mypy calls this an
+                    # untyped call.
+                    scaler.scale(loss).backward()  # type: ignore[no-untyped-call]
                     grad_norm: float | None = None
                     if cfg.grad_clip > 0:
                         # Unscale first, or the clip threshold is applied to scaled grads.
