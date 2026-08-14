@@ -18,7 +18,7 @@ from tinydiffusion.models.blocks import (
     group_norm,
     zero_module,
 )
-from tinydiffusion.models.embeddings import TimeEmbedding
+from tinydiffusion.models.embeddings import LabelEmbedding, TimeEmbedding
 
 # DDPM projects the sinusoidal embedding to 4x the base width before conditioning.
 TIME_EMBED_MULT = 4
@@ -37,10 +37,13 @@ class UNet(nn.Module):
         dropout: dropout inside ResBlocks. DDPM uses 0.1 for CIFAR-10.
         image_size: input resolution, needed to resolve attn_resolutions.
         num_heads: attention heads used by every SelfAttention layer.
+        num_classes: number of classes to condition on, or None for an
+            unconditional model. When set, `forward` takes a label per image.
 
     Raises:
         ValueError: if `image_size` cannot be halved once per level beyond the
-            first and still leave a bottleneck of at least 2x2.
+            first and still leave a bottleneck of at least 2x2, or if
+            `num_classes` is set but not positive.
     """
 
     def __init__(
@@ -54,6 +57,7 @@ class UNet(nn.Module):
         dropout: float = 0.1,
         image_size: int = 32,
         num_heads: int = 4,
+        num_classes: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -71,6 +75,12 @@ class UNet(nn.Module):
 
         time_dim = base_channels * TIME_EMBED_MULT
         self.time_embed = TimeEmbedding(base_channels, time_dim)
+        self.num_classes = num_classes
+        # Summed into the time embedding, so the class rides the FiLM path the
+        # ResBlocks already have and the rest of the architecture is untouched.
+        self.label_embed = (
+            LabelEmbedding(num_classes, time_dim) if num_classes is not None else None
+        )
         self.init_conv = nn.Conv2d(in_channels, base_channels, 3, padding=1)
 
         # the encoder
@@ -125,17 +135,35 @@ class UNet(nn.Module):
             zero_module(nn.Conv2d(channels, out_channels, 3, padding=1)),
         )
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Predict the noise in `x`.
 
         Args:
             x: (B, C, H, W) noisy image.
             t: (B,) integer timesteps.
+            y: (B,) integer class labels, where `num_classes` is the null
+                token. Omitted on an unconditional model; omitting it on a
+                conditional one predicts unconditionally, as if every label
+                were null.
 
         Returns:
             (B, out_channels, H, W) noise prediction.
+
+        Raises:
+            ValueError: if labels are passed to an unconditional model.
         """
         time_emb = self.time_embed(t)
+
+        if self.label_embed is not None:
+            if y is None:
+                y = torch.full(
+                    (x.shape[0],), self.label_embed.null_class, device=x.device, dtype=torch.long
+                )
+            time_emb = time_emb + self.label_embed(y)
+        elif y is not None:
+            raise ValueError("this UNet was built without num_classes, so it takes no labels")
 
         h = self.init_conv(x)
         skips = [h]

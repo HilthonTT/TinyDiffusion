@@ -194,7 +194,9 @@ Then the real run:
 
 Each epoch writes a `sample_XXXX.png` grid to `out_dir` — generated digits
 above a strip of real ones, so contrast and stroke weight are directly
-comparable — and a resumable `last.pt` to `ckpt_dir`. The checkpoint holds the
+comparable — and a resumable `last.pt` to `ckpt_dir`. A conditional run
+generates on the real strip's own labels, so the comparison is per class: a
+generated 4 sits directly above a real 4. The checkpoint holds the
 model, EMA shadow weights, optimiser moments, AMP scaler state, and the config,
 so a resumed run continues rather than restarts:
 
@@ -304,6 +306,8 @@ be turned on for one run without editing the TOML.
 | `--num-images` | 8 | How many images to generate |
 | `--steps` | the checkpoint's `sample_steps` | DDIM steps; fewer is faster, coarser |
 | `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM |
+| `--labels` | one image per class | Classes to generate, e.g. `7` or `0,1,2` |
+| `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
 | `--out` | `contents/samples.png` | Where to write the grid |
 | `--seed` | 0 | Seed applied before sampling |
 | `--device` | auto | `cuda`, `cpu`, `cuda:1`, … |
@@ -312,6 +316,29 @@ Checkpoints embed the config they were trained with, so this reconstructs the
 architecture from the `.pt` alone — the TOML that produced it is not needed.
 Sampling always uses the EMA weights, which is what the training grids are
 drawn from.
+
+### Asking for a particular digit
+
+`configs/mnist.toml` trains class-conditionally, so the checkpoint knows which
+digit is which:
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
+./run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
+```
+
+`--labels` takes a comma-separated list, repeated in order until the grid is
+full: `7` fills it with sevens, `0,1,2` cycles the three. Leaving it out gives
+one image per class, laid out one class per column.
+
+`--guidance` is the classifier-free guidance scale. At 1.0 you get the plain
+conditional prediction. Above that, each step extrapolates away from the
+model's unconditional prediction — digits get cleaner and more emphatically
+class-typical, variety drops, and every step costs a second forward pass. 2–4
+is the useful range on MNIST; past about 6 strokes start to blow out.
+
+Both flags are errors against an unconditional checkpoint, which has no class
+space to name.
 
 ## Evaluating a checkpoint
 
@@ -340,6 +367,10 @@ noisy to compare two checkpoints with. This pins the timesteps to a fixed grid
 and reseeds before every batch, so the only thing that varies between two runs
 is the weights — run it twice on the same checkpoint and you get the same
 number to the last digit.
+
+A conditional checkpoint is scored on the true labels, and never with
+guidance: the objective it was trained on is the conditional prediction, so
+scoring anything else would measure something the run never optimised.
 
 Read the per-timestep column as well as the headline. Loss is always highest at
 `t = 0`, where `x_t` is nearly clean and there is almost no noise left to
@@ -408,6 +439,35 @@ this way is not interchangeable with a baseline one. Bad combinations — a
 learned variance under plain `mse`, which would leave the variance head
 untrained — are rejected when the config is read.
 
+### Class conditioning
+
+`num_classes` opts into class-conditional training. It is off by default, and
+on in both shipped configs — the one place they depart from the defaults:
+
+```toml
+[conditioning]
+num_classes = 10      # MNIST's digits
+class_dropout = 0.1   # labels replaced by the null token during training
+guidance = 2.0        # scale used at sample time
+```
+
+The three work together. `num_classes` gives the U-Net a class embedding,
+summed into the timestep embedding. That embedding table holds one extra row —
+the null token, meaning "no class given" — and `class_dropout` is what trains
+it: 10% of training labels are replaced by it, so the one network learns both a
+conditional and an unconditional prediction. `guidance` then extrapolates
+between them at sample time, and needs the other two to mean anything;
+combinations that cannot work, such as `guidance` above 1 with
+`class_dropout = 0`, are rejected when the config is read.
+
+The label costs almost nothing: one embedding row per class, and the sample
+grids become class-matched — each generated digit sits directly above a real
+one of the same class instead of above an unrelated digit.
+
+Conditional and unconditional checkpoints are not interchangeable, since the
+state dict differs. Turning conditioning on part way through a run means
+starting it over, not `--resume`.
+
 | Field | Default | Notes |
 | --- | --- | --- |
 | `data_root` | `data` | MNIST is downloaded here on first use |
@@ -419,6 +479,9 @@ untrained — are rejected when the config is read.
 | `num_res_blocks` | 2 | Residual blocks per level |
 | `attn_resolutions` | `[16]` | Spatial sizes that get self-attention |
 | `dropout` | 0.1 | Inside ResBlocks |
+| `num_classes` | unset | Classes to condition on; 10 for MNIST |
+| `class_dropout` | 0.1 | Labels replaced by the null token in training |
+| `guidance` | 1.0 | Guidance scale; 1.0 is plain conditional |
 | `num_timesteps` | 1000 | Length of the diffusion schedule |
 | `schedule` | `cosine` | `cosine` or `linear` |
 | `beta_start` / `beta_end` | 1e-4 / 0.02 | Linear schedule only |
@@ -443,7 +506,8 @@ untrained — are rejected when the config is read.
 | `log_jsonl` | `true` | Append `metrics.jsonl` |
 | `tensorboard` | `false` | TensorBoard events; needs the `tracking` extra |
 
-`configs/mnist.toml` lists every field with its default;
+`configs/mnist.toml` lists every field with its default, `[conditioning]`
+aside;
 `TrainConfig` in `src/tinydiffusion/training/config.py` is the source of truth.
 
 ## Troubleshooting

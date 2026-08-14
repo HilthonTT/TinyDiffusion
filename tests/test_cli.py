@@ -56,6 +56,28 @@ def test_sample_defaults():
     assert args.num_images == 8
     assert args.eta == 0.0
     assert args.steps is None
+    # Unset, so the checkpoint's own conditioning settings decide.
+    assert args.labels is None
+    assert args.guidance is None
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"), [("3", [3]), ("0,1,2", [0, 1, 2]), ("7, 7", [7, 7])]
+)
+def test_sample_parses_labels(given, expected):
+    args = build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--labels", given])
+    assert args.labels == expected
+
+
+@pytest.mark.parametrize("given", ["", "one", "1,,x"])
+def test_sample_rejects_labels_that_are_not_whole_numbers(given):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--labels", given])
+
+
+def test_sample_parses_the_guidance_scale():
+    args = build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--guidance", "2.5"])
+    assert args.guidance == 2.5
 
 
 def test_main_reports_a_missing_config(capsys, tmp_path):

@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -23,25 +25,41 @@ TINY = TrainConfig(
 )
 
 
+CONDITIONAL = dataclasses.replace(TINY, num_classes=4, guidance=2.0)
+
+
 @pytest.fixture
-def checkpoint(tmp_path, monkeypatch):
-    """A real checkpoint over a tiny model, plus a stand-in for MNIST."""
-    diffusion = build_model(TINY)
-    ema = EMA(diffusion.net, decay=0.9, warmup=0)
-    optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
-    scaler = torch.amp.GradScaler("cpu", enabled=False)
-    path = tmp_path / "last.pt"
-    save_checkpoint(
-        path, epoch=0, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, cfg=TINY
-    )
+def make_checkpoint(tmp_path, monkeypatch, wake):
+    """Write a real checkpoint over a tiny model, and stand in for MNIST."""
 
-    def fake_loader(*args, **kwargs):
-        images = torch.randn(6, 1, TINY.image_size, TINY.image_size).clamp(-1, 1)
-        labels = torch.zeros(6, dtype=torch.long)
-        return DataLoader(TensorDataset(images, labels), batch_size=3)
+    def build(cfg=TINY, labels=None, trained=False):
+        diffusion = build_model(cfg)
+        if trained:
+            # Stand in for training: an all-zero output conv makes the loss
+            # independent of everything, conditioning included.
+            wake(diffusion.net)
+        ema = EMA(diffusion.net, decay=0.9, warmup=0)
+        optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
+        scaler = torch.amp.GradScaler("cpu", enabled=False)
+        path = tmp_path / "last.pt"
+        save_checkpoint(
+            path, epoch=0, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, cfg=cfg
+        )
 
-    monkeypatch.setattr(evaluation, "mnist_dataloader", fake_loader)
-    return path
+        def fake_loader(*args, **kwargs):
+            images = torch.randn(6, 1, cfg.image_size, cfg.image_size).clamp(-1, 1)
+            y = torch.zeros(6, dtype=torch.long) if labels is None else labels
+            return DataLoader(TensorDataset(images, y), batch_size=3)
+
+        monkeypatch.setattr(evaluation, "mnist_dataloader", fake_loader)
+        return path
+
+    return build
+
+
+@pytest.fixture
+def checkpoint(make_checkpoint):
+    return make_checkpoint()
 
 
 def test_eval_timesteps_span_the_schedule():
@@ -97,6 +115,19 @@ def test_format_reports_the_headline_and_table(checkpoint):
     assert "6 images" in text
     assert "ema weights" in text
     assert text.count("\n") >= 5
+
+
+def test_a_conditional_checkpoint_is_scored_on_its_labels(make_checkpoint):
+    # The label reaches the network, so scoring the same images under
+    # different labels has to give a different loss. Were the labels dropped
+    # on the floor, the two would be identical.
+    ones = make_checkpoint(CONDITIONAL, labels=torch.ones(6, dtype=torch.long), trained=True)
+    with_ones = evaluation.evaluate_checkpoint(ones, num_steps=2, progress=False)
+
+    twos = make_checkpoint(CONDITIONAL, labels=torch.full((6,), 2, dtype=torch.long), trained=True)
+    with_twos = evaluation.evaluate_checkpoint(twos, num_steps=2, progress=False)
+
+    assert with_ones.loss != with_twos.loss
 
 
 def test_default_step_count_is_sane():

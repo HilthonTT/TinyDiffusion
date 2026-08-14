@@ -20,6 +20,7 @@ from tinydiffusion.diffusion.gaussian_diffusion import (
     ModelMeanType,
     ModelVarType,
 )
+from tinydiffusion.diffusion.guidance import Conditioned, conditioned, drop_labels
 from tinydiffusion.diffusion.schedules import cosine_beta_schedule, linear_beta_schedule
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.config import TrainConfig
@@ -74,6 +75,8 @@ def build_model(cfg: TrainConfig) -> Diffusion:
     :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion` for
     anything else. A learned variance also doubles the network's output
     channels, since it emits the variance parameters alongside the mean.
+    ``num_classes`` gives the U-Net a label embedding; the process itself is
+    unchanged, since conditioning is carried by the network alone.
 
     Args:
         cfg: run configuration.
@@ -91,6 +94,7 @@ def build_model(cfg: TrainConfig) -> Diffusion:
         attn_resolutions=cfg.attn_resolutions,
         dropout=cfg.dropout,
         image_size=cfg.image_size,
+        num_classes=cfg.num_classes,
     )
     if cfg.schedule == "cosine":
         betas = cosine_beta_schedule(cfg.num_timesteps)
@@ -237,12 +241,17 @@ def save_samples(
     real: torch.Tensor,
     cfg: TrainConfig,
     epoch: int,
+    labels: torch.Tensor | None = None,
 ) -> None:
     """Render a grid of EMA samples above a strip of real images.
 
     Putting real data in the same grid makes contrast and stroke weight
     directly comparable, which is what tells you whether the model has
     learned the data distribution or merely something digit-shaped.
+
+    A conditional run generates on the *real* strip's own labels, so the two
+    halves line up column by column and the comparison becomes per class: a
+    generated 4 sits directly above a real 4.
 
     Args:
         diffusion: the diffusion model, used for its schedule.
@@ -251,8 +260,15 @@ def save_samples(
         cfg: run configuration.
         epoch: zero-based epoch index. The filename is one-based, matching the
             progress bar.
+        labels: the real strip's class labels, or None when unconditional.
     """
     shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
+    if labels is not None:
+        # A batch smaller than num_samples leaves the strip short; repeat it so
+        # there is a label per generated image either way.
+        index = torch.arange(cfg.num_samples) % labels.shape[0]
+        labels = labels[index].to(cfg.device)
+
     fake = ddim_sample(
         diffusion,
         cfg.num_samples,
@@ -260,7 +276,7 @@ def save_samples(
         cfg.device,
         num_steps=cfg.sample_steps,
         eta=0.0,
-        model=ema.module,
+        model=conditioned(ema.module, labels, num_classes=cfg.num_classes, scale=cfg.guidance),
     )
     reference = real[: cfg.num_samples].to(cfg.device)
     grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
@@ -354,15 +370,21 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     else:
         # A checkpoint past num_epochs would otherwise render as "epochs 4-2".
         plan = f"nothing to run (checkpoint is at {_epochs(start_epoch)})"
+    conditioning = (
+        f"{cfg.num_classes} classes, {cfg.class_dropout:g} label dropout"
+        if cfg.num_classes is not None
+        else "unconditional"
+    )
     print(
         f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | "
-        f"amp {use_amp} | {plan} | {len(loader)} steps/epoch"
+        f"amp {use_amp} | {conditioning} | {plan} | {len(loader)} steps/epoch"
     )
     if remaining <= 0:
         print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
 
     # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
     reference: torch.Tensor | None = None
+    reference_labels: torch.Tensor | None = None
     cancelled = False
 
     logger = RunLogger.for_run(
@@ -380,14 +402,29 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
             images = 0
 
             with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
-                for batch, (x, _) in enumerate(pbar):
+                for batch, (x, y) in enumerate(pbar):
                     x = x.to(cfg.device, non_blocking=True)
                     if reference is None:
                         reference = x[: cfg.num_samples].detach().cpu()
+                        if cfg.num_classes is not None:
+                            reference_labels = y[: cfg.num_samples].detach().cpu()
+
+                    model: nn.Module | None = None
+                    if cfg.num_classes is not None:
+                        # Dropping a fraction of the labels to the null token is
+                        # the only thing training does differently: it is what
+                        # teaches the one network the unconditional prediction
+                        # that guidance extrapolates away from at sample time.
+                        labels = drop_labels(
+                            y.to(cfg.device, non_blocking=True),
+                            cfg.num_classes,
+                            cfg.class_dropout,
+                        )
+                        model = Conditioned(diffusion.net, labels)
 
                     optim.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type, enabled=use_amp):
-                        terms = diffusion.loss_terms(x)
+                        terms = diffusion.loss_terms(x, model=model)
                     loss = terms.loss
 
                     # torch ships `Tensor.backward` unannotated, so now that the
@@ -477,7 +514,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                 and (epoch + 1) % cfg.sample_every == 0
                 and reference is not None
             ):
-                save_samples(diffusion, ema, reference, cfg, epoch)
+                save_samples(diffusion, ema, reference, cfg, epoch, labels=reference_labels)
 
             save_checkpoint(
                 cfg.ckpt_dir / "last.pt",

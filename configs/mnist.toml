@@ -1,9 +1,10 @@
 # Training config for `tinydiffusion train --config configs/mnist.toml`.
 #
 # These values are the TrainConfig defaults, written out so a run is
-# reproducible from the file alone. Tables are grouping only: every key is
-# flattened into TrainConfig, so a key must name a real field and may appear
-# in exactly one table.
+# reproducible from the file alone — the one exception is [conditioning],
+# which defaults to off and is turned on here. Tables are grouping only: every
+# key is flattened into TrainConfig, so a key must name a real field and may
+# appear in exactly one table.
 
 [data]
 data_root = "data"
@@ -17,6 +18,19 @@ channel_mult = [1, 2, 2]
 num_res_blocks = 2
 attn_resolutions = [16]
 dropout = 0.1
+
+# Class-conditional training on the ten digits. class_dropout is the fraction
+# of labels replaced by the null token, which is what gives the network an
+# unconditional prediction for guidance to extrapolate away from; without it
+# there is nothing to guide against. guidance applies at sample time only —
+# 1.0 is the plain conditional prediction, and higher trades diversity for
+# cleaner digits at the cost of a second forward pass per step.
+# Comment the whole table out to train unconditionally; TOML has no null, so
+# there is no value of num_classes that means "off".
+[conditioning]
+num_classes = 10
+class_dropout = 0.1
+guidance = 2.0
 
 [diffusion]
 num_timesteps = 1000

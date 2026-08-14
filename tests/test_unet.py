@@ -4,7 +4,7 @@ import torch
 from tinydiffusion.models.unet import UNet
 
 
-def build(image_size: int, channel_mult: tuple[int, ...]) -> UNet:
+def build(image_size: int, channel_mult: tuple[int, ...], num_classes: int | None = None) -> UNet:
     return UNet(
         in_channels=1,
         out_channels=1,
@@ -15,6 +15,7 @@ def build(image_size: int, channel_mult: tuple[int, ...]) -> UNet:
         dropout=0.0,
         image_size=image_size,
         num_heads=2,
+        num_classes=num_classes,
     )
 
 
@@ -46,6 +47,35 @@ def test_attention_is_placed_at_the_requested_resolution():
     )
     x = torch.randn(1, 1, 16, 16)
     assert net(x, torch.tensor([3])).shape == x.shape
+
+
+def test_labels_change_the_prediction(wake):
+    net = wake(build(16, (1, 2), num_classes=4))
+    x = torch.randn(1, 1, 16, 16)
+    t = torch.tensor([3])
+
+    assert not torch.allclose(net(x, t, torch.tensor([0])), net(x, t, torch.tensor([1])))
+
+
+def test_an_omitted_label_means_the_null_token(wake):
+    net = wake(build(16, (1, 2), num_classes=4))
+    x = torch.randn(1, 1, 16, 16)
+    t = torch.tensor([3])
+
+    # Index num_classes is the reserved null row: leaving y out must be the
+    # same call, since that is what an unguided unconditional pass relies on.
+    assert torch.equal(net(x, t), net(x, t, torch.tensor([4])))
+
+
+def test_an_unconditional_net_rejects_labels():
+    net = build(16, (1, 2))
+    with pytest.raises(ValueError, match="no labels"):
+        net(torch.randn(1, 1, 16, 16), torch.tensor([0]), torch.tensor([1]))
+
+
+def test_a_class_count_of_zero_is_rejected():
+    with pytest.raises(ValueError, match="num_classes"):
+        build(16, (1, 2), num_classes=0)
 
 
 def test_the_output_layer_starts_at_zero():

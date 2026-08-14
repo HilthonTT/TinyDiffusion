@@ -1,12 +1,15 @@
 """Generate images from a trained checkpoint."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
+import torch
 from torchvision.utils import save_image
 
 from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
+from tinydiffusion.diffusion.guidance import conditioned, cycled_labels
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.train_mnist import build_model, read_checkpoint, restore_checkpoint
@@ -47,6 +50,52 @@ def load_for_sampling(
     return diffusion, ema, cfg
 
 
+def resolve_labels(
+    labels: Sequence[int] | None,
+    *,
+    num_images: int,
+    num_classes: int | None,
+    device: torch.device | str,
+) -> torch.Tensor | None:
+    """Turn the requested classes into one label per image.
+
+    Args:
+        labels: the classes asked for, repeated in order until every image has
+            one — so ``[3]`` fills the grid with 3s and ``[0, 1]`` alternates.
+            None asks for the default, which is one image per class, cycling.
+        num_images: how many images will be generated.
+        num_classes: the checkpoint's class count, or None if it is
+            unconditional.
+        device: device to build the tensor on.
+
+    Returns:
+        A ``(num_images,)`` long tensor, or None for an unconditional model.
+
+    Raises:
+        ValueError: if labels are asked of an unconditional checkpoint, the
+            sequence is empty, or a label names no class.
+    """
+    if num_classes is None:
+        if labels is not None:
+            raise ValueError("this checkpoint is unconditional, so it cannot be given labels")
+        return None
+
+    if labels is None:
+        return cycled_labels(num_images, num_classes, device)
+    if not labels:
+        raise ValueError("no labels given")
+
+    out_of_range = sorted({label for label in labels if not 0 <= label < num_classes})
+    if out_of_range:
+        raise ValueError(
+            f"label(s) {', '.join(map(str, out_of_range))} outside "
+            f"[0, {num_classes - 1}] for this checkpoint"
+        )
+
+    asked = torch.tensor(labels, dtype=torch.long, device=device)
+    return asked[torch.arange(num_images, device=device) % asked.shape[0]]
+
+
 def sample_from_checkpoint(
     checkpoint: Path,
     out: Path,
@@ -54,6 +103,8 @@ def sample_from_checkpoint(
     num_images: int = 8,
     num_steps: int | None = None,
     eta: float = 0.0,
+    labels: Sequence[int] | None = None,
+    guidance: float | None = None,
     seed: int | None = None,
     device: str | None = None,
 ) -> Path:
@@ -65,6 +116,11 @@ def sample_from_checkpoint(
         num_images: how many images to generate.
         num_steps: DDIM steps. Defaults to the checkpoint's ``sample_steps``.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces DDPM ancestral sampling.
+        labels: classes to generate, cycled over the grid. Conditional
+            checkpoints only; see :func:`resolve_labels` for the default.
+        guidance: classifier-free guidance scale, or None to use the
+            checkpoint's. 1.0 is the plain conditional prediction; higher
+            sharpens class identity and costs a second forward pass per step.
         seed: seed applied before sampling, or None to leave the RNG alone.
         device: device to sample on. Defaults to CUDA when available.
 
@@ -72,7 +128,8 @@ def sample_from_checkpoint(
         The path that was written.
 
     Raises:
-        ValueError: if ``num_images`` is not positive.
+        ValueError: if ``num_images`` is not positive, or the conditioning
+            arguments do not match the checkpoint.
     """
     if num_images < 1:
         raise ValueError(f"num_images must be positive, got {num_images}")
@@ -80,6 +137,14 @@ def sample_from_checkpoint(
         seed_everything(seed)
 
     diffusion, ema, cfg = load_for_sampling(checkpoint, device)
+    if guidance is not None and cfg.num_classes is None and guidance != 1.0:
+        raise ValueError("this checkpoint is unconditional, so guidance does not apply")
+
+    y = resolve_labels(
+        labels, num_images=num_images, num_classes=cfg.num_classes, device=cfg.device
+    )
+    scale = cfg.guidance if guidance is None else guidance
+
     images = ddim_sample(
         diffusion,
         num_images,
@@ -87,9 +152,29 @@ def sample_from_checkpoint(
         cfg.device,
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=eta,
-        model=ema.module,
+        model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale),
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_image(denormalize(images), out, nrow=min(8, num_images))
+    save_image(denormalize(images), out, nrow=_grid_width(num_images, cfg.num_classes, labels))
     return out
+
+
+def _grid_width(num_images: int, num_classes: int | None, labels: Sequence[int] | None) -> int:
+    """Images per row in the saved grid.
+
+    A default conditional grid cycles the classes, so laying it out one class
+    per column makes the rows repeats of the same label sequence and the
+    columns directly comparable. Everything else keeps the usual eight.
+
+    Args:
+        num_images: how many images the grid holds.
+        num_classes: the checkpoint's class count, or None if unconditional.
+        labels: the classes the caller asked for, if any.
+
+    Returns:
+        A positive row width.
+    """
+    if labels is None and num_classes is not None and num_classes <= 16:
+        return min(num_classes, num_images)
+    return min(8, num_images)

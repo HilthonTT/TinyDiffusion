@@ -32,6 +32,12 @@ class TrainConfig:
     :class:`~tinydiffusion.diffusion.ddpm.DDPM` implements, and that is what
     gets built; any other combination is served by
     :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion`.
+
+    ``num_classes`` opts into class-conditional training — 10 for MNIST's
+    digits. ``class_dropout`` is the fraction of training labels replaced by
+    the null token, which is what gives the same network an unconditional
+    prediction for ``guidance`` to extrapolate from; see
+    :mod:`~tinydiffusion.diffusion.guidance`.
     """
 
     # data
@@ -46,6 +52,11 @@ class TrainConfig:
     num_res_blocks: int = 2
     attn_resolutions: tuple[int, ...] = (16,)
     dropout: float = 0.1
+
+    # conditioning
+    num_classes: int | None = None
+    class_dropout: float = 0.1
+    guidance: float = 1.0
 
     # diffusion
     num_timesteps: int = 1000
@@ -83,8 +94,9 @@ class TrainConfig:
         """Reject configurations that would only fail an epoch into the run.
 
         Raises:
-            ValueError: if the schedule is unknown or the sampling step count
-                cannot index the training schedule.
+            ValueError: if the schedule is unknown, the sampling step count
+                cannot index the training schedule, or the conditioning
+                settings do not describe a trainable model.
         """
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
@@ -94,7 +106,35 @@ class TrainConfig:
             )
         if self.num_samples < 1:
             raise ValueError(f"num_samples must be positive, got {self.num_samples}")
+        self._check_conditioning()
         self.diffusion_types()
+
+    def _check_conditioning(self) -> None:
+        """Reject conditioning settings that cannot produce what they promise.
+
+        Raises:
+            ValueError: if the class count is not positive, the dropout rate
+                is out of range, or guidance is asked for from a model that
+                will not learn the unconditional prediction it needs.
+        """
+        if self.num_classes is not None and self.num_classes < 1:
+            raise ValueError(f"num_classes must be positive when set, got {self.num_classes}")
+        if not 0.0 <= self.class_dropout < 1.0:
+            raise ValueError(f"class_dropout must lie in [0, 1), got {self.class_dropout}")
+        if self.guidance < 0.0:
+            raise ValueError(f"guidance must not be negative, got {self.guidance}")
+        if self.guidance != 1.0 and self.num_classes is None:
+            raise ValueError(
+                f"guidance={self.guidance} needs a conditional model; set num_classes "
+                "(10 for MNIST) or leave guidance at 1.0"
+            )
+        if self.guidance != 1.0 and self.class_dropout == 0.0:
+            # The null embedding would never be trained, so extrapolating away
+            # from it produces noise rather than a sharper digit.
+            raise ValueError(
+                "guidance needs class_dropout > 0 so the null token gets trained; "
+                "use class_dropout=0.1, or guidance=1.0 for plain conditional sampling"
+            )
 
     def diffusion_types(self) -> tuple[ModelMeanType, ModelVarType, LossType]:
         """Resolve the three parameterisation fields to their enums.

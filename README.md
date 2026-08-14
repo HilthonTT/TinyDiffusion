@@ -6,7 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A PyTorch implementation of a diffusion model for image generation: a DDPM
-U-Net trained on MNIST, sampled with DDIM.
+U-Net trained on MNIST, sampled with DDIM, and conditioned on the digit class
+with classifier-free guidance — so you can ask it for a 7.
 
 ![Generated digits after six epochs](docs/sample-epoch-6.png)
 
@@ -51,6 +52,19 @@ held-out test split:
 ./run.sh eval   --checkpoint checkpoints/last.pt
 ```
 
+`configs/mnist.toml` trains conditionally on the ten digits, so `sample` can be
+asked for a particular one — and for how hard to insist on it:
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
+./run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
+```
+
+With no `--labels` the grid holds one image per digit. `--guidance` is the
+classifier-free guidance scale: 1.0 is the plain conditional prediction, and
+higher values trade variety for cleaner, more emphatically class-typical
+digits at the cost of a second forward pass per step.
+
 **Using a GPU:** it is automatic when a CUDA-capable torch is installed, and
 falls back to the CPU when not. On Windows the default wheel is CPU-only, so
 getting the GPU takes one extra install step. See
@@ -78,6 +92,12 @@ sizes, and troubleshooting.
   comes from, and what is optimised — explicit, and adds the variational bound
   they are measured against. Set `variance` and `objective` in the config to
   train Nichol & Dhariwal's improved DDPM with a learned variance.
+- **Conditioning** — `models/embeddings.py` adds a class embedding, summed into
+  the timestep embedding so the label rides the FiLM path the ResBlocks already
+  have. `diffusion/guidance.py` reserves one embedding row as a null token,
+  trains it by dropping a fraction of the labels, and extrapolates away from it
+  at sample time — classifier-free guidance, as a wrapper round the network
+  rather than a change to any sampler.
 - **Sampling** — `diffusion/ddim.py` runs the reverse chain over a subsequence
   of timesteps, so 50 steps stand in for 1000. `eta` interpolates between
   deterministic DDIM and ancestral DDPM.

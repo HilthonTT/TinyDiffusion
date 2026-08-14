@@ -19,6 +19,11 @@ num_res_blocks = 1
 attn_resolutions = []
 dropout = 0.1
 
+[conditioning]
+num_classes = 10   # exercises the conditional path; the digits will not be good
+class_dropout = 0.1
+guidance = 2.0
+
 [diffusion]
 num_timesteps = 200
 schedule = "cosine"

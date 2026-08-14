@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion
+from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training import train_mnist as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.utils.tracking import METRICS_FILENAME
@@ -38,7 +39,9 @@ def tiny_cfg(tmp_path) -> TrainConfig:
 @pytest.fixture
 def fake_loader(monkeypatch):
     """Two batches of noise, standing in for the MNIST dataloader."""
-    batches = [(torch.randn(4, 1, 16, 16), torch.zeros(4, dtype=torch.long)) for _ in range(2)]
+    batches = [
+        (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(2)
+    ]
     monkeypatch.setattr(train_module, "mnist_dataloader", lambda *a, **k: batches)
 
 
@@ -91,6 +94,42 @@ def test_a_console_table_is_printed_each_epoch(tiny_cfg, fake_loader, capsys):
     assert "train/loss" in out
     headers = [line.split("|")[1].strip() for line in out.splitlines() if line.startswith("| step")]
     assert headers == [f"step {epoch}" for epoch in range(tiny_cfg.num_epochs)]
+
+
+def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
+    """The whole loop with a label embedding and a guided sample grid."""
+    cfg = dataclasses.replace(
+        tiny_cfg, num_classes=10, class_dropout=0.1, guidance=2.0, sample_every=1
+    )
+    diffusion = train_module.train_mnist(cfg)
+
+    assert diffusion.net.num_classes == 10
+    # The reserved null row is what guidance extrapolates from, so the table
+    # has to be one wider than the class count.
+    assert diffusion.net.label_embed.embed.num_embeddings == 11
+    assert _records(cfg)[0]["train/loss"] > 0
+    assert (cfg.out_dir / "sample_0002.png").exists()
+
+
+def test_a_conditional_run_reports_its_classes(tiny_cfg, fake_loader, capsys):
+    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_classes=10))
+    assert "10 classes, 0.1 label dropout" in capsys.readouterr().out
+
+
+def test_an_unconditional_run_says_so(tiny_cfg, fake_loader, capsys):
+    train_module.train_mnist(tiny_cfg)
+    assert "unconditional" in capsys.readouterr().out
+
+
+def test_a_conditional_checkpoint_reloads(tiny_cfg, fake_loader, tmp_path):
+    # The label embedding is part of the state dict, so a conditional run has
+    # to round-trip through save/load or --resume breaks.
+    cfg = dataclasses.replace(tiny_cfg, num_classes=10)
+    train_module.train_mnist(cfg)
+
+    diffusion, _, restored = load_for_sampling(cfg.ckpt_dir / "last.pt", "cpu")
+    assert restored.num_classes == 10
+    assert diffusion.net.num_classes == 10
 
 
 def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):

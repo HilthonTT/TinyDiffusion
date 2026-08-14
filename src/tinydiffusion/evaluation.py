@@ -7,6 +7,7 @@ import torch
 from tqdm import tqdm
 
 from tinydiffusion.data.mnist import mnist_dataloader
+from tinydiffusion.diffusion.guidance import Conditioned
 from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.utils.modules import eval_mode
 from tinydiffusion.utils.seed import seed_everything
@@ -141,14 +142,23 @@ def evaluate_checkpoint(
 
     with eval_mode(net):
         batches = tqdm(loader, desc=f"eval {split}", disable=not progress)
-        for x, _ in batches:
+        for x, y in batches:
             x = x.to(cfg.device, non_blocking=True)
+            # A conditional model is scored on the true labels, and never with
+            # guidance: the objective it was trained on is the conditional
+            # prediction, and scoring it against a null or extrapolated one
+            # would measure something the run never optimised.
+            scored = (
+                Conditioned(net, y.to(cfg.device, non_blocking=True))
+                if cfg.num_classes is not None
+                else net
+            )
             # Reseed per batch so the noise depends only on position in the
             # split, never on batch count or how many timesteps were scored.
             seed_everything(seed)
             for i, step in enumerate(steps):
                 t = step.expand(x.shape[0])
-                totals[i] += diffusion.loss_at(x, t, model=net).double() * x.shape[0]
+                totals[i] += diffusion.loss_at(x, t, model=scored).double() * x.shape[0]
             num_images += x.shape[0]
 
     per_step = (totals / max(num_images, 1)).tolist()

@@ -12,6 +12,27 @@ from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train_mnist import train_mnist
 
 
+def class_labels(value: str) -> list[int]:
+    """Parse a comma-separated list of class labels.
+
+    Args:
+        value: the raw ``--labels`` argument, e.g. ``"0,1,2"``.
+
+    Returns:
+        The labels, in the order given.
+
+    Raises:
+        argparse.ArgumentTypeError: if the list is empty or holds a non-integer.
+    """
+    try:
+        labels = [int(part) for part in value.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"labels must be whole numbers: {exc}") from exc
+    if not labels:
+        raise argparse.ArgumentTypeError("no labels given")
+    return labels
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -71,6 +92,18 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
     sample.add_argument("--steps", type=int, help="DDIM steps. Defaults to the checkpoint's.")
     sample.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
+    sample.add_argument(
+        "--labels",
+        type=class_labels,
+        help="Comma-separated classes to generate, cycled over the grid, e.g. '3' or '0,1,2'. "
+        "Conditional checkpoints only; the default is one image per class.",
+    )
+    sample.add_argument(
+        "--guidance",
+        type=float,
+        help="Classifier-free guidance scale. 1.0 is the plain conditional prediction; "
+        "higher sharpens class identity. Defaults to the checkpoint's.",
+    )
     sample.add_argument("--out", type=Path, default=Path("contents/samples.png"), help="Output.")
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
@@ -118,6 +151,8 @@ def _sample(args: argparse.Namespace) -> int:
         num_images=args.num_images,
         num_steps=args.steps,
         eta=args.eta,
+        labels=args.labels,
+        guidance=args.guidance,
         seed=args.seed,
         device=args.device,
     )

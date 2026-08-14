@@ -99,18 +99,19 @@ class DDPM(nn.Module):
         """
         return self.eps_model
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, model: nn.Module | None = None) -> torch.Tensor:
         """Sample t and eps, build x_t, and score the network's noise estimate.
 
         Args:
             x: (B, C, H, W) clean images in [-1, 1].
+            model: network to score. Defaults to the wrapped model.
 
         Returns:
             Scalar training loss.
         """
-        return self.loss_terms(x).loss
+        return self.loss_terms(x, model=model).loss
 
-    def loss_terms(self, x: torch.Tensor) -> LossTerms:
+    def loss_terms(self, x: torch.Tensor, model: nn.Module | None = None) -> LossTerms:
         """Take one training step's loss, keeping the per-image breakdown.
 
         Identical to :meth:`forward` in what it optimises — the scalar still
@@ -121,14 +122,18 @@ class DDPM(nn.Module):
 
         Args:
             x: (B, C, H, W) clean images in [-1, 1].
+            model: network to score. Defaults to the wrapped model; pass a
+                :class:`~tinydiffusion.diffusion.guidance.Conditioned` wrapper
+                to train on class labels.
 
         Returns:
             The scalar loss, the per-image loss, and the sampled timesteps.
         """
+        net = model if model is not None else self.eps_model
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=x.device)
         eps = torch.randn_like(x)
         x_t = self._extract(self.sqrtab, t, x) * x + self._extract(self.sqrtmab, t, x) * eps
-        pred = self.eps_model(x_t, t)
+        pred = net(x_t, t)
         per_sample = (pred.detach() - eps).square().flatten(1).mean(dim=1)
         return LossTerms(loss=self.criterion(pred, eps), per_sample=per_sample, timesteps=t)
 
