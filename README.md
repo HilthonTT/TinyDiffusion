@@ -52,6 +52,13 @@ held-out test split:
 ./run.sh eval   --checkpoint checkpoints/last.pt
 ```
 
+`fid` goes further and measures sample *quality*, by comparing generated images
+with real ones in Inception-v3 feature space:
+
+```bash
+./run.sh fid --checkpoint checkpoints/last.pt --num-images 10000
+```
+
 `configs/mnist.toml` trains conditionally on the ten digits, so `sample` can be
 asked for a particular one — and for how hard to insist on it:
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tinydiffusion import __version__
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
+from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.sampling import sample_from_checkpoint
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train_mnist import train_mnist
@@ -87,6 +88,37 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed", type=int, default=0, help="Random seed.")
     evaluate.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
 
+    fid = subparsers.add_parser("fid", help="Score a checkpoint's samples against real data.")
+    fid.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
+    fid.add_argument(
+        "--num-images",
+        type=int,
+        default=DEFAULT_FID_IMAGES,
+        help="Samples to draw, and real images to compare against. "
+        "Below a few thousand the score is mostly its own bias.",
+    )
+    fid.add_argument(
+        "--split", choices=("train", "test"), default="train", help="Real split to compare against."
+    )
+    fid.add_argument("--batch-size", type=int, help="Override the checkpoint's batch size.")
+    fid.add_argument("--data-root", type=Path, help="Override the dataset directory.")
+    fid.add_argument("--steps", type=int, help="DDIM steps. Defaults to the checkpoint's.")
+    fid.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
+    fid.add_argument(
+        "--guidance",
+        type=float,
+        help="Classifier-free guidance scale. Defaults to the checkpoint's; "
+        "worth sweeping, since FID usually bottoms out above 1.",
+    )
+    fid.add_argument(
+        "--no-ema",
+        action="store_false",
+        dest="use_ema",
+        help="Sample the raw weights, not the EMA.",
+    )
+    fid.add_argument("--seed", type=int, default=0, help="Random seed.")
+    fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
+
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
@@ -143,6 +175,25 @@ def _eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fid(args: argparse.Namespace) -> int:
+    """Run the FID subcommand."""
+    result = fid_for_checkpoint(
+        args.checkpoint,
+        num_images=args.num_images,
+        split=args.split,
+        batch_size=args.batch_size,
+        data_root=args.data_root,
+        num_steps=args.steps,
+        eta=args.eta,
+        guidance=args.guidance,
+        use_ema=args.use_ema,
+        seed=args.seed,
+        device=args.device,
+    )
+    print(result.format())
+    return 0
+
+
 def _sample(args: argparse.Namespace) -> int:
     """Run the sampling subcommand."""
     out = sample_from_checkpoint(
@@ -170,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         A process exit code.
     """
     args = build_parser().parse_args(argv)
-    handlers = {"train": _train, "eval": _eval, "sample": _sample}
+    handlers = {"train": _train, "eval": _eval, "fid": _fid, "sample": _sample}
     handler = handlers[args.command]
     try:
         return handler(args)

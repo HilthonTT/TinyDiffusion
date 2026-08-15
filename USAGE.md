@@ -12,6 +12,7 @@ the project *is*, see [README.md](README.md); for contributing, see
 - [Metrics and logging](#metrics-and-logging)
 - [Sampling](#sampling)
 - [Evaluating a checkpoint](#evaluating-a-checkpoint)
+- [Measuring sample quality with FID](#measuring-sample-quality-with-fid)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [uv command reference](#uv-command-reference)
@@ -83,6 +84,7 @@ widens sharply for `configs/mnist.toml`, which is ~40x more compute per step.
 | CUDA torch + torchvision | 1.8 GB download, 2.9 GB installed | `.venv/` |
 | Cached wheels | mirrors the above | uv's cache — **not** the project |
 | MNIST, fetched on first run | 63 MB | `data/` (`data_root`) |
+| Inception-v3, fetched on first `fid` | 104 MB | torch hub cache (`TORCH_HOME`) |
 | Checkpoints | ~3 MB per 0.2M params | `ckpt_dir` |
 | Sample grids | ~25 KB each, one per epoch | `out_dir` |
 
@@ -398,8 +400,71 @@ rises while the train loss keeps falling:
 
 One caveat: this is a proxy. Lower held-out loss means the network predicts
 noise better, which correlates with sample quality but does not measure it
-directly — the published metric for that is FID, which is not implemented here.
-Keep looking at the grids.
+directly. For that, use `fid` below — and keep looking at the grids.
+
+## Measuring sample quality with FID
+
+`eval` scores the training objective; `fid` scores the thing you actually care
+about. It draws samples, pushes them and an equal number of real images through
+a pretrained Inception-v3, and measures the Frechet distance between the two
+clouds of activations. Lower is better.
+
+```bash
+./run.sh fid --checkpoint checkpoints/last.pt
+```
+
+```
+checkpoints/last.pt | train split | ema weights
+fid 18.472
+
+10000 generated vs 10000 real images
+50 ddim steps | guidance 2
+```
+
+The Inception weights (~100 MB) download on first use into the usual torch hub
+cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--checkpoint` | required | Checkpoint to score |
+| `--num-images` | 10000 | Samples drawn, and real images compared against |
+| `--split` | `train` | Real split to compare against |
+| `--batch-size` | the checkpoint's | Larger is faster |
+| `--data-root` | the checkpoint's | Dataset directory |
+| `--steps` | the checkpoint's | DDIM steps per sample |
+| `--eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
+| `--guidance` | the checkpoint's | Classifier-free guidance scale |
+| `--no-ema` | off | Sample the raw weights instead of the EMA |
+| `--seed` | 0 | Fixes the samples; change it to redraw |
+| `--device` | auto | `cuda`, `cpu`, … |
+
+Read the number as a comparison, never as an absolute:
+
+- **It only compares like with like.** `--num-images`, `--split`, `--steps` and
+  the extractor each move the score on their own, so hold them fixed across the
+  checkpoints you are comparing.
+- **Small sample counts inflate it.** The Inception feature space is 2048-dimensional,
+  so a covariance estimated from fewer than ~2048 images per side is singular and
+  the score is biased upwards by an amount that depends on the count. Below that
+  the report says so. Use 10k when the number needs to mean anything, and a few
+  hundred only for a quick smoke test.
+- **It is not the published FID.** Those numbers come from the original
+  TensorFlow Inception graph; torchvision's port differs enough to shift the
+  absolute value. The ordering it induces over checkpoints is what carries over.
+
+It is also slow — every score runs the full DDIM chain `--num-images` times —
+which is why it is a command you run at the end of a run rather than a metric
+logged per epoch.
+
+Guidance is worth sweeping rather than leaving at the checkpoint's default. It
+trades diversity for fidelity, and FID punishes both, so the minimum usually
+sits somewhere above 1:
+
+```bash
+for g in 1 1.5 2 3 5; do
+  ./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --guidance $g
+done
+```
 
 ## Configuration
 

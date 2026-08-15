@@ -30,6 +30,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   class per column, and the per-epoch training grids now generate on the real
   strip's own labels, pairing each generated digit with a real one of the same
   class.
+- FID (`tinydiffusion.metrics`) and a `fid` subcommand. `FeatureStats`
+  accumulates the mean and covariance of Inception-v3 activations in a single
+  pass, so the score covers more images than fit in memory; `compute_fid`
+  evaluates the distance through a symmetric matrix square root rather than the
+  eigenvalues of the raw covariance product, which keeps it real-valued and
+  stable on the singular covariances that small sample counts produce. The
+  report flags when either side has too few images for the score to be
+  comparable.
 - `DDPM.loss_terms`, which returns the per-image loss and its timesteps
   alongside the scalar, and `EMA.current_decay`.
 - `-V` as a short alias for `--version`.
