@@ -133,6 +133,63 @@ def test_generate_images_yields_exactly_what_was_asked(checkpoint, extractor):
     assert all(b.shape[1:] == (1, cfg.image_size, cfg.image_size) for b in produced)
 
 
+def test_the_generated_class_mix_stays_balanced_across_batches(make_checkpoint, monkeypatch):
+    """The label cycle continues across batches instead of restarting."""
+    from tinydiffusion.sampling import load_for_sampling
+
+    path = make_checkpoint(CONDITIONAL)
+    diffusion, ema, cfg = load_for_sampling(path, "cpu")
+
+    seen = []
+    monkeypatch.setattr(
+        evaluate, "conditioned", lambda net, y, **kw: seen.append(y) or torch.nn.Identity()
+    )
+    monkeypatch.setattr(evaluate, "ddim_sample", lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8))
+
+    # 26 images in batches of 4 over 4 classes: restarting the cycle each batch
+    # would give class 0 seven samples and classes 2 and 3 six each.
+    list(
+        evaluate.generate_images(
+            diffusion,
+            ema.module,
+            cfg,
+            num_images=26,
+            batch_size=4,
+            num_steps=2,
+            eta=0.0,
+            guidance=1.0,
+        )
+    )
+    counts = torch.cat(seen).bincount(minlength=CONDITIONAL.num_classes)
+    # A continuous cycle can only ever be off by one.
+    assert counts.max() - counts.min() <= 1
+
+
+def test_an_unconditional_checkpoint_generates_without_labels(checkpoint, monkeypatch):
+    from tinydiffusion.sampling import load_for_sampling
+
+    diffusion, ema, cfg = load_for_sampling(checkpoint, "cpu")
+    seen = []
+    monkeypatch.setattr(
+        evaluate, "conditioned", lambda net, y, **kw: seen.append(y) or torch.nn.Identity()
+    )
+    monkeypatch.setattr(evaluate, "ddim_sample", lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8))
+
+    list(
+        evaluate.generate_images(
+            diffusion,
+            ema.module,
+            cfg,
+            num_images=6,
+            batch_size=4,
+            num_steps=2,
+            eta=0.0,
+            guidance=1.0,
+        )
+    )
+    assert seen == [None, None]
+
+
 def test_fid_for_checkpoint_returns_a_result(checkpoint, extractor):
     result = fid_for_checkpoint(
         checkpoint, num_images=8, num_steps=2, extractor=extractor, progress=False

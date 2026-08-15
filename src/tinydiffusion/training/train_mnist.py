@@ -242,6 +242,7 @@ def save_samples(
     cfg: TrainConfig,
     epoch: int,
     labels: torch.Tensor | None = None,
+    noise: torch.Tensor | None = None,
 ) -> None:
     """Render a grid of EMA samples above a strip of real images.
 
@@ -261,6 +262,9 @@ def save_samples(
         epoch: zero-based epoch index. The filename is one-based, matching the
             progress bar.
         labels: the real strip's class labels, or None when unconditional.
+        noise: the starting x_T to redraw from, or None for a fresh draw. Held
+            fixed across a run, it makes the grids a flipbook of one set of
+            images sharpening rather than an unrelated sample each epoch.
     """
     shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
     if labels is not None:
@@ -277,6 +281,7 @@ def save_samples(
         num_steps=cfg.sample_steps,
         eta=0.0,
         model=conditioned(ema.module, labels, num_classes=cfg.num_classes, scale=cfg.guidance),
+        noise=noise,
     )
     reference = real[: cfg.num_samples].to(cfg.device)
     grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
@@ -385,6 +390,19 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
     reference: torch.Tensor | None = None
     reference_labels: torch.Tensor | None = None
+
+    # Fixed latents, so each epoch's grid redraws the same x_T and the sequence of
+    # PNGs reads as one set of digits sharpening rather than a fresh draw each time.
+    # Seeded off cfg.seed rather than the live RNG, so a --resume continues the
+    # same grid instead of starting a new one.
+    sample_noise = torch.randn(
+        cfg.num_samples,
+        MNIST_CHANNELS,
+        cfg.image_size,
+        cfg.image_size,
+        generator=torch.Generator().manual_seed(cfg.seed),
+    )
+
     cancelled = False
 
     logger = RunLogger.for_run(
@@ -514,7 +532,15 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                 and (epoch + 1) % cfg.sample_every == 0
                 and reference is not None
             ):
-                save_samples(diffusion, ema, reference, cfg, epoch, labels=reference_labels)
+                save_samples(
+                    diffusion,
+                    ema,
+                    reference,
+                    cfg,
+                    epoch,
+                    labels=reference_labels,
+                    noise=sample_noise,
+                )
 
             save_checkpoint(
                 cfg.ckpt_dir / "last.pt",

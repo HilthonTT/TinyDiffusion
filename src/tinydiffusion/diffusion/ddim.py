@@ -67,6 +67,7 @@ def ddim_sample(
     model: nn.Module | None = None,
     timesteps: torch.Tensor | None = None,
     clip_denoised: bool = True,
+    noise: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample by running the DDIM reverse chain over a timestep subsequence.
 
@@ -81,15 +82,25 @@ def ddim_sample(
         timesteps: explicit descending subsequence, overriding `num_steps`.
         clip_denoised: clamp the predicted x_0 to [-1, 1] at each step. Matters
             much more at low step counts than it does for full-chain DDPM.
+        noise: the starting x_T, of shape ``(num_samples, *size)``. None draws a
+            fresh one. Passing it in is what makes a series of grids comparable:
+            reusing one latent across epochs shows the same images sharpening,
+            where a fresh draw each time shows a different sample of the model.
 
     Returns:
         Tensor of shape (num_samples, *size).
 
     Raises:
-        ValueError: if `eta` falls outside [0, 1].
+        ValueError: if `eta` falls outside [0, 1], or `noise` is not shaped
+            ``(num_samples, *size)``.
     """
     if not 0.0 <= eta <= 1.0:
         raise ValueError(f"eta must lie in [0, 1], got {eta}")
+    if noise is not None and noise.shape != (num_samples, *size):
+        # Checked here rather than left to broadcast: a mismatch would otherwise
+        # surface several steps into the chain, as a shape error against a
+        # timestep buffer that has nothing to do with the cause.
+        raise ValueError(f"noise must be shaped {(num_samples, *size)}, got {tuple(noise.shape)}")
 
     net = model if model is not None else diffusion.net
 
@@ -104,7 +115,11 @@ def ddim_sample(
     one = alphabar.new_ones(())
 
     with eval_mode(net):
-        x = torch.randn(num_samples, *size, device=device)
+        x = (
+            noise.to(device)
+            if noise is not None
+            else torch.randn(num_samples, *size, device=device)
+        )
 
         for t_cur, t_prev in zip(ts, ts_prev, strict=True):
             ab_t = alphabar[t_cur]

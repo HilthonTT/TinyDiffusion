@@ -82,3 +82,43 @@ def test_sampling_stays_finite_for_every_eta(oracle_diffusion):
     for eta in (0.0, 0.5, 1.0):
         out = ddim_sample(diffusion, 2, (1, 4, 4), "cpu", num_steps=8, eta=eta)
         assert torch.isfinite(out).all()
+
+
+class _Echo(nn.Module):
+    """A network whose output depends on x, so the starting latent survives."""
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return x * 0.1
+
+
+@pytest.fixture
+def echo_diffusion():
+    return DDPM(_Echo(), betas=linear_beta_schedule(1e-4, 0.02, T), num_timesteps=T)
+
+
+def test_a_given_latent_is_redrawn_exactly(echo_diffusion):
+    noise = torch.randn(3, 1, 4, 4)
+    first = ddim_sample(echo_diffusion, 3, (1, 4, 4), "cpu", num_steps=8, eta=0.0, noise=noise)
+    second = ddim_sample(echo_diffusion, 3, (1, 4, 4), "cpu", num_steps=8, eta=0.0, noise=noise)
+    assert torch.equal(first, second)
+
+
+def test_different_latents_give_different_samples(echo_diffusion):
+    kwargs = {"num_steps": 8, "eta": 0.0}
+    a = ddim_sample(echo_diffusion, 2, (1, 4, 4), "cpu", noise=torch.randn(2, 1, 4, 4), **kwargs)
+    b = ddim_sample(echo_diffusion, 2, (1, 4, 4), "cpu", noise=torch.randn(2, 1, 4, 4), **kwargs)
+    assert not torch.allclose(a, b)
+
+
+def test_omitting_the_latent_draws_a_fresh_one(echo_diffusion):
+    a = ddim_sample(echo_diffusion, 2, (1, 4, 4), "cpu", num_steps=8, eta=0.0)
+    b = ddim_sample(echo_diffusion, 2, (1, 4, 4), "cpu", num_steps=8, eta=0.0)
+    assert not torch.allclose(a, b)
+
+
+@pytest.mark.parametrize("shape", [(2, 1, 4, 4), (3, 1, 8, 8), (3, 4, 4)])
+def test_a_misshapen_latent_is_rejected(echo_diffusion, shape):
+    # Caught up front rather than several steps into the chain, where it would
+    # surface as an unrelated broadcast error.
+    with pytest.raises(ValueError, match="noise must be shaped"):
+        ddim_sample(echo_diffusion, 3, (1, 4, 4), "cpu", num_steps=4, noise=torch.randn(*shape))

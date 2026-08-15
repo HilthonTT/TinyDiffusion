@@ -111,6 +111,43 @@ def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
     assert (cfg.out_dir / "sample_0002.png").exists()
 
 
+def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkeypatch):
+    """The grids are a flipbook of one latent set, not a fresh draw per epoch."""
+    seen = []
+    real_sample = train_module.ddim_sample
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["noise"])
+        return real_sample(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "ddim_sample", spy)
+    cfg = dataclasses.replace(tiny_cfg, sample_every=1)
+    train_module.train_mnist(cfg)
+
+    assert len(seen) == cfg.num_epochs
+    assert all(torch.equal(seen[0], later) for later in seen[1:])
+    assert seen[0].shape == (cfg.num_samples, 1, cfg.image_size, cfg.image_size)
+
+
+def test_the_grid_latents_follow_the_seed(tiny_cfg, fake_loader, monkeypatch):
+    """Derived from cfg.seed, so a --resume continues the same grid."""
+    seen = []
+    real_sample = train_module.ddim_sample
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["noise"])
+        return real_sample(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "ddim_sample", spy)
+    for seed in (0, 0, 1):
+        train_module.train_mnist(
+            dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1, seed=seed)
+        )
+
+    assert torch.equal(seen[0], seen[1])
+    assert not torch.equal(seen[0], seen[2])
+
+
 def test_a_conditional_run_reports_its_classes(tiny_cfg, fake_loader, capsys):
     train_module.train_mnist(dataclasses.replace(tiny_cfg, num_classes=10))
     assert "10 classes, 0.1 label dropout" in capsys.readouterr().out

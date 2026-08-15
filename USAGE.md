@@ -451,6 +451,11 @@ Read the number as a comparison, never as an absolute:
 - **It is not the published FID.** Those numbers come from the original
   TensorFlow Inception graph; torchvision's port differs enough to shift the
   absolute value. The ordering it induces over checkpoints is what carries over.
+- **A conditional model is sampled with a uniform class mix**, while real MNIST
+  is not — the first 10k training images run from 8.6% (5s) to 11.3% (1s). That
+  prior mismatch adds a small constant to the score. It is identical for every
+  checkpoint scored the same way, so comparisons are unaffected; it is one more
+  reason not to read the absolute number.
 
 It is also slow — every score runs the full DDIM chain `--num-images` times —
 which is why it is a command you run at the end of a run rather than a metric

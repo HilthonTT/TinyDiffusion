@@ -13,7 +13,7 @@ from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.metrics.fid import FeatureStats, fid_from_stats
 from tinydiffusion.metrics.inception import FeatureExtractor
-from tinydiffusion.sampling import load_for_sampling, resolve_labels
+from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.utils.seed import seed_everything
 
@@ -143,13 +143,20 @@ def generate_images(
     Yields:
         ``(b, C, image_size, image_size)`` batches in [-1, 1].
     """
-    remaining = num_images
-    while remaining > 0:
-        batch = min(batch_size, remaining)
-        # Cycled labels rather than random ones: MNIST is near-uniform over its
-        # classes, and cycling removes the class-imbalance noise that random
-        # draws would add to the score at small sample counts.
-        y = resolve_labels(None, num_images=batch, num_classes=cfg.num_classes, device=cfg.device)
+    produced = 0
+    while produced < num_images:
+        batch = min(batch_size, num_images - produced)
+        # Cycled labels rather than random ones, so the class mix is fixed
+        # instead of being one more source of noise in the score. The cycle
+        # continues across batch boundaries rather than restarting: at 10k
+        # images in batches of 128, restarting leaves classes 8 and 9 with 937
+        # samples against 1016 for class 0, an 8% skew the score would read as
+        # the model's own.
+        y = (
+            None
+            if cfg.num_classes is None
+            else torch.arange(produced, produced + batch, device=cfg.device) % cfg.num_classes
+        )
         yield ddim_sample(
             diffusion,
             batch,
@@ -159,7 +166,7 @@ def generate_images(
             eta=eta,
             model=conditioned(net, y, num_classes=cfg.num_classes, scale=guidance),
         )
-        remaining -= batch
+        produced += batch
 
 
 @torch.no_grad()
