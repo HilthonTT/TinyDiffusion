@@ -38,12 +38,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stable on the singular covariances that small sample counts produce. The
   report flags when either side has too few images for the score to be
   comparable.
+- An HTTP sampling server (`tinydiffusion.server`) and a `serve` subcommand,
+  behind the optional `server` extra. `POST /api/sample` runs the DDIM chain on
+  a checkpoint loaded once at startup and returns a URL for the grid;
+  `GET /api/status` reports what is loaded and what the request defaults are.
+  Requests are serialised behind a lock and run off the event loop, the bind
+  defaults to loopback since nothing authenticates, and served filenames are
+  matched against the uuid names the server itself issues so a percent-encoded
+  traversal cannot escape the image directory.
+- `noise` on `ddim_sample` and `save_samples`, letting a caller supply the
+  starting x_T. Training uses it to hold the per-epoch sample grids on one set
+  of latents, so the sequence of PNGs shows the same images sharpening rather
+  than an unrelated draw each epoch.
 - `DDPM.loss_terms`, which returns the per-image loss and its timesteps
   alongside the scalar, and `EMA.current_decay`.
 - `-V` as a short alias for `--version`.
 
 ### Changed
 
+- `sampling._grid_width` is now public as `sampling.grid_width`, since the
+  server needs the same grid layout the CLI produces.
 - `DDPM.forward` and `DDPM.loss_terms` take a `model` argument, matching
   `GaussianDiffusion` and letting either process be trained through a
   conditioning wrapper.

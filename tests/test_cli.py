@@ -142,6 +142,65 @@ def test_main_reports_a_missing_fid_checkpoint(capsys, tmp_path):
     assert "error:" in capsys.readouterr().out
 
 
+def test_serve_defaults():
+    args = build_parser().parse_args(["serve", "--checkpoint", "model.pt"])
+    assert args.command == "serve"
+    # Loopback, not 0.0.0.0: the API is unauthenticated.
+    assert args.host == "127.0.0.1"
+    assert args.port == 8000
+    assert args.use_ema is True
+    assert args.cors_origins is None
+    assert (args.device, args.image_dir) == (None, None)
+
+
+def test_serve_parses_its_overrides():
+    args = build_parser().parse_args(
+        [
+            "serve",
+            "--checkpoint",
+            "m.pt",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9001",
+            "--max-images",
+            "4",
+            "--cors-origin",
+            "http://a.test",
+            "--cors-origin",
+            "http://b.test",
+            "--no-ema",
+        ]
+    )
+    assert (args.host, args.port, args.max_images) == ("0.0.0.0", 9001, 4)
+    assert args.cors_origins == ["http://a.test", "http://b.test"]
+    assert args.use_ema is False
+
+
+def test_serve_requires_a_checkpoint():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["serve"])
+
+
+def test_serve_builds_a_config_and_runs(capsys, monkeypatch, tmp_path):
+    checkpoint = tmp_path / "m.pt"
+    checkpoint.write_bytes(b"")
+    seen = {}
+    # Patched on the module the handler imports from, since it imports late so
+    # that only `serve` needs the optional extra.
+    monkeypatch.setattr("tinydiffusion.server.app.serve", lambda config: seen.update(config=config))
+
+    assert main(["serve", "--checkpoint", str(checkpoint), "--port", "9999"]) == 0
+    assert seen["config"].checkpoint == checkpoint
+    assert seen["config"].port == 9999
+    assert "http://127.0.0.1:9999" in capsys.readouterr().out
+
+
+def test_serve_reports_a_missing_checkpoint_before_binding(capsys, tmp_path):
+    assert main(["serve", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
+    assert "no such checkpoint" in capsys.readouterr().out
+
+
 def test_main_reports_a_missing_config(capsys, tmp_path):
     assert main(["train", "--config", str(tmp_path / "nope.toml")]) == 1
     assert "error:" in capsys.readouterr().out

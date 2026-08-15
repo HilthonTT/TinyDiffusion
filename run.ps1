@@ -26,10 +26,9 @@ if ($env:PYTHON) {
     $candidates = @($env:PYTHON)
 }
 else {
-    $candidates = @(
-        (Join-Path $root '.venv\Scripts\python.exe'),
-        (Join-Path $root 'venv\Scripts\python.exe')
-    )
+    # Only .venv, which is what `uv sync` creates. A second environment in the
+    # repo is exactly what this script used to silently fall back into.
+    $candidates = @((Join-Path $root '.venv\Scripts\python.exe'))
     $onPath = Get-Command python -ErrorAction SilentlyContinue
     if ($onPath) { $candidates += $onPath.Source }
 }

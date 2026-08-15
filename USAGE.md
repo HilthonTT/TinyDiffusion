@@ -13,6 +13,7 @@ the project *is*, see [README.md](README.md); for contributing, see
 - [Sampling](#sampling)
 - [Evaluating a checkpoint](#evaluating-a-checkpoint)
 - [Measuring sample quality with FID](#measuring-sample-quality-with-fid)
+- [Serving a checkpoint over HTTP](#serving-a-checkpoint-over-http)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [uv command reference](#uv-command-reference)
@@ -471,6 +472,76 @@ for g in 1 1.5 2 3 5; do
 done
 ```
 
+## Serving a checkpoint over HTTP
+
+`serve` puts a checkpoint behind a small JSON API, so something other than a
+shell can ask it for digits. It needs the `server` extra:
+
+```bash
+uv sync --extra server            # or: pip install 'tinydiffusion[server]'
+./run.sh serve --checkpoint checkpoints/last.pt
+```
+
+```
+serving checkpoints/last.pt on http://127.0.0.1:8000
+INFO:     Application startup complete.
+```
+
+The checkpoint is loaded once at startup, not per request. Interactive API docs
+are at `/docs`, and the schema at `/openapi.json`.
+
+**`POST /api/sample`** generates a grid and returns where to fetch it. Every
+field is optional except that the defaults come from the checkpoint:
+
+```bash
+curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
+  -d '{"num_images": 8, "labels": [3], "guidance": 2.0, "steps": 50, "seed": 0}'
+```
+
+```json
+{"url": "/images/d3d0e07831c3442197753ea2d7f367f9.png",
+ "filename": "d3d0e07831c3442197753ea2d7f367f9.png",
+ "num_images": 8}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `num_images` | 8 | Images in the grid, up to `--max-images` |
+| `labels` | one per class | Classes to generate. Conditional checkpoints only |
+| `guidance` | the checkpoint's | Classifier-free guidance scale |
+| `steps` | the checkpoint's | DDIM steps |
+| `eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
+| `seed` | null | Fixes the sample; the same seed returns the same image |
+
+**`GET /images/{filename}`** serves the PNG. **`GET /api/status`** reports what
+is loaded — device, image size, class count, and the defaults above — which is
+also how a client learns whether it may send `labels`.
+
+A request that does not fit the checkpoint comes back as a 400 with the reason
+(`labels` against an unconditional model, a class that does not exist, more
+images than the ceiling); a malformed one is a 422 from the schema.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--checkpoint` | required | Checkpoint to serve |
+| `--host` | `127.0.0.1` | Interface to bind |
+| `--port` | 8000 | Port to bind |
+| `--max-images` | 64 | Ceiling on `num_images` per request |
+| `--image-dir` | a temp dir | Where PNGs are written |
+| `--cors-origin` | none | Origin allowed to call the API from a browser. Repeatable |
+| `--no-ema` | off | Serve the raw weights instead of the EMA |
+| `--device` | auto | `cuda`, `cpu`, … |
+
+Two things to know before exposing it:
+
+- **There is no authentication**, which is why the default bind is loopback
+  rather than `0.0.0.0`. Generating an image is seconds of GPU time on request,
+  so an open port is a denial-of-service invitation. Widen it only behind
+  something that does authenticate.
+- **Requests are serialised.** One checkpoint on one device, one chain at a
+  time; concurrent callers queue rather than fighting over VRAM. Throughput
+  comes from `num_images` in a single request, not from parallel requests.
+
 ## Configuration
 
 Configs are TOML. Tables are cosmetic grouping only: every key is flattened
@@ -584,10 +655,19 @@ aside;
 
 **`ModuleNotFoundError: No module named 'tinydiffusion'`**
 The interpreter you used is not one the package was installed into. A second
-virtualenv in the repo is the usual culprit — `uv` manages `.venv`, so an
-activated `venv` will not have it. Use `./run.sh` / `.\run.ps1`, which pick a
-working interpreter, or install into the one you want with
+virtualenv in the repo is the usual culprit — `uv` manages `.venv` and nothing
+else, so an environment under any other name will not have the package however
+recently you activated it. Check with `echo $env:VIRTUAL_ENV` (PowerShell) or
+`echo $VIRTUAL_ENV` (bash): if it names anything but `.venv`, deactivate and
+reopen the terminal. Use `./run.sh` / `.\run.ps1`, which only ever pick
+`.venv`, or install into the interpreter you want with
 `python -m pip install -e .`.
+
+The same mix-up shows up in an editor as unresolved imports — VS Code reads
+`VIRTUAL_ENV` when choosing an interpreter, so a stale value points Pylance at
+the wrong environment. Fix it with **Python: Select Interpreter** →
+`.venv\Scripts\python.exe`, after restarting the editor so it stops inheriting
+the old variable.
 
 **`ModuleNotFoundError: No module named 'torch._weights_only_unpickler'`** (or
 any other missing submodule of an installed package)

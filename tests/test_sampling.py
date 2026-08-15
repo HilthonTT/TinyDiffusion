@@ -127,4 +127,4 @@ def test_num_images_must_be_positive(make_checkpoint, tmp_path):
     ],
 )
 def test_grid_width(num_images, num_classes, labels, expected):
-    assert sampling._grid_width(num_images, num_classes, labels) == expected
+    assert sampling.grid_width(num_images, num_classes, labels) == expected

@@ -59,6 +59,14 @@ with real ones in Inception-v3 feature space:
 ./run.sh fid --checkpoint checkpoints/last.pt --num-images 10000
 ```
 
+`serve` puts a checkpoint behind a JSON API, for anything that is not a shell:
+
+```bash
+./run.sh serve --checkpoint checkpoints/last.pt   # needs the 'server' extra
+curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
+  -d '{"num_images": 8, "labels": [7]}'
+```
+
 `configs/mnist.toml` trains conditionally on the ten digits, so `sample` can be
 asked for a particular one — and for how hard to insist on it:
 

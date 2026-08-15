@@ -156,11 +156,11 @@ def sample_from_checkpoint(
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_image(denormalize(images), out, nrow=_grid_width(num_images, cfg.num_classes, labels))
+    save_image(denormalize(images), out, nrow=grid_width(num_images, cfg.num_classes, labels))
     return out
 
 
-def _grid_width(num_images: int, num_classes: int | None, labels: Sequence[int] | None) -> int:
+def grid_width(num_images: int, num_classes: int | None, labels: Sequence[int] | None) -> int:
     """Images per row in the saved grid.
 
     A default conditional grid cycles the classes, so laying it out one class

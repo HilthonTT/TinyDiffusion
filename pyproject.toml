@@ -32,6 +32,8 @@ dependencies = [
 [project.optional-dependencies]
 # Optional experiment tracking / logging backends.
 tracking = ["tensorboard>=2.18"]
+# The HTTP sampling server (`tinydiffusion serve`).
+server = ["fastapi>=0.115", "uvicorn>=0.32"]
 
 [project.urls]
 Homepage = "https://github.com/HilthonTT/TinyDiffusion"
@@ -46,6 +48,9 @@ tinydiffusion = "tinydiffusion.cli:main"
 dev = [
     "pytest>=9.1.1",
     "pytest-cov>=6.0",
+    # Starlette's TestClient is built on httpx2; the older httpx raises a
+    # deprecation warning that this project's filterwarnings turns into an error.
+    "httpx2>=0.29",
     "ruff>=0.16.2",
     "mypy>=2.3.0",
     "pre-commit>=4.0",

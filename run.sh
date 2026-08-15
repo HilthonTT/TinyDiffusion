@@ -10,7 +10,7 @@
 # Override the choice with PYTHON=/path/to/python ./run.sh ...
 #
 # On Windows use PowerShell (.\run.ps1) or Git Bash. WSL cannot use a Windows
-# venv: its python.exe is a Windows binary, and WSL only runs those when
+# .venv: its python.exe is a Windows binary, and WSL only runs those when
 # interop is enabled.
 
 set -euo pipefail
@@ -46,12 +46,12 @@ find_python() {
 if [[ -n "${PYTHON:-}" ]]; then
     candidates=("$PYTHON")
 else
-    # Unix layouts first: in WSL they are the only ones that can run.
+    # Unix layout first: in WSL it is the only one that can run. Only .venv is
+    # probed, since that is what `uv sync` creates; a second environment in the
+    # repo is the thing this script used to silently fall back into.
     candidates=(
         "$root/.venv/bin/python"
-        "$root/venv/bin/python"
         "$root/.venv/Scripts/python.exe"
-        "$root/venv/Scripts/python.exe"
         "$(command -v python3 || true)"
         "$(command -v python || true)"
     )
@@ -65,7 +65,7 @@ if ! find_python "${candidates[@]}"; then
     else
         echo "run.sh: found no Python that this shell can run." >&2
         if grep -qi microsoft /proc/version 2>/dev/null; then
-            echo "        You are in WSL, which cannot launch the Windows venv" >&2
+            echo "        You are in WSL, which cannot launch the Windows .venv" >&2
             echo "        under $root/.venv/Scripts/." >&2
             echo "        Use PowerShell (.\\run.ps1) or Git Bash instead, or make" >&2
             echo "        a Linux env here:  uv sync --all-extras --dev" >&2

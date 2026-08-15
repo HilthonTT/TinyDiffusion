@@ -9,6 +9,7 @@ from tinydiffusion import __version__
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.sampling import sample_from_checkpoint
+from tinydiffusion.server.config import DEFAULT_HOST, DEFAULT_MAX_IMAGES, DEFAULT_PORT, ServerConfig
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train_mnist import train_mnist
 
@@ -119,6 +120,39 @@ def build_parser() -> argparse.ArgumentParser:
     fid.add_argument("--seed", type=int, default=0, help="Random seed.")
     fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
 
+    serve = subparsers.add_parser("serve", help="Serve a checkpoint over HTTP.")
+    serve.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
+    serve.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help="Interface to bind. Loopback by default; the API is unauthenticated, "
+        "so only widen it behind something that is not.",
+    )
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind.")
+    serve.add_argument(
+        "--max-images",
+        type=int,
+        default=DEFAULT_MAX_IMAGES,
+        help="Largest num_images a single request may ask for.",
+    )
+    serve.add_argument(
+        "--image-dir", type=Path, help="Where to write PNGs. Defaults to a temp dir."
+    )
+    serve.add_argument(
+        "--cors-origin",
+        action="append",
+        dest="cors_origins",
+        metavar="ORIGIN",
+        help="Origin allowed to call the API from a browser. Repeatable; omit to leave CORS off.",
+    )
+    serve.add_argument(
+        "--no-ema",
+        action="store_false",
+        dest="use_ema",
+        help="Serve the raw weights, not the EMA.",
+    )
+    serve.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
+
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
@@ -194,6 +228,31 @@ def _fid(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve(args: argparse.Namespace) -> int:
+    """Run the serve subcommand."""
+    config = ServerConfig(
+        checkpoint=args.checkpoint,
+        host=args.host,
+        port=args.port,
+        device=args.device,
+        use_ema=args.use_ema,
+        max_images=args.max_images,
+        image_dir=args.image_dir,
+        cors_origins=tuple(args.cors_origins or ()),
+    )
+    if not config.checkpoint.is_file():
+        # uvicorn would otherwise bind the port and only fail during startup,
+        # which reads as a server crash rather than a bad path.
+        raise ValueError(f"no such checkpoint: {config.checkpoint}")
+
+    # Imported here so `serve` is the only command that needs the extra.
+    from tinydiffusion.server.app import serve as run_server
+
+    print(f"serving {config.checkpoint} on http://{config.host}:{config.port}")
+    run_server(config)
+    return 0
+
+
 def _sample(args: argparse.Namespace) -> int:
     """Run the sampling subcommand."""
     out = sample_from_checkpoint(
@@ -221,13 +280,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         A process exit code.
     """
     args = build_parser().parse_args(argv)
-    handlers = {"train": _train, "eval": _eval, "fid": _fid, "sample": _sample}
+    handlers = {
+        "train": _train,
+        "eval": _eval,
+        "fid": _fid,
+        "sample": _sample,
+        "serve": _serve,
+    }
     handler = handlers[args.command]
     try:
         return handler(args)
-    except (OSError, ValueError, KeyError) as exc:
-        # Bad paths and bad configs are user errors, not something to hand back
-        # as a traceback.
+    except (OSError, ValueError, KeyError, ImportError) as exc:
+        # Bad paths, bad configs and a missing optional extra are user errors,
+        # not something to hand back as a traceback.
         print(f"error: {exc}")
         return 1
     except KeyboardInterrupt:
