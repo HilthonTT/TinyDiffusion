@@ -25,7 +25,7 @@ TINY = TrainConfig(
 )
 
 
-CONDITIONAL = dataclasses.replace(TINY, num_classes=4, guidance=2.0)
+CONDITIONAL = dataclasses.replace(TINY, num_classes=10, guidance=2.0)
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def make_checkpoint(tmp_path, monkeypatch, wake):
             y = torch.zeros(6, dtype=torch.long) if labels is None else labels
             return DataLoader(TensorDataset(images, y), batch_size=3)
 
-        monkeypatch.setattr(evaluation, "mnist_dataloader", fake_loader)
+        monkeypatch.setattr(evaluation, "image_dataloader", fake_loader)
         return path
 
     return build

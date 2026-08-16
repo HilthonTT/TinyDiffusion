@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tinydiffusion.data.mnist import denormalize
+from tinydiffusion.data.datasets import denormalize
 
 INCEPTION_DIM = 2048
 """Width of the final average-pooled Inception-v3 activation."""

@@ -633,6 +633,41 @@ num_timesteps = 1000
 schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 ```
 
+### Choosing a dataset
+
+`dataset` names an entry in the registry in `tinydiffusion/data/datasets.py`:
+
+| Name | Channels | Native size | Classes | Flips |
+| --- | --- | --- | --- | --- |
+| `mnist` | 1 | 28 | 10 | no |
+| `fashion_mnist` | 1 | 28 | 10 | yes |
+| `cifar10` | 3 | 32 | 10 | yes |
+
+Nothing downstream hard-codes a channel count: the U-Net's input and output
+width, the shape the samplers draw, and the reference side of a FID all read it
+from the spec the config names. Switching datasets is therefore the one key,
+plus whatever `num_classes` and `image_size` the new one implies:
+
+```bash
+./run.sh train --config configs/cifar10.toml
+./run.sh train --config configs/mnist.toml --dataset fashion_mnist
+```
+
+`num_classes` has to match the dataset's label space exactly, and a mismatch is
+refused when the config is read — the labels come from the dataset, so a
+smaller count would index past the embedding table the first time a batch
+carried a higher one.
+
+The "flips" column is whether a random horizontal flip preserves the label. It
+does for natural images and does not for digits, so MNIST opts out. The flip is
+applied to the training split only: a scored split never gets one, or a
+held-out number would move for reasons that have nothing to do with the
+weights.
+
+A checkpoint records the dataset it was trained on, and `--resume` refuses to
+carry a run across a change to it — the channel count is part of the shape of
+every tensor in the state dict.
+
 ### Validation and `best.pt`
 
 After each epoch the EMA weights are scored on a fixed slice of the held-out
@@ -685,7 +720,7 @@ on in both shipped configs — the one place they depart from the defaults:
 
 ```toml
 [conditioning]
-num_classes = 10      # MNIST's digits
+num_classes = 10      # MNIST's digits; has to match the dataset's label space
 class_dropout = 0.1   # labels replaced by the null token during training
 guidance = 2.0        # scale used at sample time
 ```
@@ -709,7 +744,8 @@ starting it over, not `--resume`.
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `data_root` | `data` | MNIST is downloaded here on first use |
+| `dataset` | `mnist` | Also `fashion_mnist`, `cifar10`; see [Choosing a dataset](#choosing-a-dataset) |
+| `data_root` | `data` | The dataset is downloaded here on first use |
 | `image_size` | 32 | 32 keeps 28x28 digits intact and halves exactly |
 | `batch_size` | 128 | 8 GB of VRAM has room for 256 |
 | `num_workers` | 4 | 0 when debugging |

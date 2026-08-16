@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from torchvision.utils import save_image
 
-from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize
+from tinydiffusion.data.datasets import denormalize
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.sampling import grid_width, load_for_sampling, resolve_labels
@@ -42,6 +42,7 @@ class SamplerService:
         """
         self.config = config
         self._diffusion, ema, self._cfg = load_for_sampling(config.checkpoint, config.device)
+        self._spec = self._cfg.dataset_spec()
         self._net = ema.module if config.use_ema else self._diffusion.net
         self._lock = threading.Lock()
 
@@ -159,7 +160,7 @@ class SamplerService:
             images = ddim_sample(
                 self._diffusion,
                 num_images,
-                (MNIST_CHANNELS, self._cfg.image_size, self._cfg.image_size),
+                (self._spec.channels, self._cfg.image_size, self._cfg.image_size),
                 self._cfg.device,
                 num_steps=num_steps,
                 eta=eta,
@@ -236,6 +237,7 @@ class SamplerService:
             }
         return {
             "checkpoint": str(self.config.checkpoint),
+            "dataset": self._spec.name,
             "device": self._cfg.device,
             "weights": "ema" if self.config.use_ema else "raw",
             "image_size": self._cfg.image_size,

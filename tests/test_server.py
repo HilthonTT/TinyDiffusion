@@ -27,7 +27,7 @@ TINY = TrainConfig(
     device="cpu",
 )
 
-CONDITIONAL = dataclasses.replace(TINY, num_classes=4, guidance=2.0)
+CONDITIONAL = dataclasses.replace(TINY, num_classes=10, guidance=2.0)
 
 
 @pytest.fixture
@@ -96,7 +96,7 @@ def test_status_describes_the_checkpoint(client):
 
 
 def test_status_reports_the_class_count_of_a_conditional_checkpoint(conditional_client):
-    assert conditional_client.get("/api/status").json()["num_classes"] == 4
+    assert conditional_client.get("/api/status").json()["num_classes"] == 10
 
 
 def test_requests_before_startup_are_refused(make_config):
@@ -155,9 +155,9 @@ def test_labels_are_refused_by_an_unconditional_checkpoint(client):
 
 
 def test_an_out_of_range_label_is_refused(conditional_client):
-    r = conditional_client.post("/api/sample", json={"num_images": 2, "steps": 2, "labels": [9]})
+    r = conditional_client.post("/api/sample", json={"num_images": 2, "steps": 2, "labels": [10]})
     assert r.status_code == 400
-    assert "9" in r.json()["detail"]
+    assert "10" in r.json()["detail"]
 
 
 def test_too_many_images_are_refused(make_config):

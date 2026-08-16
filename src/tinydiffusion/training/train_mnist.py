@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize, mnist_dataloader
+from tinydiffusion.data.datasets import denormalize, image_dataloader
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.ddpm import DDPM
 from tinydiffusion.diffusion.gaussian_diffusion import (
@@ -70,6 +70,7 @@ one bearing the same label.
 
 
 ARCHITECTURE_FIELDS = (
+    "dataset",
     "image_size",
     "base_channels",
     "channel_mult",
@@ -86,7 +87,9 @@ ARCHITECTURE_FIELDS = (
 )
 """Config fields a checkpoint's weights are tied to.
 
-The first six decide the shape of every tensor in the state dict; the rest
+The first seven decide the shape of every tensor in the state dict — ``dataset``
+by way of its channel count, which is the U-Net's input and output width — and
+the rest
 decide the schedule buffers and what the network's output means. Neither kind
 survives being changed under a ``--resume``, and only the first kind fails
 loudly on its own.
@@ -174,9 +177,10 @@ def build_model(cfg: TrainConfig) -> Diffusion:
         An untrained diffusion process on the CPU.
     """
     mean_type, var_type, loss_type = cfg.diffusion_types()
+    channels = cfg.dataset_spec().channels
     net = UNet(
-        in_channels=MNIST_CHANNELS,
-        out_channels=MNIST_CHANNELS * (2 if var_type.is_learned else 1),
+        in_channels=channels,
+        out_channels=channels * (2 if var_type.is_learned else 1),
         base_channels=cfg.base_channels,
         channel_mult=cfg.channel_mult,
         num_res_blocks=cfg.num_res_blocks,
@@ -407,7 +411,8 @@ def validation_batches(cfg: TrainConfig) -> list[tuple[torch.Tensor, torch.Tenso
     if cfg.val_every <= 0:
         return []
 
-    loader = mnist_dataloader(
+    loader = image_dataloader(
+        cfg.dataset_spec(),
         cfg.data_root,
         batch_size=cfg.batch_size,
         train=False,
@@ -479,7 +484,7 @@ def save_samples(
             fixed across a run, it makes the grids a flipbook of one set of
             images sharpening rather than an unrelated sample each epoch.
     """
-    shape = (MNIST_CHANNELS, cfg.image_size, cfg.image_size)
+    shape = (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size)
     if labels is not None:
         # A batch smaller than num_samples leaves the strip short; repeat it so
         # there is a label per generated image either way.
@@ -575,6 +580,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     """
     cfg = cfg or TrainConfig()
     cfg = replace(cfg, device=resolve_device(cfg.device))
+    spec = cfg.dataset_spec()
     seed_everything(cfg.seed, deterministic=cfg.deterministic)
 
     device_type = torch.device(cfg.device).type
@@ -615,12 +621,16 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     # Re-seeded per epoch below, so the batch order is a function of the epoch
     # index rather than of how many epochs this process has already run.
     loader_rng = torch.Generator()
-    loader = mnist_dataloader(
+    loader = image_dataloader(
+        spec,
         cfg.data_root,
         batch_size=cfg.batch_size,
         train=True,
         image_size=cfg.image_size,
         num_workers=cfg.num_workers,
+        # Only the training split is augmented, and only where the spec says a
+        # flip preserves the label.
+        augment=True,
         generator=loader_rng,
     )
 
@@ -646,8 +656,9 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         else "no validation"
     )
     print(
-        f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | "
-        f"amp {use_amp} | {conditioning} | {plan} | {len(loader)} steps/epoch | {scoring}"
+        f"{n_params / 1e6:.2f}M parameters | {spec.name} {cfg.image_size}px x{spec.channels} | "
+        f"device {describe_device(cfg.device)} | amp {use_amp} | {conditioning} | {plan} | "
+        f"{len(loader)} steps/epoch | {scoring}"
     )
     if remaining <= 0:
         print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
@@ -662,7 +673,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     # same grid instead of starting a new one.
     sample_noise = torch.randn(
         cfg.num_samples,
-        MNIST_CHANNELS,
+        spec.channels,
         cfg.image_size,
         cfg.image_size,
         generator=torch.Generator().manual_seed(cfg.seed),

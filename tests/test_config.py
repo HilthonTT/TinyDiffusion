@@ -96,3 +96,29 @@ def test_from_mapping_round_trips_a_checkpoint_config():
     restored = TrainConfig.from_mapping(stored)
     assert restored.out_dir == cfg.out_dir
     assert restored.channel_mult == cfg.channel_mult
+
+
+def test_the_default_config_names_a_registered_dataset():
+    cfg = TrainConfig()
+    assert cfg.dataset_spec().name == cfg.dataset
+
+
+def test_an_unregistered_dataset_is_refused_up_front():
+    with pytest.raises(ValueError, match="unknown dataset 'imagenet'"):
+        TrainConfig(dataset="imagenet")
+
+
+def test_the_class_count_has_to_match_the_datasets_label_space():
+    # The labels come from the dataset, so a smaller count indexes past the
+    # embedding table the moment a batch carries a higher one.
+    with pytest.raises(ValueError, match="does not match mnist"):
+        TrainConfig(dataset="mnist", num_classes=4)
+
+
+def test_a_dataset_may_be_trained_unconditionally():
+    assert TrainConfig(dataset="cifar10", num_classes=None).num_classes is None
+
+
+def test_switching_dataset_changes_the_channel_count_the_model_is_built_from():
+    assert TrainConfig(dataset="mnist").dataset_spec().channels == 1
+    assert TrainConfig(dataset="cifar10").dataset_spec().channels == 3

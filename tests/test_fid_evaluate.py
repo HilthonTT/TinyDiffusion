@@ -26,7 +26,7 @@ TINY = TrainConfig(
     device="cpu",
 )
 
-CONDITIONAL = dataclasses.replace(TINY, num_classes=4, guidance=2.0)
+CONDITIONAL = dataclasses.replace(TINY, num_classes=10, guidance=2.0)
 
 REAL_IMAGES = 12
 
@@ -69,7 +69,7 @@ def make_checkpoint(tmp_path, monkeypatch, wake):
             y = torch.zeros(REAL_IMAGES, dtype=torch.long)
             return DataLoader(TensorDataset(images, y), batch_size=kwargs.get("batch_size", 4))
 
-        monkeypatch.setattr(evaluate, "mnist_dataloader", fake_loader)
+        monkeypatch.setattr(evaluate, "image_dataloader", fake_loader)
         return path
 
     return build

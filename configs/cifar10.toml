@@ -1,0 +1,65 @@
+# Training config for `tinydiffusion train --config configs/cifar10.toml`.
+#
+# CIFAR-10 rather than MNIST: three channels instead of one, at the same 32px,
+# and a far harder distribution. Everything downstream reads the channel count
+# from the dataset registry, so `dataset` is the only structural change — but
+# CIFAR needs a good deal more capacity and time than digits do, and the values
+# below are sized for that rather than copied from configs/mnist.toml.
+#
+# Expect this to be slow on a laptop GPU: DDPM's own CIFAR-10 results come from
+# far longer runs than 100 epochs.
+
+[data]
+dataset = "cifar10"
+data_root = "data"
+image_size = 32
+batch_size = 128
+num_workers = 4
+
+# Wider than the MNIST config and three levels deep, giving attention at 16px
+# and a 4x4 bottleneck. Random horizontal flips come from the dataset spec,
+# which marks them label-preserving for natural images and not for digits.
+[model]
+base_channels = 128
+channel_mult = [1, 2, 2, 2]
+num_res_blocks = 2
+attn_resolutions = [16]
+dropout = 0.1
+
+# The ten CIFAR classes. num_classes has to match the dataset's label space, so
+# a leftover MNIST value would be rejected rather than silently mistrained.
+[conditioning]
+num_classes = 10
+class_dropout = 0.1
+guidance = 2.0
+
+[diffusion]
+num_timesteps = 1000
+schedule = "cosine"
+predict = "epsilon"
+variance = "fixed_small"
+objective = "mse"
+
+[optimisation]
+num_epochs = 100
+lr = 2e-4
+lr_warmup = 5000
+grad_clip = 1.0
+ema_decay = 0.9999
+ema_warmup = 2000
+
+[bookkeeping]
+seed = 0
+deterministic = false
+amp = true
+sample_every = 1
+num_samples = 16
+sample_steps = 50
+out_dir = "contents/cifar10"
+ckpt_dir = "checkpoints/cifar10"
+
+[tracking]
+log_dir = "runs/cifar10"
+log_console = true
+log_jsonl = true
+tensorboard = false

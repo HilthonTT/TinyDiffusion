@@ -17,8 +17,10 @@ stroke weight and contrast are directly comparable. Six epochs is about 11
 minutes on an RTX 5060; most digits are already well formed, a few strokes are
 still breaking up.*
 
-> **Status:** early development. Training and sampling work end to end on
-> MNIST; other datasets are not wired up yet.
+> **Status:** early development. Training and sampling work end to end.
+> MNIST is the default and the best-exercised path; Fashion-MNIST and
+> CIFAR-10 are wired up through the same registry (`dataset = "cifar10"`,
+> and see `configs/cifar10.toml`) but have had far less mileage.
 
 ## Quickstart
 

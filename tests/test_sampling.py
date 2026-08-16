@@ -21,7 +21,7 @@ TINY = TrainConfig(
     num_workers=0,
     device="cpu",
 )
-CONDITIONAL = dataclasses.replace(TINY, num_classes=4, guidance=2.0)
+CONDITIONAL = dataclasses.replace(TINY, num_classes=10, guidance=2.0)
 
 
 @pytest.fixture

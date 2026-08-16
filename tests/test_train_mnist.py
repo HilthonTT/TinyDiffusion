@@ -4,9 +4,10 @@ import json
 
 import pytest
 import torch
+from PIL import Image
 
 from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion
-from tinydiffusion.sampling import load_for_sampling
+from tinydiffusion.sampling import load_for_sampling, sample_from_checkpoint
 from tinydiffusion.training import train_mnist as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
@@ -48,7 +49,7 @@ def fake_loader(monkeypatch):
     batches = [
         (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(2)
     ]
-    monkeypatch.setattr(train_module, "mnist_dataloader", lambda *a, **k: batches)
+    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
 
 
 def _records(cfg) -> list[dict]:
@@ -484,7 +485,7 @@ def shuffle_seeds(monkeypatch):
         # only the training loader is of interest here.
         return RecordingLoader(generator) if generator is not None else batches
 
-    monkeypatch.setattr(train_module, "mnist_dataloader", loader)
+    monkeypatch.setattr(train_module, "image_dataloader", loader)
     return seeds
 
 
@@ -530,3 +531,93 @@ def test_deterministic_reaches_the_rng_and_leaves_the_autotuner_off(
 
     assert recorded == {"seed": cfg.seed, "deterministic": True}
     assert torch.backends.cudnn.benchmark is False
+
+
+def test_the_model_is_built_with_the_datasets_channel_count():
+    rgb = TrainConfig(
+        dataset="cifar10",
+        image_size=16,
+        base_channels=8,
+        channel_mult=(1,),
+        num_res_blocks=1,
+        attn_resolutions=(),
+        num_timesteps=10,
+        sample_steps=5,
+        val_steps=5,
+        device="cpu",
+    )
+    diffusion = train_module.build_model(rgb)
+
+    out = diffusion.net(torch.randn(2, 3, 16, 16), torch.zeros(2, dtype=torch.long))
+    assert out.shape == (2, 3, 16, 16)
+
+
+def test_a_checkpoint_cannot_resume_into_a_different_dataset(tiny_cfg, fake_loader):
+    # The channel count is the U-Net's input and output width, so the weights
+    # do not fit — and a bare load_state_dict would say so only as a wall of
+    # size mismatches.
+    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_epochs=1))
+    ckpt = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+
+    with pytest.raises(ValueError, match="dataset: checkpoint 'mnist', config 'cifar10'"):
+        train_module.check_resume_compatible(ckpt, dataclasses.replace(tiny_cfg, dataset="cifar10"))
+
+
+def _has_colour(path) -> bool:
+    """Whether a written grid holds anything other than grey pixels."""
+    with Image.open(path) as image:
+        pixels = torch.frombuffer(bytearray(image.convert("RGB").tobytes()), dtype=torch.uint8)
+    channels = pixels.view(-1, 3)
+    return bool((channels != channels[:, :1]).any())
+
+
+def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
+    # The whole point of the registry: nothing between the config and the PNG
+    # should know how many channels a dataset has.
+    cfg = TrainConfig(
+        dataset="cifar10",
+        image_size=16,
+        batch_size=4,
+        num_workers=0,
+        base_channels=8,
+        channel_mult=(1,),
+        num_res_blocks=1,
+        attn_resolutions=(),
+        num_timesteps=10,
+        num_epochs=1,
+        ema_warmup=0,
+        lr_warmup=0,
+        amp=False,
+        device="cpu",
+        sample_every=1,
+        num_samples=2,
+        sample_steps=5,
+        val_steps=5,
+        val_every=0,
+        num_classes=10,
+        out_dir=tmp_path / "contents",
+        ckpt_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    batches = [(torch.randn(4, 3, 16, 16), torch.arange(4, dtype=torch.long)) for _ in range(2)]
+    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+
+    train_module.train_mnist(cfg)
+
+    # save_image writes RGB whatever it is handed, so the mode proves nothing:
+    # what distinguishes a colour run is that the channels actually differ.
+    grid = cfg.out_dir / "sample_0001.png"
+    assert grid.is_file()
+    assert _has_colour(grid)
+
+    _, _, loaded = load_for_sampling(cfg.ckpt_dir / train_module.LAST_CHECKPOINT, device="cpu")
+    assert loaded.dataset == "cifar10"
+
+    out = sample_from_checkpoint(
+        cfg.ckpt_dir / train_module.LAST_CHECKPOINT,
+        tmp_path / "gen.png",
+        num_images=2,
+        num_steps=2,
+        device="cpu",
+    )
+    assert _has_colour(out)

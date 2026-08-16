@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from tinydiffusion.data.mnist import MNIST_CHANNELS, mnist_dataloader
+from tinydiffusion.data.datasets import image_dataloader
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
@@ -160,7 +160,7 @@ def generate_images(
         yield ddim_sample(
             diffusion,
             batch,
-            (MNIST_CHANNELS, cfg.image_size, cfg.image_size),
+            (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
             cfg.device,
             num_steps=num_steps,
             eta=eta,
@@ -243,7 +243,8 @@ def fid_for_checkpoint(
 
         extractor = InceptionFeatures().to(cfg.device)
 
-    loader = mnist_dataloader(
+    loader = image_dataloader(
+        cfg.dataset_spec(),
         data_root if data_root is not None else cfg.data_root,
         batch_size=batch,
         train=split == "train",

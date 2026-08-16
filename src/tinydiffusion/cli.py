@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from tinydiffusion import __version__
+from tinydiffusion.data.datasets import dataset_names
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.sampling import sample_from_checkpoint
@@ -57,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, help="Path to a training config file. Omit to use the defaults."
     )
     train.add_argument("--resume", type=Path, help="Checkpoint to continue training from.")
+    train.add_argument(
+        "--dataset",
+        choices=dataset_names(),
+        help="Dataset to train on, overriding the config. A conditional run's "
+        "num_classes has to match it.",
+    )
     train.add_argument("--seed", type=int, help="Random seed, overriding the config.")
     train.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
     train.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
@@ -212,6 +219,7 @@ def _train(args: argparse.Namespace) -> int:
     overrides = {
         name: getattr(args, name)
         for name in (
+            "dataset",
             "seed",
             "device",
             "num_epochs",

@@ -1,19 +1,25 @@
 """Datasets, transforms and dataloader construction."""
 
-from tinydiffusion.data.mnist import (
-    MNIST_CHANNELS,
-    MNIST_NATIVE_SIZE,
+from tinydiffusion.data.datasets import (
+    DATASETS,
+    DEFAULT_DATASET,
+    DatasetSpec,
+    dataset_names,
+    dataset_spec,
     denormalize,
-    mnist_dataloader,
-    mnist_dataset,
-    mnist_transform,
+    image_dataloader,
+    image_dataset,
+    image_transform,
 )
 
 __all__ = [
-    "MNIST_CHANNELS",
-    "MNIST_NATIVE_SIZE",
+    "DATASETS",
+    "DEFAULT_DATASET",
+    "DatasetSpec",
+    "dataset_names",
+    "dataset_spec",
     "denormalize",
-    "mnist_dataloader",
-    "mnist_dataset",
-    "mnist_transform",
+    "image_dataloader",
+    "image_dataset",
+    "image_transform",
 ]

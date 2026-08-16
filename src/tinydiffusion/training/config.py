@@ -8,6 +8,7 @@ from typing import Any, Literal, Self
 
 import torch
 
+from tinydiffusion.data.datasets import DEFAULT_DATASET, DatasetSpec, dataset_spec
 from tinydiffusion.diffusion.gaussian_diffusion import LossType, ModelMeanType, ModelVarType
 
 # Fields whose declared type is not what TOML (or a checkpoint's provenance
@@ -33,6 +34,12 @@ class TrainConfig:
     gets built; any other combination is served by
     :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion`.
 
+    ``dataset`` names an entry in
+    :data:`~tinydiffusion.data.datasets.DATASETS`, which is where the channel
+    count, the label space and the augmentation come from. Nothing downstream
+    hard-codes any of them, so switching datasets is this field plus whatever
+    ``num_classes`` and ``image_size`` the new one implies.
+
     ``num_classes`` opts into class-conditional training — 10 for MNIST's
     digits. ``class_dropout`` is the fraction of training labels replaced by
     the null token, which is what gives the same network an unconditional
@@ -57,6 +64,7 @@ class TrainConfig:
     """
 
     # data
+    dataset: str = DEFAULT_DATASET
     data_root: Path = Path("data")
     image_size: int = 32
     batch_size: int = 128
@@ -119,11 +127,16 @@ class TrainConfig:
         """Reject configurations that would only fail an epoch into the run.
 
         Raises:
-            ValueError: if the schedule is unknown, a step count cannot index
-                the training schedule, a count that must be non-negative is
-                not, or the conditioning settings do not describe a trainable
-                model.
+            ValueError: if the dataset is unregistered, the schedule is
+                unknown, a step count cannot index the training schedule, a
+                count that must be non-negative is not, or the conditioning
+                settings do not describe a trainable model.
         """
+        # Raises on an unregistered name, and is what every downstream shape
+        # is read from, so it is checked before anything else can use it.
+        spec = self.dataset_spec()
+        if self.image_size < 1:
+            raise ValueError(f"image_size must be positive, got {self.image_size}")
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
         if not 1 <= self.sample_steps <= self.num_timesteps:
@@ -142,19 +155,31 @@ class TrainConfig:
             raise ValueError(f"lr_warmup must not be negative, got {self.lr_warmup}")
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
-        self._check_conditioning()
+        self._check_conditioning(spec)
         self.diffusion_types()
 
-    def _check_conditioning(self) -> None:
+    def _check_conditioning(self, spec: DatasetSpec) -> None:
         """Reject conditioning settings that cannot produce what they promise.
 
+        Args:
+            spec: the dataset being trained on, whose label space
+                ``num_classes`` has to match.
+
         Raises:
-            ValueError: if the class count is not positive, the dropout rate
-                is out of range, or guidance is asked for from a model that
-                will not learn the unconditional prediction it needs.
+            ValueError: if the class count does not match the dataset's, the
+                dropout rate is out of range, or guidance is asked for from a
+                model that will not learn the unconditional prediction it
+                needs.
         """
-        if self.num_classes is not None and self.num_classes < 1:
-            raise ValueError(f"num_classes must be positive when set, got {self.num_classes}")
+        if self.num_classes is not None and self.num_classes != spec.num_classes:
+            # The labels come from the dataset, so a count that disagrees with
+            # it either indexes past the embedding table or leaves rows that
+            # nothing ever trains.
+            raise ValueError(
+                f"num_classes={self.num_classes} does not match {spec.name}, which has "
+                f"{spec.num_classes} classes; use num_classes={spec.num_classes} or "
+                "leave it unset to train unconditionally"
+            )
         if not 0.0 <= self.class_dropout < 1.0:
             raise ValueError(f"class_dropout must lie in [0, 1), got {self.class_dropout}")
         if self.guidance < 0.0:
@@ -171,6 +196,21 @@ class TrainConfig:
                 "guidance needs class_dropout > 0 so the null token gets trained; "
                 "use class_dropout=0.1, or guidance=1.0 for plain conditional sampling"
             )
+
+    def dataset_spec(self) -> DatasetSpec:
+        """Resolve ``dataset`` to the registry entry it names.
+
+        Called from :meth:`__post_init__`, so a config that names nothing fails
+        while it is being read rather than once a loader is built, and again by
+        everything that needs the channel count or the label space.
+
+        Returns:
+            The spec for :attr:`dataset`.
+
+        Raises:
+            ValueError: if no dataset is registered under that name.
+        """
+        return dataset_spec(self.dataset)
 
     def diffusion_types(self) -> tuple[ModelMeanType, ModelVarType, LossType]:
         """Resolve the three parameterisation fields to their enums.

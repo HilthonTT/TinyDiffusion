@@ -74,8 +74,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `deterministic` config field and a matching `--deterministic` flag on
   `train`, forcing deterministic CUDA kernels and leaving the cuDNN autotuner
   off for the run.
-- `generator` on `mnist_dataloader`, and `train_mnist.epoch_seed`, which
-  derives one epoch's shuffle seed from the run seed and the epoch index.
+- `generator` on the dataloader, and `train_mnist.epoch_seed`, which derives
+  one epoch's shuffle seed from the run seed and the epoch index.
+- A dataset registry (`tinydiffusion.data.datasets`) and a `dataset` config
+  field, with a matching `--dataset` on `train`. `DatasetSpec` carries the
+  channel count, native size, label space and whether a horizontal flip
+  preserves the label; MNIST, Fashion-MNIST and CIFAR-10 ship registered, and
+  adding another is an entry in `DATASETS` rather than an edit to five modules.
+  `configs/cifar10.toml` is a worked three-channel example.
+- Training-split augmentation, applied only where a spec marks a flip
+  label-preserving and never to a scored split.
 
 ### Fixed
 
@@ -99,6 +107,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `tinydiffusion.data.mnist` is now `tinydiffusion.data.datasets`, and its
+  MNIST-specific names are general: `MNIST_CHANNELS` is `DatasetSpec.channels`,
+  `mnist_transform`/`mnist_dataset`/`mnist_dataloader` are
+  `image_transform`/`image_dataset`/`image_dataloader` and take a spec.
+- `dataset` is part of `ARCHITECTURE_FIELDS`, so `--resume` refuses a
+  checkpoint trained on a different one rather than failing on a channel-count
+  mismatch deep inside `load_state_dict`.
+- `num_classes` has to match the dataset's label space. It was previously
+  unchecked, so a count below the real one trained until a batch carried a
+  label past the end of the embedding table.
+- `/api/status` reports the checkpoint's `dataset`.
 - A `Ctrl+C` save now writes `interrupted.pt` rather than overwriting
   `last.pt`. An interrupt lands mid-epoch, so its weights are worse than the
   ones the previous epoch finished on, and it is recorded under that previous

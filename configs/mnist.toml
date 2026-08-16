@@ -7,6 +7,7 @@
 # appear in exactly one table.
 
 [data]
+dataset = "mnist"       # see configs/cifar10.toml for the other registered sets
 data_root = "data"
 image_size = 32
 batch_size = 128

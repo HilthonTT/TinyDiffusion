@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torchvision.utils import save_image
 
-from tinydiffusion.data.mnist import MNIST_CHANNELS, denormalize
+from tinydiffusion.data.datasets import denormalize
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned, cycled_labels
@@ -148,7 +148,7 @@ def sample_from_checkpoint(
     images = ddim_sample(
         diffusion,
         num_images,
-        (MNIST_CHANNELS, cfg.image_size, cfg.image_size),
+        (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
         cfg.device,
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=eta,

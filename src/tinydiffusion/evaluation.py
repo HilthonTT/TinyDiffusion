@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from tinydiffusion.data.mnist import mnist_dataloader
+from tinydiffusion.data.datasets import image_dataloader
 from tinydiffusion.diffusion.guidance import Conditioned
 from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training.validation import DEFAULT_VAL_STEPS, eval_timesteps
@@ -90,8 +90,10 @@ def evaluate_checkpoint(
 
     Args:
         checkpoint: file to score.
-        split: ``"test"`` for the 10k held-out split, ``"train"`` for the 60k
-            training split — scoring both is how you see overfitting.
+        split: ``"test"`` for the held-out split, ``"train"`` for the training
+            one — scoring both is how you see overfitting. Neither is
+            augmented, so the training score measures the split rather than a
+            random flip of it.
         num_steps: how many timesteps to score at.
         batch_size: images per batch, or None to reuse the checkpoint's.
         data_root: dataset directory, or None to reuse the checkpoint's.
@@ -112,7 +114,8 @@ def evaluate_checkpoint(
     diffusion, ema, cfg = load_for_sampling(checkpoint, device)
     net = ema.module if use_ema else diffusion.net
 
-    loader = mnist_dataloader(
+    loader = image_dataloader(
+        cfg.dataset_spec(),
         data_root if data_root is not None else cfg.data_root,
         batch_size=batch_size if batch_size is not None else cfg.batch_size,
         train=split == "train",
