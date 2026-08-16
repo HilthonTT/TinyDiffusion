@@ -24,10 +24,12 @@ still breaking up.*
 
 ## Quickstart
 
-Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/). Full instructions,
+including how to check the GPU was picked up, are in
+[docs/INSTALL.md](docs/INSTALL.md).
 
 ```bash
-uv sync --all-extras --dev              # creates .venv/ (~0.7 GB)
+uv sync --all-extras --dev              # creates .venv/ (~3.5 GB with CUDA)
 ./run.sh train  --config configs/smoke.toml
 ./run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
 ```
@@ -82,17 +84,20 @@ classifier-free guidance scale: 1.0 is the plain conditional prediction, and
 higher values trade variety for cleaner, more emphatically class-typical
 digits at the cost of a second forward pass per step.
 
-**Using a GPU:** it is automatic when a CUDA-capable torch is installed, and
-falls back to the CPU when not. On Windows the default wheel is CPU-only, so
-getting the GPU takes one extra install step. See
-**[USAGE.md](USAGE.md)** for that, along with configuration, disk and download
-sizes, and troubleshooting.
+**Using a GPU:** `uv sync` installs a CUDA build of PyTorch on Windows and
+Linux, so an NVIDIA GPU is picked up automatically, and training falls back to
+the CPU when none is visible — its first line says which it chose. Add
+`--no-sources` for a CPU-only environment. For scale, one MNIST epoch is about
+1.8 minutes on an RTX 5060 and 29 on a CPU. See
+**[docs/INSTALL.md](docs/INSTALL.md)** for verification and troubleshooting,
+and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
 
 ## Documentation
 
 | | |
 | --- | --- |
-| [USAGE.md](USAGE.md) | Install, GPU setup, downloads and disk use, training, sampling, evaluation, every CLI flag, config reference, troubleshooting |
+| [docs/INSTALL.md](docs/INSTALL.md) | Install, GPU setup, verification, troubleshooting |
+| [USAGE.md](USAGE.md) | Downloads and disk use, training, sampling, evaluation, every CLI flag, config reference |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 

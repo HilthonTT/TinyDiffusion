@@ -84,6 +84,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `configs/cifar10.toml` is a worked three-channel example.
 - Training-split augmentation, applied only where a spec marks a flip
   label-preserving and never to a scored split.
+- `grad_accum`, running that many micro-batches per optimiser step for an
+  effective batch of `batch_size * grad_accum`. Each group is averaged over the
+  batches it holds, so a ragged trailing group is not a fractional update.
+- `lr_schedule = "cosine"`, decaying the learning rate to zero over the run's
+  optimiser steps after the warmup ramp. The two compose without a
+  discontinuity where they meet. `constant`, the previous behaviour, stays the
+  default.
+- `betas` and `weight_decay`, and `train_mnist.lr_factor` alongside them.
+- `amp_dtype`, choosing fp16 (scaled, as before) or bf16 (unscaled, no skipped
+  steps, Ampere or newer, with a reported fallback to fp16 where unsupported).
+- `compile`, wrapping the network in `torch.compile` for the training step
+  only. The checkpoint, the EMA and the samplers keep the eager module they
+  share parameters with, so a compiled run's checkpoints carry no
+  `_orig_mod.` prefix.
+- `channels_last`, applied to the network before the EMA is taken and to each
+  batch as it lands. Worth about 11% on an RTX 5060 at the shipped MNIST
+  settings, where bf16 alone is worth nothing measurable.
+- A `compile` run on CUDA without Triton installed now says so at startup and
+  trains eagerly, rather than failing on the first batch inside dynamo. The
+  PyTorch Windows wheels do not ship Triton.
+- `docs/INSTALL.md`: install, GPU verification and troubleshooting.
 
 ### Fixed
 
@@ -118,6 +139,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchecked, so a count below the real one trained until a batch carried a
   label past the end of the embedding table.
 - `/api/status` reports the checkpoint's `dataset`.
+- The optimiser is AdamW rather than Adam. At the default `weight_decay = 0.0`
+  the two are the same algorithm, so nothing about an existing run changes, and
+  an Adam checkpoint resumes into it unaltered.
+- `fid_for_checkpoint` moves a caller-supplied extractor to the device the run
+  resolved to, when it is an `nn.Module`. One built on the CPU and handed to a
+  run that resolved to CUDA previously failed inside a matmul, complaining
+  about `mat2` rather than about a device.
+- `EMA.update` folds the average through `torch._foreach_lerp_` — the same
+  arithmetic in a handful of fused kernels rather than one per parameter
+  tensor — and refuses a model whose parameter count does not match.
+- A `--resume` checkpoint is read and checked before the dataset is built, so a
+  mismatched config fails without first waiting on a download.
+- `uv sync` installs a CUDA build of PyTorch on Windows, where PyPI's wheel is
+  CPU-only. `pyproject.toml` points the Windows `torch` and `torchvision`
+  wheels at PyTorch's `cu132` index through an explicit `[tool.uv.sources]`
+  entry, and `uv.lock` carries both builds behind a platform marker. The CUDA
+  build previously had to be installed by hand, outside the lockfile, where the
+  next `uv sync` — or the implicit one a bare `uv run` performs — silently
+  replaced it with the CPU wheel. CI opts out with `--no-sources`.
 - A `Ctrl+C` save now writes `interrupted.pt` rather than overwriting
   `last.pt`. An interrupt lands mid-epoch, so its weights are worse than the
   ones the previous epoch finished on, and it is recorded under that previous

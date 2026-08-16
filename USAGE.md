@@ -20,6 +20,10 @@ the project *is*, see [README.md](README.md); for contributing, see
 
 ## Install
 
+> A fuller walkthrough, with GPU setup and troubleshooting, lives in
+> [docs/INSTALL.md](docs/INSTALL.md).
+
+
 Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
@@ -633,6 +637,63 @@ num_timesteps = 1000
 schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 ```
 
+### Going faster
+
+Everything here is off or neutral by default, because each one is a change you
+should measure on your own hardware rather than inherit:
+
+```toml
+[optimisation]
+grad_accum = 2          # effective batch of batch_size * grad_accum
+lr_schedule = "cosine"  # decay to zero over the run, after the warmup ramp
+
+[bookkeeping]
+amp_dtype = "bf16"      # no gradient scaler, no skipped steps
+compile = true          # torch.compile the training step
+channels_last = true    # measure this one; it can lose on a small model
+```
+
+Measured on an RTX 5060 at the `configs/mnist.toml` settings (batch 128, 32px,
+`base_channels = 64`), 25 steps after a warmup:
+
+| Setting | ms/step | vs default |
+| --- | --- | --- |
+| fp16 (the default) | 203 | — |
+| bf16 | 206 | 0.98x |
+| fp16 + `channels_last` | 182 | **1.11x** |
+| bf16 + `channels_last` | 183 | 1.11x |
+
+So on that card `channels_last` is worth about 11% and `amp_dtype = "bf16"`
+buys no throughput — its argument is stability, not speed: no loss scaler, and
+so no skipped steps. Both are worth re-measuring on your own card and at your
+own width; these numbers do not transfer.
+
+`compile` wraps the network for the training step only. The checkpoint, the
+EMA and every sampler keep the eager module, which shares its parameters — so a
+compiled run writes ordinary checkpoints rather than ones whose keys all carry
+a `_orig_mod.` prefix, and the first batch pays the compile cost once.
+
+> **On Windows, `compile` needs Triton**, which the PyTorch Windows wheels do
+> not ship: `pip install triton-windows`. Without it the run says so on
+> startup and trains eagerly, rather than failing on the first batch several
+> frames inside dynamo. It is therefore unmeasured here.
+
+`amp_dtype = "bf16"` turns the gradient scaler off, since bfloat16 has
+float32's exponent range and nothing to overflow. That also means no skipped
+steps: `train/skipped_step` stays at zero, and it is not hiding anything. On a
+GPU without bfloat16 the run says so and falls back to fp16.
+
+`grad_accum` buys an effective batch larger than VRAM allows. Each group is
+averaged over the batches it actually holds, including the ragged one a
+non-dividing loader leaves at the end of an epoch, so the last update of an
+epoch is not quietly a fraction of the others. `lr_warmup` and `lr_schedule`
+count optimiser steps, so raising `grad_accum` covers proportionally more data
+per step of the schedule.
+
+The optimiser is AdamW. At the default `weight_decay = 0.0` that is Adam
+exactly — decoupled decay is the only thing the two differ in — so turning it
+on is an opt-in, and `betas` is there for the runs that need it.
+
 ### Choosing a dataset
 
 `dataset` names an entry in the registry in `tinydiffusion/data/datasets.py`:
@@ -766,12 +827,19 @@ starting it over, not `--resume`.
 | `num_epochs` | 30 | |
 | `lr` | 2e-4 | Adam |
 | `lr_warmup` | 500 | Optimiser steps to ramp the LR over; 0 disables |
+| `lr_schedule` | `constant` | Or `cosine`, decaying to zero after the ramp |
+| `betas` | `[0.9, 0.999]` | AdamW moment decays |
+| `weight_decay` | 0.0 | Decoupled; at 0 AdamW is Adam |
+| `grad_accum` | 1 | Micro-batches per optimiser step |
 | `grad_clip` | 1.0 | 0 disables clipping |
 | `ema_decay` | 0.9999 | Sample quality depends on this |
 | `ema_warmup` | 2000 | Steps over which the decay ramps in |
 | `seed` | 0 | Python, NumPy and torch RNGs; with the epoch index, fixes the batch order |
 | `deterministic` | `false` | Force deterministic CUDA kernels and disable the cuDNN autotuner, at a throughput cost |
-| `amp` | `true` | fp16 autocast; ignored off CUDA |
+| `amp` | `true` | Autocast; ignored off CUDA |
+| `amp_dtype` | `fp16` | Or `bf16`, which runs unscaled but wants Ampere or newer |
+| `compile` | `false` | `torch.compile` the training step |
+| `channels_last` | `false` | Worth measuring rather than assuming |
 | `sample_every` | 1 | Epochs between sample grids; 0 disables |
 | `num_samples` | 16 | Images per grid |
 | `sample_steps` | 50 | DDIM steps for those grids |

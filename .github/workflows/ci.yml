@@ -14,7 +14,10 @@ permissions:
   contents: read
 
 env:
-  # Keep CI on CPU wheels: the CUDA builds are multi-GB and useless on hosted runners.
+  # Keep CI on CPU wheels: the CUDA builds are multi-GB and useless on hosted
+  # runners. `--no-sources` on every sync below is what does it — it ignores
+  # the [tool.uv.sources] table that points Windows at PyTorch's CUDA index —
+  # and UV_TORCH_BACKEND covers anything reaching for the pip interface.
   UV_TORCH_BACKEND: cpu
   FORCE_COLOR: "1"
 
@@ -32,7 +35,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --no-sources
 
       - name: Ruff format check
         run: uv run ruff format --check .
@@ -61,7 +64,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+        run: uv sync --all-extras --dev --no-sources --python ${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run pytest --cov --cov-report=xml -m "not gpu"

@@ -14,7 +14,7 @@ from tinydiffusion.diffusion.gaussian_diffusion import LossType, ModelMeanType, 
 # Fields whose declared type is not what TOML (or a checkpoint's provenance
 # dict, which stringifies Paths) hands back, so they need coercing on the way in.
 _PATH_FIELDS = frozenset({"data_root", "out_dir", "ckpt_dir", "log_dir"})
-_TUPLE_FIELDS = frozenset({"channel_mult", "attn_resolutions"})
+_TUPLE_FIELDS = frozenset({"channel_mult", "attn_resolutions", "betas"})
 
 
 @dataclass(slots=True)
@@ -49,6 +49,26 @@ class TrainConfig:
     ``lr_warmup`` ramps the learning rate linearly from zero over that many
     optimiser steps before holding it at ``lr``. Diffusion training is unstable
     in the first few hundred steps at full LR; 0 turns the ramp off.
+    ``lr_schedule`` decides what happens after the ramp: ``constant`` holds
+    ``lr`` for the rest of the run, and ``cosine`` decays it to zero over the
+    remaining optimiser steps, which usually buys a little final quality. The
+    decay is a function of ``num_epochs``, so resuming with a different value
+    resumes onto a different curve.
+
+    ``grad_accum`` runs that many micro-batches per optimiser step, for an
+    effective batch of ``batch_size * grad_accum`` in the memory of one
+    ``batch_size``. It multiplies neither the epoch nor the logged loss: what
+    it changes is how many batches go into each update, so ``lr_warmup`` and
+    the LR schedule — which count updates — cover proportionally more data.
+
+    ``amp_dtype`` picks the autocast type on CUDA. ``fp16`` needs the gradient
+    scaler and can skip a step when it overflows; ``bf16`` has the range not to
+    and so runs unscaled, but wants Ampere or newer. ``compile`` wraps the
+    network in :func:`torch.compile` for training only — the checkpoint, the
+    EMA and every sampler keep the eager module, so a compiled run's
+    checkpoints stay ordinary ones. ``channels_last`` is worth measuring rather
+    than assuming: it wins on wide convolutional stacks under AMP and can lose
+    on a small one.
 
     ``deterministic`` trades throughput for bit-reproducibility: it forces
     deterministic cuDNN/cuBLAS kernels and turns off the cuDNN autotuner, whose
@@ -95,6 +115,10 @@ class TrainConfig:
     num_epochs: int = 30
     lr: float = 2e-4
     lr_warmup: int = 500  # optimiser steps to ramp the LR over; 0 disables it
+    lr_schedule: Literal["constant", "cosine"] = "constant"
+    betas: tuple[float, float] = (0.9, 0.999)
+    weight_decay: float = 0.0
+    grad_accum: int = 1  # micro-batches per optimiser step
     grad_clip: float = 1.0
     ema_decay: float = 0.9999
     ema_warmup: int = 2000
@@ -108,6 +132,9 @@ class TrainConfig:
     seed: int = 0
     deterministic: bool = False
     amp: bool = True
+    amp_dtype: Literal["fp16", "bf16"] = "fp16"
+    compile: bool = False
+    channels_last: bool = False
     sample_every: int = 1
     num_samples: int = 16
     sample_steps: int = 50
@@ -153,6 +180,18 @@ class TrainConfig:
             raise ValueError(f"val_batches must not be negative, got {self.val_batches}")
         if self.lr_warmup < 0:
             raise ValueError(f"lr_warmup must not be negative, got {self.lr_warmup}")
+        if self.lr_schedule not in ("constant", "cosine"):
+            raise ValueError(
+                f"unknown lr_schedule {self.lr_schedule!r}, expected 'constant' or 'cosine'"
+            )
+        if self.grad_accum < 1:
+            raise ValueError(f"grad_accum must be positive, got {self.grad_accum}")
+        if self.weight_decay < 0:
+            raise ValueError(f"weight_decay must not be negative, got {self.weight_decay}")
+        if len(self.betas) != 2 or not all(0.0 <= b < 1.0 for b in self.betas):
+            raise ValueError(f"betas must be two values in [0, 1), got {self.betas}")
+        if self.amp_dtype not in ("fp16", "bf16"):
+            raise ValueError(f"unknown amp_dtype {self.amp_dtype!r}, expected 'fp16' or 'bf16'")
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
         self._check_conditioning(spec)

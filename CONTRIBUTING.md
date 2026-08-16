@@ -16,11 +16,16 @@ uv sync --all-extras --dev
 uv run pre-commit install
 ```
 
-`uv sync` installs the CPU build of PyTorch by default. For a CUDA build:
+`uv sync` installs a CUDA build of PyTorch on Windows and Linux, and a CPU one
+on macOS. For a CPU-only environment anywhere — which is what CI uses — ignore
+the PyTorch index pinned in `pyproject.toml`:
 
 ```bash
-UV_TORCH_BACKEND=cu124 uv sync --all-extras --dev   # PowerShell: $env:UV_TORCH_BACKEND="cu124"
+uv sync --all-extras --dev --no-sources
 ```
+
+See [docs/INSTALL.md](docs/INSTALL.md) for the details, and for checking that
+the wheel supports your card.
 
 ## Everyday commands
 

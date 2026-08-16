@@ -122,3 +122,37 @@ def test_a_dataset_may_be_trained_unconditionally():
 def test_switching_dataset_changes_the_channel_count_the_model_is_built_from():
     assert TrainConfig(dataset="mnist").dataset_spec().channels == 1
     assert TrainConfig(dataset="cifar10").dataset_spec().channels == 3
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"grad_accum": 0}, "grad_accum"),
+        ({"weight_decay": -0.1}, "weight_decay"),
+        ({"betas": (0.9,)}, "betas"),
+        ({"betas": (0.9, 1.0)}, "betas"),
+        ({"amp_dtype": "fp8"}, "amp_dtype"),
+        ({"lr_schedule": "linear"}, "lr_schedule"),
+    ],
+)
+def test_bad_optimisation_settings_are_refused_when_the_config_is_read(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        TrainConfig(**kwargs)
+
+
+def test_betas_survive_the_toml_round_trip(tmp_path):
+    # TOML has no tuple, so an uncoerced list would reach AdamW as a list and
+    # compare unequal to the checkpoint's provenance on resume.
+    path = tmp_path / "c.toml"
+    path.write_text("""
+    [optimisation]
+    betas = [0.85, 0.995]
+    """)
+    assert load_config(path).betas == (0.85, 0.995)
+
+
+def test_the_performance_settings_default_to_the_conservative_choice():
+    # Each is a behaviour or throughput change the user should opt into.
+    cfg = TrainConfig()
+    assert (cfg.compile, cfg.channels_last, cfg.grad_accum) == (False, False, 1)
+    assert (cfg.amp_dtype, cfg.lr_schedule, cfg.weight_decay) == ("fp16", "constant", 0.0)

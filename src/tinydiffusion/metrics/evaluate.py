@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from tinydiffusion.data.datasets import image_dataloader
@@ -242,6 +243,14 @@ def fid_for_checkpoint(
         from tinydiffusion.metrics.inception import InceptionFeatures
 
         extractor = InceptionFeatures().to(cfg.device)
+    elif isinstance(extractor, nn.Module):
+        # A supplied extractor was built without knowing where this would run —
+        # `device=None` resolves to CUDA when there is a GPU, whatever device
+        # the checkpoint was trained on. Left alone it fails several layers
+        # down, as a matmul complaining about mat2 rather than about a device.
+        # Only for a Module: FeatureExtractor promises `dim` and a call, so
+        # anything else is the caller's to place.
+        extractor = extractor.to(cfg.device)
 
     loader = image_dataloader(
         cfg.dataset_spec(),

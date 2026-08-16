@@ -38,7 +38,10 @@ class StubExtractor(nn.Module):
         super().__init__()
         self.dim = dim
         g = torch.Generator().manual_seed(0)
-        self.weight = torch.randn(image_size * image_size, dim, generator=g)
+        # A buffer, not an attribute: a bare tensor does not follow the module
+        # across `.to(device)`, which passes on a CPU-only machine and fails
+        # everywhere else.
+        self.register_buffer("weight", torch.randn(image_size * image_size, dim, generator=g))
         self.seen = 0
 
     def forward(self, images):

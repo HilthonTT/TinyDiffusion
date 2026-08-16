@@ -25,6 +25,12 @@ class EMA:
         self.module = copy.deepcopy(model).eval()
         for p in self.module.parameters():
             p.requires_grad_(False)
+        # Held rather than re-walked per update: the fused kernels below take
+        # lists, and this runs once per optimiser step for the whole run.
+        # Typed as plain tensors: Parameter is a Tensor, but `list` is
+        # invariant, and the fused kernels below are annotated over tensors.
+        self._params: list[torch.Tensor] = list(self.module.parameters())
+        self._buffers: list[torch.Tensor] = list(self.module.buffers())
 
     @property
     def current_decay(self) -> float:
@@ -46,12 +52,31 @@ class EMA:
     def update(self, model: nn.Module) -> None:
         """Fold one optimiser step of `model` into the averaged weights.
 
+        The parameter average goes through ``torch._foreach_lerp_``, which is
+        the same arithmetic as a ``lerp_`` per parameter but launches a handful
+        of fused kernels instead of one per tensor. At a few hundred parameter
+        tensors and one call per optimiser step, the launch overhead is
+        otherwise a measurable slice of a small model's step time.
+
         Args:
             model: the live model, after its parameter update.
+
+        Raises:
+            ValueError: if `model` does not have the same tensors as the module
+                the average was built from.
         """
         decay = self.current_decay
         self.step += 1
-        for ema_p, p in zip(self.module.parameters(), model.parameters(), strict=True):
-            ema_p.lerp_(p.detach(), 1.0 - decay)
-        for ema_b, b in zip(self.module.buffers(), model.buffers(), strict=True):
+
+        params: list[torch.Tensor] = list(model.parameters())
+        if len(params) != len(self._params):
+            raise ValueError(
+                f"model has {len(params)} parameter tensors, but this EMA was built from "
+                f"{len(self._params)}"
+            )
+        torch._foreach_lerp_(self._params, params, 1.0 - decay)
+
+        # Left as a loop: buffers are few, are not necessarily floating point,
+        # and are copied rather than averaged.
+        for ema_b, b in zip(self._buffers, model.buffers(), strict=True):
             ema_b.copy_(b)

@@ -56,6 +56,30 @@ dev = [
     "pre-commit>=4.0",
 ]
 
+# ---------------------------------------------------------------------------
+# uv: where PyTorch comes from
+# ---------------------------------------------------------------------------
+# PyPI's torch wheel is CUDA-capable on Linux — it pulls the nvidia-* runtime
+# packages — but CPU-only on Windows, where the CUDA builds live on PyTorch's
+# own index instead. Left alone, `uv sync` therefore gives a Windows machine a
+# CPU torch however good its GPU is, and puts the CPU wheel back over any
+# manual fix the next time anything syncs.
+#
+# Pinning the Windows wheels to the CUDA index makes the GPU the default there,
+# which is what a machine with a GPU wants. `explicit = true` keeps every other
+# package coming from PyPI.
+#
+# CI opts out with `--no-sources`, which ignores this table: hosted runners
+# have no GPU, and the CUDA wheels are gigabytes.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+
 [tool.hatch.version]
 path = "src/tinydiffusion/version.py"
 

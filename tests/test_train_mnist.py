@@ -6,7 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
-from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion
+from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion, LossTerms
 from tinydiffusion.sampling import load_for_sampling, sample_from_checkpoint
 from tinydiffusion.training import train_mnist as train_module
 from tinydiffusion.training.config import TrainConfig
@@ -621,3 +621,258 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
         device="cpu",
     )
     assert _has_colour(out)
+
+
+# --------------------------------------------------------------- LR schedule
+
+
+def test_the_warmup_ramp_is_unchanged_by_a_constant_schedule():
+    factor = lambda step: train_module.lr_factor(  # noqa: E731
+        step, warmup=10, total=100, schedule="constant"
+    )
+    assert factor(0) == 0.0
+    assert factor(5) == pytest.approx(0.5)
+    assert factor(10) == 1.0
+    assert factor(99) == 1.0
+
+
+def test_cosine_decays_from_the_end_of_the_ramp_to_zero():
+    factor = lambda step: train_module.lr_factor(  # noqa: E731
+        step, warmup=10, total=100, schedule="cosine"
+    )
+    # The two terms have to meet at 1: a jump where they join would show up as
+    # a spike in the loss right after warmup.
+    assert factor(10) == pytest.approx(1.0)
+    assert factor(55) == pytest.approx(0.5, abs=1e-6)
+    assert factor(100) == pytest.approx(0.0, abs=1e-9)
+    assert factor(5) == pytest.approx(0.5)  # still ramping
+
+
+def test_a_run_shorter_than_its_warmup_still_has_a_schedule():
+    # total <= warmup would otherwise divide by zero or go negative.
+    assert train_module.lr_factor(3, warmup=10, total=5, schedule="cosine") == pytest.approx(0.3)
+
+
+def test_the_cosine_schedule_is_monotone_after_the_ramp():
+    factors = [
+        train_module.lr_factor(step, warmup=4, total=40, schedule="cosine") for step in range(4, 41)
+    ]
+    assert factors == sorted(factors, reverse=True)
+
+
+# ------------------------------------------------------- gradient accumulation
+
+
+@pytest.fixture
+def counted_loader(monkeypatch):
+    """A loader of `n` batches, for counting optimiser steps against."""
+
+    def build(n):
+        batches = [
+            (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(n)
+        ]
+        monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+
+    return build
+
+
+def _ema_steps(cfg) -> int:
+    ckpt = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+    return int(ckpt["ema_step"])
+
+
+def test_accumulation_takes_one_optimiser_step_per_group(tiny_cfg, counted_loader):
+    counted_loader(4)
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2)
+
+    train_module.train_mnist(cfg)
+
+    # Four batches, two per step: the EMA — and so the LR schedule, which is
+    # stepped alongside it — advances twice, not four times.
+    assert _ema_steps(cfg) == 2
+
+
+def test_a_ragged_accumulation_group_still_steps(tiny_cfg, counted_loader):
+    # Three batches at grad_accum=2 leaves a group of one. Dropping it would
+    # silently discard a third of the epoch.
+    counted_loader(3)
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2)
+
+    train_module.train_mnist(cfg)
+
+    assert _ema_steps(cfg) == 2
+
+
+def test_accumulation_logs_one_step_outcome_per_group(tiny_cfg, counted_loader):
+    counted_loader(4)
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2, val_every=0)
+
+    train_module.train_mnist(cfg)
+
+    # Averaged over the batches that reported it, the skipped-step rate has to
+    # stay a rate: recording it per micro-batch would halve it.
+    record = _records(cfg)[0]
+    assert record["train/skipped_step"] == 0.0
+    assert record["train/grad_norm"] > 0
+
+
+def test_without_accumulation_every_batch_steps(tiny_cfg, counted_loader):
+    counted_loader(4)
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=1)
+
+    train_module.train_mnist(cfg)
+
+    assert _ema_steps(cfg) == 4
+
+
+# ------------------------------------------------------------------ optimiser
+
+
+def test_the_optimiser_carries_the_configured_betas_and_decay(tiny_cfg, fake_loader):
+    cfg = dataclasses.replace(
+        tiny_cfg, num_epochs=1, betas=(0.85, 0.995), weight_decay=0.01, lr_warmup=0
+    )
+
+    train_module.train_mnist(cfg)
+
+    group = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)["optim"][
+        "param_groups"
+    ][0]
+    assert group["betas"] == (0.85, 0.995)
+    assert group["weight_decay"] == 0.01
+
+
+def test_compiling_leaves_the_checkpoint_an_ordinary_one(tiny_cfg, fake_loader, monkeypatch):
+    # torch.compile's wrapper prefixes every state-dict key with `_orig_mod.`.
+    # Training through the wrapper while checkpointing the eager module is what
+    # keeps a compiled run's checkpoints loadable by everything else. Stubbed
+    # rather than really compiled: inductor is slow and needs a toolchain.
+    compiled = []
+
+    def fake_compile(module, **kwargs):
+        compiled.append(module)
+        wrapper = torch.nn.Module()
+        wrapper._orig_mod = module
+        wrapper.forward = module.forward
+        return wrapper
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, compile=True)
+
+    train_module.train_mnist(cfg)
+
+    assert compiled, "torch.compile was never called"
+    keys = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)["model"]
+    assert not any(key.startswith("_orig_mod.") for key in keys)
+    load_for_sampling(cfg.ckpt_dir / train_module.LAST_CHECKPOINT, device="cpu")
+
+
+class _LinearDiffusion(torch.nn.Module):
+    """A stand-in whose loss is exactly the mean of the network's output.
+
+    Deterministic, unlike the real objective, which draws a timestep and noise
+    per image — so two runs over the same images are comparable tensor for
+    tensor.
+    """
+
+    num_timesteps = 10
+
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Conv2d(1, 1, 1, bias=False)
+        torch.nn.init.constant_(self.net.weight, 0.5)
+
+    def loss_terms(self, x, model=None):
+        out = (model if model is not None else self.net)(x)
+        return LossTerms(
+            loss=out.mean(),
+            per_sample=out.detach().flatten(1).mean(dim=1),
+            timesteps=torch.zeros(x.shape[0], dtype=torch.long),
+        )
+
+
+def _weight_after(cfg, batches, monkeypatch):
+    monkeypatch.setattr(train_module, "build_model", lambda cfg: _LinearDiffusion())
+    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+    return train_module.train_mnist(cfg).net.weight.detach().clone()
+
+
+def test_accumulating_two_batches_updates_as_one_batch_of_both(tiny_cfg, tmp_path, monkeypatch):
+    # The group is divided by its own size, so summing two half-batches has to
+    # land exactly where the whole batch would have.
+    images = torch.randn(8, 1, 16, 16)
+    labels = torch.zeros(8, dtype=torch.long)
+    base = dataclasses.replace(
+        tiny_cfg,
+        num_epochs=1,
+        num_classes=None,
+        lr_warmup=0,
+        grad_clip=0.0,
+        ema_warmup=0,
+        val_every=0,
+        sample_every=0,
+    )
+
+    with monkeypatch.context() as m:
+        split = dataclasses.replace(base, grad_accum=2, ckpt_dir=tmp_path / "split")
+        accumulated = _weight_after(split, [(images[:4], labels[:4]), (images[4:], labels[4:])], m)
+
+    with monkeypatch.context() as m:
+        whole = dataclasses.replace(base, grad_accum=1, ckpt_dir=tmp_path / "whole")
+        one_batch = _weight_after(whole, [(images, labels)], m)
+
+    assert torch.allclose(accumulated, one_batch, atol=1e-7)
+
+
+def test_a_ragged_group_is_averaged_over_what_it_holds(tiny_cfg, tmp_path, monkeypatch):
+    # A trailing group of one divided by grad_accum instead of by its own
+    # length would apply half the gradient it should.
+    images = torch.randn(4, 1, 16, 16)
+    labels = torch.zeros(4, dtype=torch.long)
+    base = dataclasses.replace(
+        tiny_cfg,
+        num_epochs=1,
+        num_classes=None,
+        lr_warmup=0,
+        grad_clip=0.0,
+        ema_warmup=0,
+        val_every=0,
+        sample_every=0,
+    )
+
+    with monkeypatch.context() as m:
+        # One batch, asked to accumulate three: the group holds one.
+        ragged = dataclasses.replace(base, grad_accum=3, ckpt_dir=tmp_path / "ragged")
+        accumulated = _weight_after(ragged, [(images, labels)], m)
+
+    with monkeypatch.context() as m:
+        plain = dataclasses.replace(base, grad_accum=1, ckpt_dir=tmp_path / "plain")
+        unaccumulated = _weight_after(plain, [(images, labels)], m)
+
+    assert torch.allclose(accumulated, unaccumulated, atol=1e-7)
+
+
+@pytest.mark.gpu
+def test_compiling_is_skipped_when_triton_is_missing(tiny_cfg, fake_loader, monkeypatch, capsys):
+    # Inductor's CUDA backend needs Triton, which the Windows wheels do not
+    # ship. Discovering that on the first batch — several frames inside dynamo,
+    # after the dataset has downloaded — is not a useful place to find out.
+    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(torch, "compile", lambda *a, **k: pytest.fail("should not compile"))
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=1, compile=True, device="cuda")
+
+    train_module.train_mnist(cfg)
+
+    assert "Triton is not installed" in capsys.readouterr().out
+
+
+def test_compiling_goes_ahead_on_cpu_where_triton_is_not_needed():
+    # The CPU backend generates C++ rather than Triton kernels.
+    assert train_module._can_compile("cpu")
+
+
+def test_compiling_needs_triton_on_cuda(monkeypatch):
+    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: None)
+    assert not train_module._can_compile("cuda")
+    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: object())
+    assert train_module._can_compile("cuda")

@@ -1,10 +1,12 @@
 """MNIST training loop for TinyDiffusion."""
 
+import importlib.util
+import math
 import shutil
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -44,6 +46,7 @@ __all__ = [
     "check_resume_compatible",
     "epoch_seed",
     "load_checkpoint",
+    "lr_factor",
     "read_checkpoint",
     "restore_checkpoint",
     "save_checkpoint",
@@ -122,6 +125,69 @@ def _warmup_lr(step: int, warmup: int) -> float:
     if warmup <= 0:
         return 1.0
     return min(step, warmup) / warmup
+
+
+def _cosine_lr(step: int, warmup: int, total: int) -> float:
+    """Cosine decay factor over the steps that follow the warmup ramp.
+
+    Args:
+        step: optimiser steps completed.
+        warmup: steps the ramp covers, which the decay starts after.
+        total: optimiser steps the whole run will take.
+
+    Returns:
+        A multiplier in [0, 1], 1 at the end of the ramp and 0 at the last step.
+    """
+    decaying = total - warmup
+    if decaying <= 0:
+        # A run shorter than its own warmup never reaches the decay; the ramp
+        # is the whole schedule and this must not divide by zero.
+        return 1.0
+    progress = min(max(step - warmup, 0) / decaying, 1.0)
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def lr_factor(step: int, *, warmup: int, total: int, schedule: str) -> float:
+    """The multiplier on ``cfg.lr`` at a given optimiser step, for LambdaLR.
+
+    Args:
+        step: optimiser steps completed.
+        warmup: steps to ramp over. 0 disables the ramp.
+        total: optimiser steps the whole run will take, which the cosine decay
+            is measured against.
+        schedule: ``"constant"`` to hold ``lr`` after the ramp, ``"cosine"`` to
+            decay it to zero over what remains.
+
+    Returns:
+        A multiplier on ``cfg.lr`` in [0, 1].
+    """
+    factor = _warmup_lr(step, warmup)
+    if schedule == "cosine":
+        # Multiplied rather than branched: during the ramp the cosine term is
+        # still 1, so the two compose without a discontinuity where they meet.
+        factor *= _cosine_lr(step, warmup, total)
+    return factor
+
+
+def _can_compile(device_type: str) -> bool:
+    """Whether :func:`torch.compile` can actually build kernels here.
+
+    Inductor needs Triton for its CUDA backend, and Triton is not part of the
+    Windows PyTorch wheels. Without this check the failure lands on the first
+    batch, several frames inside dynamo, long after the run has downloaded a
+    dataset and printed its plan — and it is a hard stop rather than something
+    the run can carry on without.
+
+    Args:
+        device_type: ``"cuda"``, ``"cpu"``, or whatever the run resolved to.
+
+    Returns:
+        True when compiling is worth attempting. The CPU backend generates C++
+        rather than Triton, so it is not subject to the same check.
+    """
+    if device_type != "cuda":
+        return True
+    return importlib.util.find_spec("triton") is not None
 
 
 def epoch_seed(seed: int, epoch: int) -> int:
@@ -585,6 +651,12 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     device_type = torch.device(cfg.device).type
     use_amp = cfg.amp and device_type == "cuda"
+    amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
+    if use_amp and amp_dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        # Pre-Ampere. Saying so beats an unexplained slowdown from a dtype the
+        # hardware only emulates.
+        print("this GPU has no bfloat16 support, falling back to fp16")
+        amp_dtype = torch.float16
     if device_type == "cuda":
         # Input shapes are fixed for the whole run, so autotuning pays off once
         # — but the autotuner picks whichever kernel wins on the day, so it is
@@ -595,28 +667,42 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         enable_tf32()
 
     diffusion = build_model(cfg).to(cfg.device)
+    if cfg.channels_last:
+        # Before the EMA is taken, so the shadow weights carry the same layout
+        # and the copy back at the end of the run does not have to convert.
+        # `memory_format` is absent from the shipped `Module.to` overloads.
+        diffusion.net.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
 
-    optim = torch.optim.Adam(diffusion.parameters(), lr=cfg.lr)
-    # Stepped once per *applied* optimiser step below, so the ramp counts real
-    # updates rather than batches AMP threw away.
-    sched = torch.optim.lr_scheduler.LambdaLR(
-        optim, lr_lambda=lambda step: _warmup_lr(step, cfg.lr_warmup)
-    )
-    scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
+    # Compiled for the training step only, and only as a wrapper: it shares its
+    # parameters with the eager module, which is what the checkpoint, the EMA
+    # and every sampler go on using. A compiled run therefore writes ordinary
+    # checkpoints, rather than ones whose keys all carry a `_orig_mod.` prefix.
+    train_net: nn.Module = diffusion.net
+    if cfg.compile and _can_compile(device_type):
+        # torch.compile is annotated as returning a bare callable; what it
+        # returns is a Module wrapping — and sharing the parameters of — the
+        # one it was given.
+        train_net = cast(nn.Module, torch.compile(diffusion.net))
+    elif cfg.compile:
+        print(
+            "compile is on but Triton is not installed, so the CUDA backend cannot build "
+            "kernels; training eagerly instead (pip install triton-windows on Windows)"
+        )
 
-    start_epoch = 0
-    best_val: float | None = None
+    # AdamW rather than Adam, and identical to it at the default
+    # weight_decay=0: decoupled decay is what the two differ in.
+    optim = torch.optim.AdamW(
+        diffusion.parameters(), lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
+    )
+
+    # Read before the resume so a mismatch names the setting that changed
+    # instead of listing every tensor that no longer fits — and before the
+    # dataset is touched, so it fails without waiting on a download.
+    ckpt: dict[str, Any] | None = None
     if resume is not None:
         ckpt = read_checkpoint(resume, device=cfg.device)
-        # Before load_state_dict, so a mismatch names the setting that changed
-        # instead of listing every tensor that no longer fits.
         check_resume_compatible(ckpt, cfg, path=resume)
-        start_epoch = restore_checkpoint(
-            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
-        )
-        best_val = ckpt.get("best_val")
-        print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
     # Re-seeded per epoch below, so the batch order is a function of the epoch
     # index rather than of how many epochs this process has already run.
@@ -633,6 +719,36 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         augment=True,
         generator=loader_rng,
     )
+
+    # Optimiser steps, not batches: an accumulated group is one step, and the
+    # ragged group a non-dividing accumulation leaves still steps once.
+    steps_per_epoch = -(-len(loader) // cfg.grad_accum)
+    # Stepped once per *applied* optimiser step below, so the ramp counts real
+    # updates rather than batches AMP threw away.
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim,
+        lr_lambda=lambda step: lr_factor(
+            step,
+            warmup=cfg.lr_warmup,
+            total=steps_per_epoch * cfg.num_epochs,
+            schedule=cfg.lr_schedule,
+        ),
+    )
+    scaler = torch.amp.GradScaler(
+        device_type,
+        # bf16 carries fp32's exponent range, so there is nothing to scale
+        # against and no step to skip when the scale would have overflowed.
+        enabled=use_amp and amp_dtype is torch.float16,
+    )
+
+    start_epoch = 0
+    best_val: float | None = None
+    if ckpt is not None:
+        start_epoch = restore_checkpoint(
+            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
+        )
+        best_val = ckpt.get("best_val")
+        print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
     held_out = validation_batches(cfg)
 
@@ -655,10 +771,18 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         if held_out
         else "no validation"
     )
+    precision = f"amp {cfg.amp_dtype}" if use_amp else "amp off"
+    if cfg.compile:
+        precision += " | compiled"
+    if cfg.channels_last:
+        precision += " | channels_last"
+    steps = f"{steps_per_epoch} steps/epoch"
+    if cfg.grad_accum > 1:
+        steps += f" (x{cfg.grad_accum} accumulated, {cfg.batch_size * cfg.grad_accum} effective)"
     print(
         f"{n_params / 1e6:.2f}M parameters | {spec.name} {cfg.image_size}px x{spec.channels} | "
-        f"device {describe_device(cfg.device)} | amp {use_amp} | {conditioning} | {plan} | "
-        f"{len(loader)} steps/epoch | {scoring}"
+        f"device {describe_device(cfg.device)} | {precision} | {conditioning} | {plan} | "
+        f"{steps} | {scoring}"
     )
     if remaining <= 0:
         print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
@@ -699,12 +823,14 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
             with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
                 for batch, (x, y) in enumerate(pbar):
                     x = x.to(cfg.device, non_blocking=True)
+                    if cfg.channels_last:
+                        x = x.contiguous(memory_format=torch.channels_last)
                     if reference is None:
                         reference = x[: cfg.num_samples].detach().cpu()
                         if cfg.num_classes is not None:
                             reference_labels = y[: cfg.num_samples].detach().cpu()
 
-                    model: nn.Module | None = None
+                    model: nn.Module = train_net
                     if cfg.num_classes is not None:
                         # Dropping a fraction of the labels to the null token is
                         # the only thing training does differently: it is what
@@ -715,10 +841,21 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                             cfg.num_classes,
                             cfg.class_dropout,
                         )
-                        model = Conditioned(diffusion.net, labels)
+                        model = Conditioned(train_net, labels)
 
-                    optim.zero_grad(set_to_none=True)
-                    with torch.amp.autocast(device_type, enabled=use_amp):
+                    # Micro-batches are summed into one update. The group is
+                    # divided by its own length rather than by grad_accum, so
+                    # the ragged group a non-dividing loader leaves is still an
+                    # average over the batches it actually holds.
+                    group_start = batch - batch % cfg.grad_accum
+                    group_size = min(cfg.grad_accum, len(loader) - group_start)
+                    applies = batch + 1 == group_start + group_size
+
+                    if batch == group_start:
+                        optim.zero_grad(set_to_none=True)
+                    with torch.amp.autocast(
+                        device_type, dtype=amp_dtype if use_amp else None, enabled=use_amp
+                    ):
                         terms = diffusion.loss_terms(x, model=model)
                     loss = terms.loss
 
@@ -726,34 +863,42 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     # loss is a real Tensor rather than the Any that
                     # `nn.Module.__call__` returns, strict mypy calls this an
                     # untyped call.
-                    scaler.scale(loss).backward()  # type: ignore[no-untyped-call]
-                    grad_norm: float | None = None
-                    if cfg.grad_clip > 0:
-                        # Unscale first, or the clip threshold is applied to scaled grads.
-                        scaler.unscale_(optim)
-                        # The pre-clip norm comes back for free; it is the first
-                        # thing to look at when a loss curve goes flat or spikes.
-                        grad_norm = float(
-                            nn.utils.clip_grad_norm_(diffusion.parameters(), cfg.grad_clip)
-                        )
+                    scaler.scale(loss / group_size).backward()  # type: ignore[no-untyped-call]
 
-                    scale_before = scaler.get_scale()
-                    scaler.step(optim)
-                    scaler.update()
-                    # A shrinking scale means inf/NaN grads and a skipped optimiser
-                    # step; folding the unchanged weights in would still burn a step
-                    # of the EMA warmup.
-                    stepped = scaler.get_scale() >= scale_before
-                    if stepped:
-                        ema.update(diffusion.net)
-                        sched.step()
+                    grad_norm: float | None = None
+                    stepped = True
+                    if applies:
+                        if cfg.grad_clip > 0:
+                            # Unscale first, or the clip threshold is applied to scaled grads.
+                            scaler.unscale_(optim)
+                            # The pre-clip norm comes back for free; it is the first
+                            # thing to look at when a loss curve goes flat or spikes.
+                            grad_norm = float(
+                                nn.utils.clip_grad_norm_(diffusion.parameters(), cfg.grad_clip)
+                            )
+
+                        scale_before = scaler.get_scale()
+                        scaler.step(optim)
+                        scaler.update()
+                        # A shrinking scale means inf/NaN grads and a skipped optimiser
+                        # step; folding the unchanged weights in would still burn a step
+                        # of the EMA warmup.
+                        stepped = scaler.get_scale() >= scale_before
+                        if stepped:
+                            ema.update(diffusion.net)
+                            sched.step()
 
                     value = loss.item()
                     loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
                     pbar.set_postfix(loss=f"{loss_ema:.4f}")
 
                     images += x.shape[0]
-                    batch_metrics = {"train/loss": value, "train/skipped_step": float(not stepped)}
+                    batch_metrics = {"train/loss": value}
+                    if applies:
+                        # Only meaningful where a step was attempted; recording
+                        # them per micro-batch would dilute the rate by
+                        # grad_accum and log a stale norm alongside it.
+                        batch_metrics["train/skipped_step"] = float(not stepped)
                     if grad_norm is not None:
                         batch_metrics["train/grad_norm"] = grad_norm
                     if batch % QUARTILE_EVERY == 0:
