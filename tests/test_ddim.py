@@ -122,3 +122,75 @@ def test_a_misshapen_latent_is_rejected(echo_diffusion, shape):
     # surface as an unrelated broadcast error.
     with pytest.raises(ValueError, match="noise must be shaped"):
         ddim_sample(echo_diffusion, 3, (1, 4, 4), "cpu", num_steps=4, noise=torch.randn(*shape))
+
+
+# --- generator ------------------------------------------------------------
+
+
+def test_a_generator_makes_a_sample_reproducible(echo_diffusion):
+    def draw():
+        return ddim_sample(
+            echo_diffusion,
+            2,
+            (1, 4, 4),
+            "cpu",
+            num_steps=3,
+            generator=torch.Generator().manual_seed(11),
+        )
+
+    assert torch.equal(draw(), draw())
+
+
+def test_a_generator_covers_the_stochastic_steps_too(echo_diffusion):
+    def draw():
+        return ddim_sample(
+            echo_diffusion,
+            2,
+            (1, 4, 4),
+            "cpu",
+            num_steps=3,
+            eta=1.0,
+            generator=torch.Generator().manual_seed(11),
+        )
+
+    assert torch.equal(draw(), draw())
+
+
+def test_different_generator_seeds_diverge(echo_diffusion):
+    first = ddim_sample(
+        echo_diffusion, 2, (1, 4, 4), "cpu", num_steps=3, generator=torch.Generator().manual_seed(1)
+    )
+    second = ddim_sample(
+        echo_diffusion, 2, (1, 4, 4), "cpu", num_steps=3, generator=torch.Generator().manual_seed(2)
+    )
+    assert not torch.equal(first, second)
+
+
+def test_a_generator_leaves_the_global_rng_alone(echo_diffusion):
+    torch.manual_seed(5)
+    expected = torch.randn(4)
+
+    torch.manual_seed(5)
+    ddim_sample(
+        echo_diffusion,
+        2,
+        (1, 4, 4),
+        "cpu",
+        num_steps=3,
+        eta=1.0,
+        generator=torch.Generator().manual_seed(11),
+    )
+    assert torch.equal(expected, torch.randn(4))
+
+
+@pytest.mark.gpu
+def test_a_generator_on_the_wrong_device_is_rejected(echo_diffusion):
+    with pytest.raises(ValueError, match="generator is on"):
+        ddim_sample(
+            echo_diffusion,
+            1,
+            (1, 4, 4),
+            "cuda",
+            num_steps=2,
+            generator=torch.Generator().manual_seed(0),
+        )

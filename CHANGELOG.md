@@ -53,9 +53,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `DDPM.loss_terms`, which returns the per-image loss and its timesteps
   alongside the scalar, and `EMA.current_decay`.
 - `-V` as a short alias for `--version`.
+- Per-epoch held-out validation (`tinydiffusion.training.validation`), scoring
+  the EMA weights on a fixed slice of the test split at a pinned timestep grid
+  with pinned noise, so `val/loss` moves only with the weights. Configured by
+  `val_every`, `val_steps` and `val_batches`, and logged as `val/loss` and
+  `val/best_loss`.
+- `best.pt`, the lowest-scoring epoch so far, kept alongside `last.pt` and
+  controlled by `keep_best`. `keep_last` additionally retains a rolling window
+  of numbered `epoch_NNNN.pt` snapshots. Neither existed before, so a run that
+  peaked mid-training had already overwritten its best weights.
+- `train_mnist.check_resume_compatible`, which refuses a `--resume` whose
+  checkpoint was trained with a different architecture, schedule or
+  parameterisation, naming the field that changed. Previously this surfaced as
+  a raw `load_state_dict` size-mismatch dump, or — for a differing schedule —
+  not at all.
+- `ddim_sample(generator=...)`, for a reproducible sample without touching the
+  global RNG.
+- `--image-ttl` and `--keep-images` on `serve`, with matching `ServerConfig`
+  fields, bounding the rendered-PNG directory by age and by count.
 
 ### Changed
 
+- A `Ctrl+C` save now writes `interrupted.pt` rather than overwriting
+  `last.pt`. An interrupt lands mid-epoch, so its weights are worse than the
+  ones the previous epoch finished on, and it is recorded under that previous
+  epoch's number — writing it to `last.pt` replaced a good checkpoint with a
+  worse one carrying the same label.
+- The server's `seed` request field seeds a request-local generator instead of
+  calling `seed_everything`. A client's seed no longer reseeds the process, so
+  it cannot reach into concurrent requests or outlive its own.
+- The server sweeps rendered PNGs it has issued once they pass `image_ttl` or
+  fall outside `keep_images`. Nothing deleted them before, so a long-lived
+  server grew its image directory without bound.
+- `evaluation.eval_timesteps` moved to `tinydiffusion.training.validation`,
+  shared with the in-loop validation; it is still importable from
+  `tinydiffusion.evaluation`.
 - `sampling._grid_width` is now public as `sampling.grid_width`, since the
   server needs the same grid layout the CLI produces.
 - `DDPM.forward` and `DDPM.loss_terms` take a `model` argument, matching

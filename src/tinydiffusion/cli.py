@@ -9,7 +9,14 @@ from tinydiffusion import __version__
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.sampling import sample_from_checkpoint
-from tinydiffusion.server.config import DEFAULT_HOST, DEFAULT_MAX_IMAGES, DEFAULT_PORT, ServerConfig
+from tinydiffusion.server.config import (
+    DEFAULT_HOST,
+    DEFAULT_IMAGE_TTL,
+    DEFAULT_KEEP_IMAGES,
+    DEFAULT_MAX_IMAGES,
+    DEFAULT_PORT,
+    ServerConfig,
+)
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train_mnist import train_mnist
 
@@ -139,6 +146,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--image-dir", type=Path, help="Where to write PNGs. Defaults to a temp dir."
     )
     serve.add_argument(
+        "--image-ttl",
+        type=float,
+        default=DEFAULT_IMAGE_TTL,
+        metavar="SECONDS",
+        help="How long a rendered PNG is kept before it is swept. 0 keeps them forever.",
+    )
+    serve.add_argument(
+        "--keep-images",
+        type=int,
+        default=DEFAULT_KEEP_IMAGES,
+        metavar="N",
+        help="PNGs retained regardless of age, newest first. 0 for no cap.",
+    )
+    serve.add_argument(
         "--cors-origin",
         action="append",
         dest="cors_origins",
@@ -239,6 +260,8 @@ def _serve(args: argparse.Namespace) -> int:
         max_images=args.max_images,
         image_dir=args.image_dir,
         cors_origins=tuple(args.cors_origins or ()),
+        image_ttl=args.image_ttl,
+        keep_images=args.keep_images,
     )
     if not config.checkpoint.is_file():
         # uvicorn would otherwise bind the port and only fail during startup,

@@ -9,11 +9,18 @@ from tqdm import tqdm
 from tinydiffusion.data.mnist import mnist_dataloader
 from tinydiffusion.diffusion.guidance import Conditioned
 from tinydiffusion.sampling import load_for_sampling
+from tinydiffusion.training.validation import DEFAULT_VAL_STEPS, eval_timesteps
 from tinydiffusion.utils.modules import eval_mode
 from tinydiffusion.utils.seed import seed_everything
 
-DEFAULT_EVAL_STEPS = 10
-"""Timesteps to score at. Enough to cover the schedule without being slow."""
+__all__ = ["DEFAULT_EVAL_STEPS", "EvalResult", "eval_timesteps", "evaluate_checkpoint"]
+
+DEFAULT_EVAL_STEPS = DEFAULT_VAL_STEPS
+"""Timesteps to score at. Enough to cover the schedule without being slow.
+
+The same grid the training loop's per-epoch validation uses, so the two
+numbers are on one scale.
+"""
 
 
 @dataclass(slots=True)
@@ -55,24 +62,6 @@ class EvalResult:
         ]
         lines += [f"{t:6d}   {loss:.5f}" for t, loss in self.per_timestep]
         return "\n".join(lines)
-
-
-def eval_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
-    """Evenly spaced timesteps to score at, ascending.
-
-    Args:
-        num_timesteps: length of the model's schedule.
-        num_steps: how many timesteps to score.
-
-    Returns:
-        Long tensor of length ``num_steps``.
-
-    Raises:
-        ValueError: if ``num_steps`` cannot index the schedule.
-    """
-    if not 1 <= num_steps <= num_timesteps:
-        raise ValueError(f"num_steps must lie in [1, {num_timesteps}], got {num_steps}")
-    return torch.linspace(0, num_timesteps - 1, num_steps).round().long()
 
 
 @torch.no_grad()

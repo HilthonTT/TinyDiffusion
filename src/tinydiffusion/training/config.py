@@ -38,6 +38,12 @@ class TrainConfig:
     the null token, which is what gives the same network an unconditional
     prediction for ``guidance`` to extrapolate from; see
     :mod:`~tinydiffusion.diffusion.guidance`.
+
+    ``val_every`` scores a fixed slice of the held-out split after each epoch,
+    on a pinned timestep grid and pinned noise, so the number moves only with
+    the weights. ``keep_best`` uses it to maintain ``best.pt`` alongside
+    ``last.pt``: training loss alone cannot tell you which epoch to sample
+    from, and the last one is not reliably the best.
     """
 
     # data
@@ -74,6 +80,11 @@ class TrainConfig:
     ema_decay: float = 0.9999
     ema_warmup: int = 2000
 
+    # validation
+    val_every: int = 1
+    val_steps: int = 10
+    val_batches: int = 4
+
     # bookkeeping
     seed: int = 0
     amp: bool = True
@@ -82,6 +93,8 @@ class TrainConfig:
     sample_steps: int = 50
     out_dir: Path = Path("contents")
     ckpt_dir: Path = Path("checkpoints")
+    keep_best: bool = True
+    keep_last: int = 0
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
 
     # tracking
@@ -94,9 +107,10 @@ class TrainConfig:
         """Reject configurations that would only fail an epoch into the run.
 
         Raises:
-            ValueError: if the schedule is unknown, the sampling step count
-                cannot index the training schedule, or the conditioning
-                settings do not describe a trainable model.
+            ValueError: if the schedule is unknown, a step count cannot index
+                the training schedule, a count that must be non-negative is
+                not, or the conditioning settings do not describe a trainable
+                model.
         """
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
@@ -106,6 +120,14 @@ class TrainConfig:
             )
         if self.num_samples < 1:
             raise ValueError(f"num_samples must be positive, got {self.num_samples}")
+        if not 1 <= self.val_steps <= self.num_timesteps:
+            raise ValueError(
+                f"val_steps must lie in [1, {self.num_timesteps}], got {self.val_steps}"
+            )
+        if self.val_batches < 0:
+            raise ValueError(f"val_batches must not be negative, got {self.val_batches}")
+        if self.keep_last < 0:
+            raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
         self._check_conditioning()
         self.diffusion_types()
 

@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import json
 
@@ -8,6 +9,8 @@ from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion
 from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training import train_mnist as train_module
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.training.ema import EMA
+from tinydiffusion.training.interrupt import InterruptChoice
 from tinydiffusion.utils.tracking import METRICS_FILENAME
 
 
@@ -181,3 +184,201 @@ def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
     assert _records(cfg)[0]["train/loss"] > 0
     assert (cfg.ckpt_dir / "last.pt").exists()
     assert (cfg.out_dir / "sample_0002.png").exists()
+
+
+# --- resume compatibility -------------------------------------------------
+
+
+def _checkpoint(tmp_path, cfg, *, best_val=None):
+    """Write a real checkpoint for `cfg` and return its path."""
+    diffusion = train_module.build_model(cfg)
+    ema = EMA(diffusion.net, decay=0.9, warmup=0)
+    optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    path = tmp_path / "source.pt"
+    train_module.save_checkpoint(
+        path,
+        epoch=0,
+        diffusion=diffusion,
+        ema=ema,
+        optim=optim,
+        scaler=scaler,
+        cfg=cfg,
+        best_val=best_val,
+    )
+    return path
+
+
+def test_an_unchanged_config_resumes(tiny_cfg, tmp_path):
+    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    train_module.check_resume_compatible(ckpt, tiny_cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "overrides"),
+    [
+        ("base_channels", {"base_channels": 16}),
+        ("channel_mult", {"channel_mult": (1, 2)}),
+        ("num_classes", {"num_classes": 10}),
+        ("num_timesteps", {"num_timesteps": 20, "sample_steps": 5, "val_steps": 5}),
+        ("schedule", {"schedule": "linear"}),
+        # A learned variance needs an objective that trains it, so the pair
+        # has to change together for the config to build at all.
+        ("variance", {"variance": "learned_range", "objective": "rescaled_mse"}),
+    ],
+)
+def test_a_changed_architecture_refuses_to_resume(tiny_cfg, tmp_path, field, overrides):
+    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    changed = dataclasses.replace(tiny_cfg, **overrides)
+
+    with pytest.raises(ValueError, match=field):
+        train_module.check_resume_compatible(ckpt, changed)
+
+
+def test_a_changed_batch_size_still_resumes(tiny_cfg, tmp_path):
+    """Only the settings the weights depend on are checked."""
+    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    train_module.check_resume_compatible(
+        ckpt, dataclasses.replace(tiny_cfg, batch_size=64, lr=1e-3)
+    )
+
+
+def test_a_checkpoint_without_provenance_is_left_to_load_state_dict(tiny_cfg):
+    train_module.check_resume_compatible({"epoch": 0}, tiny_cfg)
+
+
+def test_the_refusal_names_the_file_and_both_values(tiny_cfg, tmp_path):
+    path = _checkpoint(tmp_path, tiny_cfg)
+    ckpt = train_module.read_checkpoint(path)
+    changed = dataclasses.replace(tiny_cfg, base_channels=16)
+
+    with pytest.raises(ValueError) as excinfo:
+        train_module.check_resume_compatible(ckpt, changed, path=path)
+
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "checkpoint 8" in message
+    assert "config 16" in message
+
+
+def test_training_refuses_a_mismatched_resume(tiny_cfg, fake_loader, tmp_path):
+    path = _checkpoint(tmp_path, tiny_cfg)
+    with pytest.raises(ValueError, match="base_channels"):
+        train_module.train_mnist(dataclasses.replace(tiny_cfg, base_channels=16), resume=path)
+
+
+# --- interrupt safety -----------------------------------------------------
+
+
+class _StubGuard:
+    """Requests an interrupt once `after` batch boundaries have passed."""
+
+    def __init__(self, after):
+        self.remaining = after
+
+    @property
+    def requested(self):
+        self.remaining -= 1
+        return self.remaining < 0
+
+    def resolve(self):
+        return InterruptChoice(stop=True, save=True)
+
+
+@pytest.fixture
+def interrupt_after(monkeypatch):
+    def install(batches):
+        @contextlib.contextmanager
+        def guard():
+            yield _StubGuard(batches)
+
+        monkeypatch.setattr(train_module, "interrupt_guard", guard)
+
+    return install
+
+
+def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loader, interrupt_after):
+    # Two batches per epoch, so this lands on the first batch of epoch 2 —
+    # after epoch 1 has already written last.pt.
+    interrupt_after(2)
+    train_module.train_mnist(tiny_cfg)
+
+    last = tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT
+    interrupted = tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT
+    assert last.exists()
+    assert interrupted.exists()
+
+    complete = train_module.read_checkpoint(last)
+    partial = train_module.read_checkpoint(interrupted)
+    # The interrupt landed a full optimiser step past the completed epoch, so
+    # if last.pt still holds that epoch's own weights the two must differ.
+    key = next(iter(complete["model"]))
+    assert not torch.equal(complete["model"][key], partial["model"][key])
+
+
+def test_an_interrupt_in_the_first_epoch_writes_no_last(tiny_cfg, fake_loader, interrupt_after):
+    interrupt_after(1)
+    train_module.train_mnist(tiny_cfg)
+
+    assert not (tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT).exists()
+    assert (tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT).exists()
+
+
+def test_the_interrupt_message_points_at_the_file_it_wrote(
+    tiny_cfg, fake_loader, interrupt_after, capsys
+):
+    interrupt_after(1)
+    train_module.train_mnist(tiny_cfg)
+    expected = tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT
+    assert f"--resume {expected}" in capsys.readouterr().out
+
+
+# --- validation and checkpoint retention ----------------------------------
+
+
+def test_validation_is_logged_and_a_best_checkpoint_is_kept(tiny_cfg, fake_loader):
+    train_module.train_mnist(tiny_cfg)
+
+    records = _records(tiny_cfg)
+    assert all("val/loss" in record for record in records)
+    assert all(record["val/best_loss"] <= record["val/loss"] for record in records)
+    assert (tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT).exists()
+
+
+def test_the_best_checkpoint_records_the_score_that_won_it(tiny_cfg, fake_loader):
+    train_module.train_mnist(tiny_cfg)
+
+    best = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT)
+    scores = [record["val/loss"] for record in _records(tiny_cfg)]
+    assert best["best_val"] == pytest.approx(min(scores))
+
+
+def test_a_resume_keeps_comparing_against_the_earlier_best(tiny_cfg, fake_loader):
+    train_module.train_mnist(tiny_cfg)
+    before = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT)
+
+    longer = dataclasses.replace(tiny_cfg, num_epochs=3)
+    train_module.train_mnist(longer, resume=tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+
+    after = train_module.read_checkpoint(longer.ckpt_dir / train_module.BEST_CHECKPOINT)
+    assert after["best_val"] <= before["best_val"]
+
+
+def test_validation_can_be_switched_off(tiny_cfg, fake_loader):
+    cfg = dataclasses.replace(tiny_cfg, val_every=0)
+    train_module.train_mnist(cfg)
+
+    assert not (cfg.ckpt_dir / train_module.BEST_CHECKPOINT).exists()
+    assert all("val/loss" not in record for record in _records(cfg))
+
+
+def test_epoch_snapshots_are_kept_and_pruned(tiny_cfg, fake_loader):
+    cfg = dataclasses.replace(tiny_cfg, keep_last=1, num_epochs=3)
+    train_module.train_mnist(cfg)
+
+    assert sorted(p.name for p in cfg.ckpt_dir.glob("epoch_*.pt")) == ["epoch_0003.pt"]
+
+
+def test_no_snapshots_are_kept_by_default(tiny_cfg, fake_loader):
+    train_module.train_mnist(tiny_cfg)
+    assert list(tiny_cfg.ckpt_dir.glob("epoch_*.pt")) == []

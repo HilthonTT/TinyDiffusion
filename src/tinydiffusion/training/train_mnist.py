@@ -1,5 +1,6 @@
 """MNIST training loop for TinyDiffusion."""
 
+import shutil
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -26,21 +27,68 @@ from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import interrupt_guard
+from tinydiffusion.training.validation import validation_loss
 from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
 from tinydiffusion.utils.seed import seed_everything
 from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
 
 __all__ = [
+    "ARCHITECTURE_FIELDS",
+    "BEST_CHECKPOINT",
+    "INTERRUPTED_CHECKPOINT",
+    "LAST_CHECKPOINT",
     "QUARTILE_EVERY",
     "TrainConfig",
     "build_model",
+    "check_resume_compatible",
     "load_checkpoint",
     "read_checkpoint",
     "restore_checkpoint",
     "save_checkpoint",
     "save_samples",
     "train_mnist",
+    "validation_batches",
 ]
+
+LAST_CHECKPOINT = "last.pt"
+"""Rewritten after every completed epoch. What ``--resume`` normally wants."""
+
+BEST_CHECKPOINT = "best.pt"
+"""The epoch with the lowest held-out loss so far. Written when ``keep_best``."""
+
+INTERRUPTED_CHECKPOINT = "interrupted.pt"
+"""Where a cancelled run saves.
+
+Deliberately not ``last.pt``: a Ctrl+C lands mid-epoch, so its weights are
+worse than the ones the previous epoch left behind. Writing them over
+``last.pt`` — under the *previous* epoch's number, which is what makes the
+resume replay correct — would quietly replace a good checkpoint with a worse
+one bearing the same label.
+"""
+
+
+ARCHITECTURE_FIELDS = (
+    "image_size",
+    "base_channels",
+    "channel_mult",
+    "num_res_blocks",
+    "attn_resolutions",
+    "num_classes",
+    "num_timesteps",
+    "schedule",
+    "beta_start",
+    "beta_end",
+    "predict",
+    "variance",
+    "objective",
+)
+"""Config fields a checkpoint's weights are tied to.
+
+The first six decide the shape of every tensor in the state dict; the rest
+decide the schedule buffers and what the network's output means. Neither kind
+survives being changed under a ``--resume``, and only the first kind fails
+loudly on its own.
+"""
 
 
 QUARTILE_EVERY = 8
@@ -52,6 +100,10 @@ ever read as an epoch mean, and every batch draws its timesteps independently,
 so sampling one batch in eight measures the same thing for an eighth of the
 overhead.
 """
+
+
+def _warmup_lr(step: int, warmup: int) -> float:
+    return min(step, warmup) / warmup
 
 
 def _epochs(count: int) -> str:
@@ -127,6 +179,7 @@ def save_checkpoint(
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     cfg: TrainConfig,
+    best_val: float | None = None,
 ) -> None:
     """Write a resumable checkpoint.
 
@@ -141,6 +194,9 @@ def save_checkpoint(
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
         cfg: run configuration, stored for provenance.
+        best_val: lowest held-out loss seen so far, or None if the run is not
+            validating. Stored so a ``--resume`` does not restart the
+            comparison and overwrite a better ``best.pt``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -153,6 +209,7 @@ def save_checkpoint(
             "optim": optim.state_dict(),
             "scaler": scaler.state_dict(),
             "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
+            "best_val": best_val,
         },
         tmp,
     )
@@ -234,6 +291,111 @@ def restore_checkpoint(
     return int(ckpt["epoch"]) + 1
 
 
+def check_resume_compatible(
+    ckpt: dict[str, Any], cfg: TrainConfig, *, path: Path | None = None
+) -> None:
+    """Refuse a ``--resume`` whose weights do not fit the model being built.
+
+    ``train --config X --resume Y`` builds the network from `X` and then loads
+    `Y` into it. When the two disagree the failure is a raw ``load_state_dict``
+    size-mismatch dump listing every tensor, which says nothing about which
+    setting was changed — and for a differing schedule or parameterisation
+    there is no failure at all, just a run that quietly optimises something
+    other than what the checkpoint was trained on.
+
+    Args:
+        ckpt: mapping returned by :func:`read_checkpoint`.
+        cfg: the config the model was built from.
+        path: the checkpoint's path, for the message.
+
+    Raises:
+        ValueError: if any of :data:`ARCHITECTURE_FIELDS` differs.
+    """
+    stored = ckpt.get("config")
+    if stored is None:
+        # Predates config provenance. Nothing to compare, so let load_state_dict
+        # have its say rather than refusing a checkpoint that may well fit.
+        return
+
+    # Round-tripped through the config so lists become tuples and strings
+    # become paths; comparing the raw dict would flag `[1, 2]` against `(1, 2)`.
+    reference = TrainConfig.from_mapping({**stored, "device": cfg.device})
+    changed = [
+        (name, getattr(reference, name), getattr(cfg, name))
+        for name in ARCHITECTURE_FIELDS
+        if getattr(reference, name) != getattr(cfg, name)
+    ]
+    if not changed:
+        return
+
+    detail = "\n".join(
+        f"  {name}: checkpoint {was!r}, config {now!r}" for name, was, now in changed
+    )
+    where = path if path is not None else "the checkpoint"
+    raise ValueError(
+        f"{where} was trained with a different model, so it cannot resume into this "
+        f"config:\n{detail}\nmatch the config to the checkpoint, or start a fresh run "
+        f"without --resume"
+    )
+
+
+def validation_batches(cfg: TrainConfig) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Materialise the held-out slice the run is scored on each epoch.
+
+    Read once and kept in host memory rather than reloaded per epoch: the slice
+    is small, and it has to be *the same images every time* for the epoch-to-
+    epoch comparison — and so for ``best.pt`` — to mean anything.
+
+    Args:
+        cfg: run configuration. ``val_batches`` bounds the slice; 0 takes the
+            whole test split.
+
+    Returns:
+        ``(images, labels)`` pairs on the CPU, empty if ``val_every`` is off.
+    """
+    if cfg.val_every <= 0:
+        return []
+
+    loader = mnist_dataloader(
+        cfg.data_root,
+        batch_size=cfg.batch_size,
+        train=False,
+        image_size=cfg.image_size,
+        # Read once, so worker processes would cost more to spawn than they save.
+        num_workers=0,
+        shuffle=False,
+        drop_last=False,
+    )
+    batches: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for index, (x, y) in enumerate(loader):
+        if cfg.val_batches and index >= cfg.val_batches:
+            break
+        batches.append((x, y))
+    return batches
+
+
+def _snapshot_epoch(ckpt_dir: Path, source: Path, *, epoch: int, keep: int) -> None:
+    """Keep a numbered copy of this epoch's checkpoint, pruning old ones.
+
+    A copy of the file just written rather than a second :func:`save_checkpoint`
+    call: the bytes are identical by construction, and serialising a U-Net
+    twice per epoch is not free.
+
+    Args:
+        ckpt_dir: directory holding the run's checkpoints.
+        source: the checkpoint just written, copied under an epoch name.
+        epoch: zero-based epoch index. The filename is one-based.
+        keep: how many snapshots to retain, newest first.
+    """
+    if keep <= 0 or not source.is_file():
+        return
+    shutil.copy2(source, ckpt_dir / f"epoch_{epoch + 1:04d}.pt")
+    # Zero-padded, so lexical order is epoch order.
+    snapshots = sorted(ckpt_dir.glob("epoch_*.pt"))
+    for stale in snapshots[: max(len(snapshots) - keep, 0)]:
+        stale.unlink(missing_ok=True)
+
+
 @torch.no_grad()
 def save_samples(
     diffusion: Diffusion,
@@ -297,8 +459,12 @@ def _save_and_report(
     ema: EMA,
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
+    best_val: float | None = None,
 ) -> None:
     """Checkpoint a cancelled run and tell the user how to pick it up again.
+
+    Written to :data:`INTERRUPTED_CHECKPOINT`, never over ``last.pt``; see that
+    constant for why.
 
     Args:
         cfg: run configuration.
@@ -307,13 +473,22 @@ def _save_and_report(
         ema: exponential moving average of the network weights.
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
+        best_val: lowest held-out loss seen so far, carried through so a resume
+            keeps comparing against it.
     """
-    path = cfg.ckpt_dir / "last.pt"
+    path = cfg.ckpt_dir / INTERRUPTED_CHECKPOINT
     save_checkpoint(
-        path, epoch=epoch, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, cfg=cfg
+        path,
+        epoch=epoch,
+        diffusion=diffusion,
+        ema=ema,
+        optim=optim,
+        scaler=scaler,
+        cfg=cfg,
+        best_val=best_val,
     )
     done = max(epoch + 1, 0)
-    print(f"saved {path} ({_epochs(done)} complete)")
+    print(f"saved {path} ({_epochs(done)} complete, plus a partial epoch)")
     print(f"resume with: tinydiffusion train --resume {path}")
 
 
@@ -324,7 +499,13 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     Ctrl+C does not tear the run down: it is caught at the next batch boundary
     and turned into a confirmation prompt, with the option to checkpoint first
-    so ``--resume`` can pick the run up later.
+    so ``--resume`` can pick the run up later. That save goes to
+    :data:`INTERRUPTED_CHECKPOINT`, leaving ``last.pt`` as the newest *complete*
+    epoch.
+
+    Each epoch ends by scoring a fixed held-out slice, and the best-scoring
+    epoch is kept as :data:`BEST_CHECKPOINT`. Diffusion runs do not improve
+    monotonically, so the last epoch is not reliably the one worth sampling.
 
     Args:
         cfg: run configuration. Defaults are used when omitted.
@@ -333,6 +514,10 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     Returns:
         The trained model, with EMA weights already swapped in. A run cancelled
         part way through returns the model as it stood at that point.
+
+    Raises:
+        ValueError: if `resume` names a checkpoint trained with a different
+            model than `cfg` describes.
     """
     cfg = cfg or TrainConfig()
     cfg = replace(cfg, device=resolve_device(cfg.device))
@@ -352,10 +537,16 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     start_epoch = 0
+    best_val: float | None = None
     if resume is not None:
-        start_epoch = load_checkpoint(
-            resume, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, device=cfg.device
+        ckpt = read_checkpoint(resume, device=cfg.device)
+        # Before load_state_dict, so a mismatch names the setting that changed
+        # instead of listing every tensor that no longer fits.
+        check_resume_compatible(ckpt, cfg, path=resume)
+        start_epoch = restore_checkpoint(
+            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler
         )
+        best_val = ckpt.get("best_val")
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
     loader = mnist_dataloader(
@@ -365,6 +556,8 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         image_size=cfg.image_size,
         num_workers=cfg.num_workers,
     )
+
+    held_out = validation_batches(cfg)
 
     n_params = sum(p.numel() for p in diffusion.net.parameters())
     remaining = cfg.num_epochs - start_epoch
@@ -380,9 +573,14 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         if cfg.num_classes is not None
         else "unconditional"
     )
+    scoring = (
+        f"{sum(x.shape[0] for x, _ in held_out)} held-out images every {_epochs(cfg.val_every)}"
+        if held_out
+        else "no validation"
+    )
     print(
         f"{n_params / 1e6:.2f}M parameters | device {describe_device(cfg.device)} | "
-        f"amp {use_amp} | {conditioning} | {plan} | {len(loader)} steps/epoch"
+        f"amp {use_amp} | {conditioning} | {plan} | {len(loader)} steps/epoch | {scoring}"
     )
     if remaining <= 0:
         print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
@@ -504,6 +702,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                                 ema=ema,
                                 optim=optim,
                                 scaler=scaler,
+                                best_val=best_val,
                             )
                         else:
                             print("cancelled without saving")
@@ -520,6 +719,25 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     "time/images_per_second": images / elapsed if elapsed > 0 else 0.0,
                 }
             )
+            new_best: float | None = None
+            if held_out and not cancelled and (epoch + 1) % cfg.val_every == 0:
+                # The EMA weights, because they are what the sample grids and
+                # every downstream command draw from. Scoring the live weights
+                # would pick a "best" epoch nobody ever samples.
+                val = validation_loss(
+                    diffusion,
+                    held_out,
+                    model=ema.module,
+                    num_classes=cfg.num_classes,
+                    device=cfg.device,
+                    num_steps=cfg.val_steps,
+                    seed=cfg.seed,
+                )
+                logger.set(**{"val/loss": val})
+                if best_val is None or val < best_val:
+                    best_val = new_best = val
+                logger.set(**{"val/best_loss": best_val})
+
             # Flushed even for the partial epoch a Ctrl+C ends on: those batches
             # were still work, and the record explains where the run stopped.
             logger.flush(step=epoch)
@@ -542,15 +760,24 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     noise=sample_noise,
                 )
 
+            last = cfg.ckpt_dir / LAST_CHECKPOINT
             save_checkpoint(
-                cfg.ckpt_dir / "last.pt",
+                last,
                 epoch=epoch,
                 diffusion=diffusion,
                 ema=ema,
                 optim=optim,
                 scaler=scaler,
                 cfg=cfg,
+                best_val=best_val,
             )
+            _snapshot_epoch(cfg.ckpt_dir, last, epoch=epoch, keep=cfg.keep_last)
+
+            if new_best is not None and cfg.keep_best:
+                best = cfg.ckpt_dir / BEST_CHECKPOINT
+                # Copied rather than re-serialised: identical bytes, half the I/O.
+                shutil.copy2(last, best)
+                print(f"val/loss {new_best:.5f} is a new best; wrote {best}")
 
     # Ship the EMA weights: they are what the sample grids were drawn from.
     diffusion.net.load_state_dict(ema.module.state_dict())

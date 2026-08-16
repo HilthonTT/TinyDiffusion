@@ -68,6 +68,7 @@ def ddim_sample(
     timesteps: torch.Tensor | None = None,
     clip_denoised: bool = True,
     noise: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Sample by running the DDIM reverse chain over a timestep subsequence.
 
@@ -86,16 +87,27 @@ def ddim_sample(
             fresh one. Passing it in is what makes a series of grids comparable:
             reusing one latent across epochs shows the same images sharpening,
             where a fresh draw each time shows a different sample of the model.
+        generator: RNG for the starting latent and, when `eta` is positive, the
+            per-step noise. None uses the global RNG. Passing one is how a
+            caller gets a reproducible sample without reseeding the process —
+            which matters for anything serving concurrent requests.
 
     Returns:
         Tensor of shape (num_samples, *size).
 
     Raises:
-        ValueError: if `eta` falls outside [0, 1], or `noise` is not shaped
-            ``(num_samples, *size)``.
+        ValueError: if `eta` falls outside [0, 1], `noise` is not shaped
+            ``(num_samples, *size)``, or `generator` is on another device.
     """
     if not 0.0 <= eta <= 1.0:
         raise ValueError(f"eta must lie in [0, 1], got {eta}")
+    if generator is not None and generator.device.type != torch.device(device).type:
+        # torch raises deep inside the first draw with a message that does not
+        # mention the generator; say it here instead.
+        raise ValueError(
+            f"generator is on {generator.device.type}, but sampling runs on "
+            f"{torch.device(device).type}"
+        )
     if noise is not None and noise.shape != (num_samples, *size):
         # Checked here rather than left to broadcast: a mismatch would otherwise
         # surface several steps into the chain, as a shape error against a
@@ -118,7 +130,7 @@ def ddim_sample(
         x = (
             noise.to(device)
             if noise is not None
-            else torch.randn(num_samples, *size, device=device)
+            else torch.randn(num_samples, *size, device=device, generator=generator)
         )
 
         for t_cur, t_prev in zip(ts, ts_prev, strict=True):
@@ -152,6 +164,10 @@ def ddim_sample(
 
             x = ab_prev.sqrt() * x0 + direction * eps
             if eta > 0 and t_prev >= 0:
-                x = x + sigma * torch.randn_like(x)
+                # randn_like takes no generator, so the shape is spelled out.
+                step_noise = torch.randn(
+                    x.shape, device=x.device, dtype=x.dtype, generator=generator
+                )
+                x = x + sigma * step_noise
 
     return x

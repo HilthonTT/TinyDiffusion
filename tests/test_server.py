@@ -1,4 +1,6 @@
 import dataclasses
+import os
+import time
 
 import pytest
 import torch
@@ -235,3 +237,93 @@ def test_cors_allows_only_the_configured_origin(make_config):
         assert "access-control-allow-credentials" not in allowed.headers
         other = c.get("/api/status", headers={"Origin": "http://evil.test"})
         assert "access-control-allow-origin" not in other.headers
+
+
+# --- retention ------------------------------------------------------------
+
+
+def _stale(path, age):
+    """Backdate a file so the sweep sees it as old."""
+    when = time.time() - age
+    os.utime(path, (when, when))
+
+
+def test_retention_settings_must_be_non_negative():
+    with pytest.raises(ValueError, match="image_ttl"):
+        ServerConfig(checkpoint="m.pt", image_ttl=-1)
+    with pytest.raises(ValueError, match="keep_images"):
+        ServerConfig(checkpoint="m.pt", keep_images=-1)
+
+
+def test_expired_images_are_swept(make_config):
+    service = SamplerService(make_config(image_ttl=60, keep_images=0))
+    old = service.sample(num_images=1, steps=2)
+    _stale(old, 3600)
+    fresh = service.sample(num_images=1, steps=2)
+
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_the_image_count_is_capped(make_config):
+    service = SamplerService(make_config(image_ttl=0, keep_images=2))
+    # Written directly rather than sampled: `sample` sweeps as it goes, and
+    # same-second mtimes would leave "oldest" ambiguous.
+    written = [service.image_dir / f"{index:032x}.png" for index in range(4)]
+    for age, path in enumerate(reversed(written)):
+        path.write_bytes(b"")
+        _stale(path, age)
+
+    assert service.prune_images() == 2
+    assert [path.exists() for path in written] == [False, False, True, True]
+
+
+def test_a_fresh_render_survives_its_own_sweep(make_config):
+    service = SamplerService(make_config(image_ttl=0, keep_images=1))
+    first = service.sample(num_images=1, steps=2)
+    _stale(first, 10)
+    second = service.sample(num_images=1, steps=2)
+
+    assert second.exists()
+    assert not first.exists()
+
+
+def test_the_sweep_leaves_foreign_files_alone(make_config):
+    service = SamplerService(make_config(image_ttl=1, keep_images=1))
+    bystander = service.image_dir / "notes.txt"
+    bystander.write_text("not ours")
+    _stale(bystander, 3600)
+
+    service.prune_images()
+    assert bystander.exists()
+
+
+def test_retention_can_be_switched_off_entirely(make_config):
+    service = SamplerService(make_config(image_ttl=0, keep_images=0))
+    written = [service.sample(num_images=1, steps=2) for _ in range(3)]
+    for path in written:
+        _stale(path, 10**6)
+
+    assert service.prune_images() == 0
+    assert all(p.exists() for p in written)
+
+
+def test_status_reports_the_retention_policy(client):
+    body = client.get("/api/status").json()
+    assert body["image_ttl"] > 0
+    assert body["keep_images"] > 0
+
+
+# --- seeding --------------------------------------------------------------
+
+
+def test_a_seeded_request_does_not_disturb_the_global_rng(make_config):
+    """A client's seed must not reseed the process it is talking to."""
+    service = SamplerService(make_config())
+    torch.manual_seed(1234)
+    before = torch.randn(3)
+
+    service.sample(num_images=1, steps=2, seed=99)
+
+    torch.manual_seed(1234)
+    assert torch.equal(before, torch.randn(3))

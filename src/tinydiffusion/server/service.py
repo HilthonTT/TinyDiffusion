@@ -3,6 +3,7 @@
 import re
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,7 +16,6 @@ from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.sampling import grid_width, load_for_sampling, resolve_labels
 from tinydiffusion.server.config import ServerConfig
-from tinydiffusion.utils.seed import seed_everything
 
 _FILENAME = re.compile(r"\A[0-9a-f]{32}\.png\Z")
 """What :meth:`SamplerService.image_path` will accept. See its docstring."""
@@ -114,7 +114,8 @@ class SamplerService:
                 checkpoint's.
             steps: DDIM steps, or None for the checkpoint's.
             eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
-            seed: seed applied before sampling, or None to leave the RNG alone.
+            seed: seed for this request's own generator, or None to draw from
+                the global RNG.
 
         Returns:
             The path of the written PNG.
@@ -146,11 +147,15 @@ class SamplerService:
         )
         scale = self._cfg.guidance if guidance is None else guidance
 
+        # A request-local generator rather than seed_everything: reseeding the
+        # process from a request would make one caller's `seed` reach into
+        # every other caller's sampling, and outlive the request that asked
+        # for it. This keeps the reproducibility and drops the side effect.
+        generator = (
+            torch.Generator(device=self._cfg.device).manual_seed(seed) if seed is not None else None
+        )
+
         with self._lock:
-            if seed is not None:
-                # Global RNG, so this has to happen inside the lock or a
-                # concurrent request would consume the seeded stream.
-                seed_everything(seed)
             images = ddim_sample(
                 self._diffusion,
                 num_images,
@@ -159,6 +164,7 @@ class SamplerService:
                 num_steps=num_steps,
                 eta=eta,
                 model=conditioned(self._net, y, num_classes=self._cfg.num_classes, scale=scale),
+                generator=generator,
             )
 
         path = self.image_dir / f"{uuid.uuid4().hex}.png"
@@ -167,7 +173,53 @@ class SamplerService:
             path,
             nrow=grid_width(num_images, self._cfg.num_classes, labels),
         )
+        self.prune_images()
         return path
+
+    def prune_images(self) -> int:
+        """Delete rendered PNGs past their age or count limit.
+
+        Called after each render, because nothing else ever removes these
+        files: a long-lived server would otherwise grow its image directory
+        without bound. Only names this service issued are considered, so a
+        directory shared with anything else keeps its other contents.
+
+        Returns:
+            How many files were deleted.
+        """
+        ttl = self.config.image_ttl
+        keep = self.config.keep_images
+        if not ttl and not keep:
+            return 0
+
+        # (mtime, path), oldest first. A file that vanishes underneath us — a
+        # concurrent sweep, a user with a broom — is already in the state the
+        # sweep wants it in.
+        entries: list[tuple[float, Path]] = []
+        for candidate in self.image_dir.glob("*.png"):
+            if not _FILENAME.fullmatch(candidate.name):
+                continue
+            try:
+                entries.append((candidate.stat().st_mtime, candidate))
+            except OSError:
+                continue
+        entries.sort()
+
+        now = time.time()
+        doomed = set()
+        if ttl:
+            doomed |= {path for mtime, path in entries if now - mtime > ttl}
+        if keep and len(entries) > keep:
+            doomed |= {path for _, path in entries[: len(entries) - keep]}
+
+        removed = 0
+        for path in doomed:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
 
     def status(self) -> dict[str, object]:
         """Describe what is loaded, for the status endpoint.
@@ -192,5 +244,7 @@ class SamplerService:
             "default_steps": self.default_steps,
             "default_guidance": self.default_guidance,
             "max_images": self.config.max_images,
+            "image_ttl": self.config.image_ttl,
+            "keep_images": self.config.keep_images,
             "memory": memory,
         }

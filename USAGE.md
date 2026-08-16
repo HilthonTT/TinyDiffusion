@@ -218,20 +218,73 @@ and the logging flags in [Metrics and logging](#metrics-and-logging).
 ### Stopping a run early
 
 `Ctrl+C` does not kill the run outright. At the next batch boundary training
-pauses and asks whether to stop, and if so whether to write `last.pt` first:
+pauses and asks whether to stop, and if so whether to checkpoint first:
 
 ```text
 stop training? [y/N] y
 save a checkpoint so training can resume later? [Y/n] y
-saved checkpoints/last.pt (3 epochs complete)
-resume with: tinydiffusion train --resume checkpoints/last.pt
+saved checkpoints/interrupted.pt (3 epochs complete, plus a partial epoch)
+resume with: tinydiffusion train --resume checkpoints/interrupted.pt
 ```
 
 Answering `n` to the first question resumes training where it left off. A
-checkpoint saved mid-epoch records the last *completed* epoch, so resuming
-replays the interrupted one in full. A second `Ctrl+C` while the questions are
-on screen quits immediately, and a run without a terminal attached — a CI job,
-a `nohup`ed script — saves and exits without asking.
+second `Ctrl+C` while the questions are on screen quits immediately, and a run
+without a terminal attached — a CI job, a `nohup`ed script — saves and exits
+without asking.
+
+The save goes to `interrupted.pt`, never over `last.pt`. An interrupt lands
+mid-epoch, so its weights are a few batches *worse* than the ones the previous
+epoch finished on — and because a mid-epoch checkpoint records the last
+**completed** epoch (so resuming replays the interrupted one in full), writing
+it to `last.pt` would replace a good checkpoint with a worse one carrying the
+same epoch number. Keeping them apart means `last.pt` is always the newest
+complete epoch and `interrupted.pt` is always the furthest the run actually
+got.
+
+## Checkpoints
+
+A run writes up to three kinds of file into `ckpt_dir`:
+
+| File | Written | Holds |
+| --- | --- | --- |
+| `last.pt` | after every completed epoch | the newest complete epoch |
+| `best.pt` | when held-out loss improves | the best epoch so far, by `val/loss` |
+| `interrupted.pt` | on a saved `Ctrl+C` | the furthest the run got |
+| `epoch_NNNN.pt` | when `keep_last > 0` | the last `keep_last` epochs |
+
+Each is a full training state — weights, EMA shadow weights, optimiser moments,
+AMP scale, and the config it was trained with — so any of them can be passed to
+`--resume`, `sample`, `eval`, `fid` or `serve`.
+
+`best.pt` is usually the one to sample from. Diffusion runs do not improve
+monotonically, and the last epoch is not reliably the best one; without a
+recorded score there is no way to tell which epoch was, and `last.pt` has
+already overwritten the evidence. `keep_last` is the cruder insurance: set it
+to keep a rolling window of numbered epoch snapshots.
+
+```toml
+[bookkeeping]
+keep_best = true   # maintain best.pt (the default)
+keep_last = 3      # also keep epoch_0028.pt, epoch_0029.pt, epoch_0030.pt
+```
+
+### Resuming
+
+`--resume` loads weights into the model the config describes, so the two have
+to agree. They are checked before anything is loaded, and a mismatch names the
+setting that changed:
+
+```text
+checkpoints/last.pt was trained with a different model, so it cannot resume
+into this config:
+  base_channels: checkpoint 64, config 128
+match the config to the checkpoint, or start a fresh run without --resume
+```
+
+Everything the weights depend on is compared — the six architecture fields, the
+schedule, and the three parameterisation fields. Settings that do not change
+the weights, like `batch_size`, `lr` or `num_epochs`, are yours to change
+between resumes.
 
 ## Metrics and logging
 
@@ -254,12 +307,20 @@ numbers to `log_dir/metrics.jsonl`:
 | train/loss_q3          |   0.0179 |
 | train/lr               |  2.0e-04 |
 | train/skipped_step     |   0.0000 |
+| val/best_loss          |   0.0388 |
+| val/loss               |   0.0388 |
 ------------------------------------
 ```
 
 Per-batch values (`train/loss`, `train/grad_norm`, the quartiles) are averaged
 over the epoch; states (`train/lr`, `train/amp_scale`, the timings) are recorded
 as they stood at the end of it.
+
+`val/loss` is the held-out score described under
+[Validation and `best.pt`](#validation-and-bestpt) — the one number here that is
+comparable between epochs, and between runs sharing a parameterisation.
+`val/best_loss` is the lowest it has reached, which is the epoch `best.pt`
+holds.
 
 The quartile losses are the reason to look at this rather than just the progress
 bar. `loss_q0` covers the lowest quarter of the diffusion schedule and `loss_q3`
@@ -513,6 +574,10 @@ curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
 | `eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `seed` | null | Fixes the sample; the same seed returns the same image |
 
+`seed` is request-local: it seeds a generator used for that one sample and
+nothing else. It does not reseed the server, so one caller's seed cannot reach
+into another caller's images or outlive the request that asked for it.
+
 **`GET /images/{filename}`** serves the PNG. **`GET /api/status`** reports what
 is loaded — device, image size, class count, and the defaults above — which is
 also how a client learns whether it may send `labels`.
@@ -528,6 +593,8 @@ images than the ceiling); a malformed one is a 422 from the schema.
 | `--port` | 8000 | Port to bind |
 | `--max-images` | 64 | Ceiling on `num_images` per request |
 | `--image-dir` | a temp dir | Where PNGs are written |
+| `--image-ttl` | 3600 | Seconds a PNG is kept before it is swept. 0 keeps them forever |
+| `--keep-images` | 256 | PNGs retained regardless of age, newest first. 0 for no cap |
 | `--cors-origin` | none | Origin allowed to call the API from a browser. Repeatable |
 | `--no-ema` | off | Serve the raw weights instead of the EMA |
 | `--device` | auto | `cuda`, `cpu`, … |
@@ -541,6 +608,12 @@ Two things to know before exposing it:
 - **Requests are serialised.** One checkpoint on one device, one chain at a
   time; concurrent callers queue rather than fighting over VRAM. Throughput
   comes from `num_images` in a single request, not from parallel requests.
+- **Rendered PNGs are swept.** Every request writes a file, and nothing else
+  deletes them, so the image directory is bounded by age (`--image-ttl`) and by
+  count (`--keep-images`). The sweep only ever touches names the server itself
+  issued, so pointing `--image-dir` at a directory holding anything else is
+  safe. Turn both to 0 to keep everything — reasonable for a short-lived local
+  server, a slow disk leak for anything longer.
 
 ## Configuration
 
@@ -559,6 +632,31 @@ attn_resolutions = [16]
 num_timesteps = 1000
 schedule = "cosine"       # or "linear", which uses beta_start/beta_end
 ```
+
+### Validation and `best.pt`
+
+After each epoch the EMA weights are scored on a fixed slice of the held-out
+test split, at a pinned grid of timesteps with pinned noise. Everything that
+would otherwise make the number jump around is held constant, so `val/loss`
+moves only with the weights — which is what makes it usable for picking a best
+epoch:
+
+```toml
+[validation]
+val_every = 1     # epochs between scores; 0 turns validation off
+val_steps = 10    # timesteps to score at
+val_batches = 4   # batches of the test split to score; 0 for all of it
+```
+
+The defaults cost a few percent of an epoch. `val_batches = 0` scores the whole
+10k split, which is a better absolute number and a much slower one — and it
+buys little here, since the same small slice every epoch already isolates the
+weights. The score lands in `metrics.jsonl` as `val/loss`, alongside
+`val/best_loss`, and drives `best.pt`.
+
+It is scored with the *EMA* weights, because those are what the sample grids
+and every downstream command draw from; scoring the live weights would pick a
+best epoch nobody ever samples.
 
 ### Choosing the parameterisation
 
