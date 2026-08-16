@@ -42,6 +42,7 @@ __all__ = [
     "TrainConfig",
     "build_model",
     "check_resume_compatible",
+    "epoch_seed",
     "load_checkpoint",
     "read_checkpoint",
     "restore_checkpoint",
@@ -118,6 +119,28 @@ def _warmup_lr(step: int, warmup: int) -> float:
     if warmup <= 0:
         return 1.0
     return min(step, warmup) / warmup
+
+
+def epoch_seed(seed: int, epoch: int) -> int:
+    """Seed for one epoch's shuffle order.
+
+    A function of ``(seed, epoch)`` alone, deliberately: seeding the loader
+    once at startup makes the order depend on how many epochs have already run
+    in *this process*, so a run resumed at epoch 5 replays the ordering a fresh
+    run used for epoch 0, and every later epoch follows suit. Deriving it here
+    means epoch 5 draws epoch 5's batches whether it was reached by resuming or
+    by training straight through.
+
+    Args:
+        seed: the run's seed.
+        epoch: zero-based epoch index.
+
+    Returns:
+        A seed inside the range ``torch.Generator.manual_seed`` accepts.
+    """
+    # An odd multiplier so consecutive epochs land far apart in the stream,
+    # masked to 63 bits because manual_seed rejects anything wider.
+    return (seed * 1_000_003 + epoch) & ((1 << 63) - 1)
 
 
 def _epochs(count: int) -> str:
@@ -552,13 +575,17 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     """
     cfg = cfg or TrainConfig()
     cfg = replace(cfg, device=resolve_device(cfg.device))
-    seed_everything(cfg.seed)
+    seed_everything(cfg.seed, deterministic=cfg.deterministic)
 
     device_type = torch.device(cfg.device).type
     use_amp = cfg.amp and device_type == "cuda"
     if device_type == "cuda":
-        # Input shapes are fixed for the whole run, so autotuning pays off once.
-        torch.backends.cudnn.benchmark = True
+        # Input shapes are fixed for the whole run, so autotuning pays off once
+        # — but the autotuner picks whichever kernel wins on the day, so it is
+        # exactly what `deterministic` is asking us not to do. seed_everything
+        # has already cleared the flag; setting it back here unconditionally
+        # would quietly undo the setting that was just applied.
+        torch.backends.cudnn.benchmark = not cfg.deterministic
         enable_tf32()
 
     diffusion = build_model(cfg).to(cfg.device)
@@ -585,12 +612,16 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         best_val = ckpt.get("best_val")
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
 
+    # Re-seeded per epoch below, so the batch order is a function of the epoch
+    # index rather than of how many epochs this process has already run.
+    loader_rng = torch.Generator()
     loader = mnist_dataloader(
         cfg.data_root,
         batch_size=cfg.batch_size,
         train=True,
         image_size=cfg.image_size,
         num_workers=cfg.num_workers,
+        generator=loader_rng,
     )
 
     held_out = validation_batches(cfg)
@@ -648,6 +679,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
 
     with logger, interrupt_guard() as interrupts:
         for epoch in range(start_epoch, cfg.num_epochs):
+            loader_rng.manual_seed(epoch_seed(cfg.seed, epoch))
             diffusion.train()
             loss_ema: float | None = None
             epoch_start = time.perf_counter()

@@ -733,7 +733,8 @@ starting it over, not `--resume`.
 | `grad_clip` | 1.0 | 0 disables clipping |
 | `ema_decay` | 0.9999 | Sample quality depends on this |
 | `ema_warmup` | 2000 | Steps over which the decay ramps in |
-| `seed` | 0 | Python, NumPy and torch RNGs |
+| `seed` | 0 | Python, NumPy and torch RNGs; with the epoch index, fixes the batch order |
+| `deterministic` | `false` | Force deterministic CUDA kernels and disable the cuDNN autotuner, at a throughput cost |
 | `amp` | `true` | fp16 autocast; ignored off CUDA |
 | `sample_every` | 1 | Epochs between sample grids; 0 disables |
 | `num_samples` | 16 | Images per grid |

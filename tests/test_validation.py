@@ -92,3 +92,40 @@ def test_a_conditional_model_is_scored_on_its_labels(wake):
     other = validation_loss(diffusion, ones, model=net, num_classes=4, num_steps=3)
 
     assert scored != pytest.approx(other)
+
+
+def _recorded_noise(diffusion, batches, **kwargs):
+    """Run validation, returning every `noise` tensor loss_at was handed."""
+    seen = []
+    original = diffusion.loss_at
+
+    def spy(x, t, *, noise=None, model=None):
+        seen.append(noise.clone())
+        return original(x, t, noise=noise, model=model)
+
+    diffusion.loss_at = spy
+    try:
+        validation_loss(diffusion, batches, model=diffusion.net, **kwargs)
+    finally:
+        del diffusion.loss_at
+    return seen
+
+
+def test_each_scored_timestep_gets_its_own_noise(diffusion, batches):
+    # One draw reused down the timestep grid would make the average an estimate
+    # of the loss under that single realisation rather than under the objective.
+    seen = _recorded_noise(diffusion, batches, num_steps=4)
+
+    assert len(seen) == len(batches) * 4
+    for i, first in enumerate(seen):
+        for second in seen[i + 1 :]:
+            assert not torch.equal(first, second)
+
+
+def test_the_noise_sequence_is_replayed_every_call(diffusion, batches):
+    # Pinning the noise is the whole point of the fixed seed: two calls on the
+    # same weights have to see the same draws, or best.pt is chosen by luck.
+    first = _recorded_noise(diffusion, batches, num_steps=3)
+    second = _recorded_noise(diffusion, batches, num_steps=3)
+
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))

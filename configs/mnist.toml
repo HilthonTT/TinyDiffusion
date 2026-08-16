@@ -57,6 +57,10 @@ ema_warmup = 2000
 
 [bookkeeping]
 seed = 0
+# Batch order is a function of seed and epoch index either way, so a resumed
+# run sees the epochs it would have seen unresumed. deterministic goes further
+# and pins the CUDA kernels too, at a noticeable throughput cost.
+deterministic = false
 amp = true
 sample_every = 1
 num_samples = 16

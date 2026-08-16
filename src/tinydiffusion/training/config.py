@@ -43,6 +43,12 @@ class TrainConfig:
     optimiser steps before holding it at ``lr``. Diffusion training is unstable
     in the first few hundred steps at full LR; 0 turns the ramp off.
 
+    ``deterministic`` trades throughput for bit-reproducibility: it forces
+    deterministic cuDNN/cuBLAS kernels and turns off the cuDNN autotuner, whose
+    kernel choice is otherwise free to vary between runs on identical inputs.
+    The batch order is a function of ``seed`` and the epoch index either way,
+    so it is only the kernels this changes.
+
     ``val_every`` scores a fixed slice of the held-out split after each epoch,
     on a pinned timestep grid and pinned noise, so the number moves only with
     the weights. ``keep_best`` uses it to maintain ``best.pt`` alongside
@@ -92,6 +98,7 @@ class TrainConfig:
 
     # bookkeeping
     seed: int = 0
+    deterministic: bool = False
     amp: bool = True
     sample_every: int = 1
     num_samples: int = 16

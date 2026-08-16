@@ -75,6 +75,7 @@ def mnist_dataloader(
     pin_memory: bool | None = None,
     shuffle: bool | None = None,
     drop_last: bool | None = None,
+    generator: torch.Generator | None = None,
 ) -> DataLoader[tuple[torch.Tensor, int]]:
     """Build a dataloader over MNIST ready for a training loop.
 
@@ -93,6 +94,11 @@ def mnist_dataloader(
         drop_last: discard the final partial batch, or None to follow ``train``.
             A ragged last batch perturbs the loss average during training, but
             dropping it while scoring would silently omit images.
+        generator: RNG the shuffle order is drawn from, or None for the global
+            one. The sampler draws a fresh permutation from it at the start of
+            every epoch, so re-seeding it between epochs is what lets a caller
+            make the order a function of the epoch rather than of how many
+            epochs have already run.
 
     Returns:
         A configured :class:`~torch.utils.data.DataLoader`.
@@ -112,6 +118,7 @@ def mnist_dataloader(
         drop_last=train if drop_last is None else drop_last,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available() if pin_memory is None else pin_memory,
+        generator=generator,
         **loader_kwargs,
     )
 

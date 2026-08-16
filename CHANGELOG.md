@@ -71,6 +71,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   global RNG.
 - `--image-ttl` and `--keep-images` on `serve`, with matching `ServerConfig`
   fields, bounding the rendered-PNG directory by age and by count.
+- `deterministic` config field and a matching `--deterministic` flag on
+  `train`, forcing deterministic CUDA kernels and leaving the cuDNN autotuner
+  off for the run.
+- `generator` on `mnist_dataloader`, and `train_mnist.epoch_seed`, which
+  derives one epoch's shuffle seed from the run seed and the epoch index.
+
+### Fixed
+
+- A resumed run replayed the batch order of a fresh one. The loader was seeded
+  once at startup, so the order depended on how many epochs had run in that
+  process: resuming at epoch 5 handed it epoch 0's ordering, and every later
+  epoch followed suit. The order is now a function of `(seed, epoch)`, so an
+  epoch draws the same batches whether it was reached by resuming or by
+  training straight through.
+- `train` re-enabled the cuDNN autotuner immediately after `seed_everything`
+  had disabled it, so a deterministic run was not one — the autotuner is free
+  to pick a different kernel on an identical input. It is now left off when
+  `deterministic` is set, which is also the first time that setting is
+  reachable from a config or the command line.
+- Held-out validation drew one noise tensor per batch and reused it at every
+  scored timestep, so `val/loss` estimated the objective under a single
+  realisation and a draw far from the mean biased every timestep the same way.
+  Each `(batch, timestep)` now draws its own noise from the same seeded
+  generator, so the score stays replayable but is no longer tied to one draw.
+  Values shift slightly against runs scored before this change.
 
 ### Changed
 

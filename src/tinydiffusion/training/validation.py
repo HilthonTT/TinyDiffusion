@@ -2,9 +2,10 @@
 
 Training draws a random timestep and fresh noise per image, so a single loss
 value moves for reasons that have nothing to do with the weights. Everything
-here pins both: a fixed grid of timesteps, and noise drawn from a dedicated
-generator seeded the same way every call. What is left varies only with the
-model, which is what makes two epochs — or two checkpoints — comparable.
+here pins both: a fixed grid of timesteps, and a fresh draw of noise per
+(batch, timestep) taken from a dedicated generator seeded the same way every
+call. What is left varies only with the model, which is what makes two epochs
+— or two checkpoints — comparable.
 """
 
 from collections.abc import Sequence
@@ -68,8 +69,9 @@ def validation_loss(
             guidance: the conditional prediction is what the run optimised.
         device: device to score on.
         num_steps: how many timesteps to score at.
-        seed: seed for the noise generator. Fixed across calls, so the only
-            thing that changes between epochs is the weights.
+        seed: seed for the noise generator. Fixed across calls, so the same
+            sequence of draws is replayed every time and the only thing that
+            changes between epochs is the weights.
 
     Returns:
         The mean loss over every batch and timestep, weighted by image count.
@@ -90,11 +92,16 @@ def validation_loss(
         for x, y in batches:
             x = x.to(device)
             scored = Conditioned(model, y.to(device)) if num_classes is not None else model
-            # Drawn on the CPU and moved, so the same seed gives the same noise
-            # whether the run is on a GPU or not.
-            noise = torch.randn(x.shape, generator=generator).to(device)
             for step in steps:
                 t = step.expand(x.shape[0])
+                # Drawn per timestep, not once per batch. One draw reused down
+                # the grid makes the terms share a noise realisation, so the
+                # average is an estimate of the loss under that one draw rather
+                # than under the objective — and a draw that happens to sit far
+                # from the mean biases every timestep the same way. Drawn on
+                # the CPU and moved, so the same seed gives the same noise
+                # whether the run is on a GPU or not.
+                noise = torch.randn(x.shape, generator=generator).to(device)
                 total += float(diffusion.loss_at(x, t, noise=noise, model=scored)) * x.shape[0]
             num_images += x.shape[0]
 

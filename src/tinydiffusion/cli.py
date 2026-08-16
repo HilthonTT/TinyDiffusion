@@ -69,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also write TensorBoard events. Needs the 'tracking' extra.",
     )
     train.add_argument(
+        "--deterministic",
+        action="store_true",
+        default=None,
+        help="Force deterministic kernels and disable the cuDNN autotuner. "
+        "Reproducible to the bit, at a noticeable throughput cost.",
+    )
+    train.add_argument(
         "--quiet",
         action="store_false",
         default=None,
@@ -204,7 +211,15 @@ def _train(args: argparse.Namespace) -> int:
     # Only flags the user actually passed override the file.
     overrides = {
         name: getattr(args, name)
-        for name in ("seed", "device", "num_epochs", "log_dir", "tensorboard", "log_console")
+        for name in (
+            "seed",
+            "device",
+            "num_epochs",
+            "log_dir",
+            "tensorboard",
+            "log_console",
+            "deterministic",
+        )
         if getattr(args, name) is not None
     }
     cfg = dataclasses.replace(cfg, **overrides)

@@ -450,3 +450,83 @@ def test_epoch_snapshots_are_kept_and_pruned(tiny_cfg, fake_loader):
 def test_no_snapshots_are_kept_by_default(tiny_cfg, fake_loader):
     train_module.train_mnist(tiny_cfg)
     assert list(tiny_cfg.ckpt_dir.glob("epoch_*.pt")) == []
+
+
+def test_epoch_seed_depends_on_both_the_seed_and_the_epoch():
+    assert train_module.epoch_seed(0, 0) == train_module.epoch_seed(0, 0)
+    assert train_module.epoch_seed(0, 0) != train_module.epoch_seed(0, 1)
+    assert train_module.epoch_seed(0, 1) != train_module.epoch_seed(1, 1)
+    # manual_seed rejects anything wider than 64 bits.
+    assert 0 <= train_module.epoch_seed(2**40, 5) < 2**63
+
+
+@pytest.fixture
+def shuffle_seeds(monkeypatch):
+    """Record the seed the loader's RNG carries at the start of each epoch."""
+    seeds: list[int] = []
+    batches = [
+        (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(2)
+    ]
+
+    class RecordingLoader:
+        def __init__(self, generator):
+            self.generator = generator
+
+        def __iter__(self):
+            seeds.append(self.generator.initial_seed())
+            return iter(batches)
+
+        def __len__(self):
+            return len(batches)
+
+    def loader(*a, generator=None, **k):
+        # The held-out slice is read once, unshuffled, and passes no generator;
+        # only the training loader is of interest here.
+        return RecordingLoader(generator) if generator is not None else batches
+
+    monkeypatch.setattr(train_module, "mnist_dataloader", loader)
+    return seeds
+
+
+def test_each_epoch_shuffles_from_its_own_seed(tiny_cfg, shuffle_seeds):
+    train_module.train_mnist(tiny_cfg)
+
+    assert shuffle_seeds == [
+        train_module.epoch_seed(tiny_cfg.seed, 0),
+        train_module.epoch_seed(tiny_cfg.seed, 1),
+    ]
+
+
+def test_a_resumed_epoch_shuffles_as_it_would_have_unresumed(tiny_cfg, shuffle_seeds):
+    # Seeding the loader once at startup made a resumed epoch 1 replay epoch 0's
+    # ordering, so a run split across two processes saw different data than the
+    # same run trained straight through.
+    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_epochs=1))
+    straight_through = list(shuffle_seeds)
+    shuffle_seeds.clear()
+
+    train_module.train_mnist(tiny_cfg, resume=tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+
+    assert straight_through == [train_module.epoch_seed(tiny_cfg.seed, 0)]
+    assert shuffle_seeds == [train_module.epoch_seed(tiny_cfg.seed, 1)]
+
+
+def test_deterministic_reaches_the_rng_and_leaves_the_autotuner_off(
+    tiny_cfg, fake_loader, monkeypatch
+):
+    # seed_everything clears cudnn.benchmark; training used to set it straight
+    # back, which quietly undid the setting that had just been applied.
+    recorded = {}
+    monkeypatch.setattr(
+        train_module,
+        "seed_everything",
+        lambda seed, *, deterministic=False: recorded.update(
+            seed=seed, deterministic=deterministic
+        ),
+    )
+    cfg = dataclasses.replace(tiny_cfg, deterministic=True, num_epochs=1)
+
+    train_module.train_mnist(cfg)
+
+    assert recorded == {"seed": cfg.seed, "deterministic": True}
+    assert torch.backends.cudnn.benchmark is False
