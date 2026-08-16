@@ -39,6 +39,10 @@ class TrainConfig:
     prediction for ``guidance`` to extrapolate from; see
     :mod:`~tinydiffusion.diffusion.guidance`.
 
+    ``lr_warmup`` ramps the learning rate linearly from zero over that many
+    optimiser steps before holding it at ``lr``. Diffusion training is unstable
+    in the first few hundred steps at full LR; 0 turns the ramp off.
+
     ``val_every`` scores a fixed slice of the held-out split after each epoch,
     on a pinned timestep grid and pinned noise, so the number moves only with
     the weights. ``keep_best`` uses it to maintain ``best.pt`` alongside
@@ -76,6 +80,7 @@ class TrainConfig:
     # optimisation
     num_epochs: int = 30
     lr: float = 2e-4
+    lr_warmup: int = 500  # optimiser steps to ramp the LR over; 0 disables it
     grad_clip: float = 1.0
     ema_decay: float = 0.9999
     ema_warmup: int = 2000
@@ -126,6 +131,8 @@ class TrainConfig:
             )
         if self.val_batches < 0:
             raise ValueError(f"val_batches must not be negative, got {self.val_batches}")
+        if self.lr_warmup < 0:
+            raise ValueError(f"lr_warmup must not be negative, got {self.lr_warmup}")
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
         self._check_conditioning()

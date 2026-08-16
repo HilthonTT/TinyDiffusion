@@ -50,6 +50,7 @@ objective = "mse"         # "mse", "rescaled_mse", "kl" or "rescaled_kl"
 [optimisation]
 num_epochs = 30
 lr = 2e-4
+lr_warmup = 500          # optimiser steps to ramp the LR over; 0 disables
 grad_clip = 1.0
 ema_decay = 0.9999
 ema_warmup = 2000

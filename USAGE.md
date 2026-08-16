@@ -729,6 +729,7 @@ starting it over, not `--resume`.
 | `objective` | `mse` | Also `rescaled_mse` (hybrid), `kl`, `rescaled_kl` |
 | `num_epochs` | 30 | |
 | `lr` | 2e-4 | Adam |
+| `lr_warmup` | 500 | Optimiser steps to ramp the LR over; 0 disables |
 | `grad_clip` | 1.0 | 0 disables clipping |
 | `ema_decay` | 0.9999 | Sample quality depends on this |
 | `ema_warmup` | 2000 | Steps over which the decay ramps in |

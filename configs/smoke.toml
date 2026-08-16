@@ -31,6 +31,7 @@ schedule = "cosine"
 [optimisation]
 num_epochs = 1
 lr = 2e-4
+lr_warmup = 0
 ema_decay = 0.995
 ema_warmup = 100
 

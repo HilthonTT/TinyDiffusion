@@ -28,6 +28,9 @@ def tiny_cfg(tmp_path) -> TrainConfig:
         num_timesteps=10,
         num_epochs=2,
         ema_warmup=0,
+        # Four optimiser steps in total, so a ramp would leave the LR near zero
+        # and the weights barely moved. Warmup gets its own test below.
+        lr_warmup=0,
         amp=False,
         device="cpu",
         sample_every=0,
@@ -184,6 +187,71 @@ def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
     assert _records(cfg)[0]["train/loss"] > 0
     assert (cfg.ckpt_dir / "last.pt").exists()
     assert (cfg.out_dir / "sample_0002.png").exists()
+
+
+# --- learning rate warmup -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("step", "warmup", "expected"),
+    [
+        (0, 500, 0.0),
+        (250, 500, 0.5),
+        (500, 500, 1.0),
+        (900, 500, 1.0),
+        (0, 0, 1.0),
+        (7, 0, 1.0),
+    ],
+)
+def test_the_warmup_factor_ramps_then_holds(step, warmup, expected):
+    assert train_module._warmup_lr(step, warmup) == pytest.approx(expected)
+
+
+def test_the_learning_rate_ramps_over_the_configured_steps(tiny_cfg, fake_loader):
+    # Two batches an epoch over two epochs, so the run ends mid-ramp and the
+    # logged rate must still be climbing.
+    cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
+    train_module.train_mnist(cfg)
+
+    first, second = (r["train/lr"] for r in _records(cfg))
+    assert first == pytest.approx(cfg.lr * 2 / 8)
+    assert second == pytest.approx(cfg.lr * 4 / 8)
+
+
+def test_the_warmup_survives_a_resume(tiny_cfg, fake_loader, tmp_path):
+    cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
+    train_module.train_mnist(cfg)
+
+    diffusion = train_module.build_model(cfg)
+    ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
+    optim = torch.optim.Adam(diffusion.parameters(), lr=cfg.lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim, lr_lambda=lambda step: train_module._warmup_lr(step, cfg.lr_warmup)
+    )
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    ckpt = train_module.read_checkpoint(cfg.ckpt_dir / "last.pt")
+    train_module.restore_checkpoint(
+        ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
+    )
+
+    # Four steps done, so the resumed run picks the ramp up where it stopped
+    # rather than replaying it from zero over already-trained weights.
+    assert sched.get_last_lr()[0] == pytest.approx(cfg.lr * 4 / 8)
+
+
+def test_a_checkpoint_without_a_schedule_still_restores(tiny_cfg, tmp_path):
+    path = _checkpoint(tmp_path, tiny_cfg)
+    ckpt = train_module.read_checkpoint(path)
+    assert ckpt["sched"] is None
+
+    diffusion = train_module.build_model(tiny_cfg)
+    ema = EMA(diffusion.net, decay=0.9, warmup=0)
+    optim = torch.optim.Adam(diffusion.parameters(), lr=tiny_cfg.lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim, lr_lambda=lambda step: train_module._warmup_lr(step, 8)
+    )
+    train_module.restore_checkpoint(ckpt, diffusion=diffusion, ema=ema, sched=sched)
+    assert sched.get_last_lr()[0] == pytest.approx(0.0)
 
 
 # --- resume compatibility -------------------------------------------------

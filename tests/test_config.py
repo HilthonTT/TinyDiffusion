@@ -62,6 +62,8 @@ def test_invalid_values_are_rejected():
         TrainConfig(sample_steps=0)
     with pytest.raises(ValueError, match="num_samples"):
         TrainConfig(num_samples=0)
+    with pytest.raises(ValueError, match="lr_warmup"):
+        TrainConfig(lr_warmup=-1)
 
 
 def test_invalid_conditioning_is_rejected():

@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import LRScheduler
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -103,6 +104,19 @@ overhead.
 
 
 def _warmup_lr(step: int, warmup: int) -> float:
+    """Linear LR ramp-in factor, for LambdaLR.
+
+    Stepped per optimiser step, not per epoch.
+
+    Args:
+        step: optimiser steps completed.
+        warmup: steps to ramp over. 0 disables the ramp.
+
+    Returns:
+        A multiplier on ``cfg.lr`` in [0, 1].
+    """
+    if warmup <= 0:
+        return 1.0
     return min(step, warmup) / warmup
 
 
@@ -179,6 +193,7 @@ def save_checkpoint(
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     cfg: TrainConfig,
+    sched: LRScheduler | None = None,
     best_val: float | None = None,
 ) -> None:
     """Write a resumable checkpoint.
@@ -194,6 +209,9 @@ def save_checkpoint(
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
         cfg: run configuration, stored for provenance.
+        sched: LR schedule, or None if the run has none. Its step count is what
+            the warmup ramp is a function of, so a resume that dropped it would
+            replay the ramp from zero on already-trained weights.
         best_val: lowest held-out loss seen so far, or None if the run is not
             validating. Stored so a ``--resume`` does not restart the
             comparison and overwrite a better ``best.pt``.
@@ -208,6 +226,7 @@ def save_checkpoint(
             "ema_step": ema.step,
             "optim": optim.state_dict(),
             "scaler": scaler.state_dict(),
+            "sched": sched.state_dict() if sched is not None else None,
             "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
             "best_val": best_val,
         },
@@ -224,6 +243,7 @@ def load_checkpoint(
     ema: EMA,
     optim: torch.optim.Optimizer | None = None,
     scaler: torch.amp.GradScaler | None = None,
+    sched: LRScheduler | None = None,
     device: str = "cpu",
 ) -> int:
     """Read and restore a checkpoint written by :func:`save_checkpoint`.
@@ -234,13 +254,16 @@ def load_checkpoint(
         ema: EMA wrapper to load shadow weights into.
         optim: optimiser to restore, or None to skip (e.g. sampling only).
         scaler: AMP scaler to restore, or None to skip.
+        sched: LR schedule to restore, or None to skip.
         device: device to map tensors onto.
 
     Returns:
         The epoch index to resume from.
     """
     ckpt = read_checkpoint(path, device=device)
-    return restore_checkpoint(ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler)
+    return restore_checkpoint(
+        ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
+    )
 
 
 def read_checkpoint(path: Path, *, device: str = "cpu") -> dict[str, Any]:
@@ -268,6 +291,7 @@ def restore_checkpoint(
     ema: EMA,
     optim: torch.optim.Optimizer | None = None,
     scaler: torch.amp.GradScaler | None = None,
+    sched: LRScheduler | None = None,
 ) -> int:
     """Apply an already-loaded checkpoint to the training objects.
 
@@ -277,6 +301,8 @@ def restore_checkpoint(
         ema: EMA wrapper to load shadow weights into.
         optim: optimiser to restore, or None to skip (e.g. sampling only).
         scaler: AMP scaler to restore, or None to skip.
+        sched: LR schedule to restore, or None to skip. Checkpoints written
+            before schedules existed carry no entry, and leave it at step 0.
 
     Returns:
         The epoch index to resume from.
@@ -288,6 +314,8 @@ def restore_checkpoint(
         optim.load_state_dict(ckpt["optim"])
     if scaler is not None and "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
+    if sched is not None and ckpt.get("sched") is not None:
+        sched.load_state_dict(ckpt["sched"])
     return int(ckpt["epoch"]) + 1
 
 
@@ -459,6 +487,7 @@ def _save_and_report(
     ema: EMA,
     optim: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
+    sched: LRScheduler | None = None,
     best_val: float | None = None,
 ) -> None:
     """Checkpoint a cancelled run and tell the user how to pick it up again.
@@ -473,6 +502,7 @@ def _save_and_report(
         ema: exponential moving average of the network weights.
         optim: optimiser whose moments should be preserved.
         scaler: AMP gradient scaler.
+        sched: LR schedule to restore, or None to skip.
         best_val: lowest held-out loss seen so far, carried through so a resume
             keeps comparing against it.
     """
@@ -484,6 +514,7 @@ def _save_and_report(
         ema=ema,
         optim=optim,
         scaler=scaler,
+        sched=sched,
         cfg=cfg,
         best_val=best_val,
     )
@@ -534,6 +565,11 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
 
     optim = torch.optim.Adam(diffusion.parameters(), lr=cfg.lr)
+    # Stepped once per *applied* optimiser step below, so the ramp counts real
+    # updates rather than batches AMP threw away.
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim, lr_lambda=lambda step: _warmup_lr(step, cfg.lr_warmup)
+    )
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
     start_epoch = 0
@@ -544,7 +580,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
         # instead of listing every tensor that no longer fits.
         check_resume_compatible(ckpt, cfg, path=resume)
         start_epoch = restore_checkpoint(
-            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler
+            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
         )
         best_val = ckpt.get("best_val")
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
@@ -667,6 +703,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                     stepped = scaler.get_scale() >= scale_before
                     if stepped:
                         ema.update(diffusion.net)
+                        sched.step()
 
                     value = loss.item()
                     loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
@@ -703,6 +740,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                                 optim=optim,
                                 scaler=scaler,
                                 best_val=best_val,
+                                sched=sched,
                             )
                         else:
                             print("cancelled without saving")
@@ -768,6 +806,7 @@ def train_mnist(cfg: TrainConfig | None = None, resume: Path | None = None) -> D
                 ema=ema,
                 optim=optim,
                 scaler=scaler,
+                sched=sched,
                 cfg=cfg,
                 best_val=best_val,
             )
