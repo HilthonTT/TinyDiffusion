@@ -51,7 +51,7 @@ dev = [
     # Starlette's TestClient is built on httpx2; the older httpx raises a
     # deprecation warning that this project's filterwarnings turns into an error.
     "httpx2>=0.29",
-    "ruff>=0.16.2",
+    "ruff>=0.16.3",
     "mypy>=2.3.0",
     "pre-commit>=4.0",
 ]
