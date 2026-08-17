@@ -8,9 +8,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from tinydiffusion.metrics import evaluate
 from tinydiffusion.metrics.evaluate import FidResult, accumulate_features, fid_for_checkpoint
 from tinydiffusion.metrics.fid import FeatureStats
+from tinydiffusion.training.checkpoints import save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.train_mnist import build_model, save_checkpoint
+from tinydiffusion.training.model import build_model
 
 TINY = TrainConfig(
     image_size=8,

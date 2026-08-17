@@ -19,7 +19,7 @@ from tinydiffusion.server.config import (
     ServerConfig,
 )
 from tinydiffusion.training.config import TrainConfig, load_config
-from tinydiffusion.training.train_mnist import train_mnist
+from tinydiffusion.training.train import train as train_run
 
 
 def class_labels(value: str) -> list[int]:
@@ -232,7 +232,7 @@ def _train(args: argparse.Namespace) -> int:
     }
     cfg = dataclasses.replace(cfg, **overrides)
 
-    train_mnist(cfg, resume=args.resume)
+    train_run(cfg, resume=args.resume)
     print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}, metrics in {cfg.log_dir}")
     return 0
 

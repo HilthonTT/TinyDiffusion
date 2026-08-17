@@ -1,6 +1,8 @@
 import contextlib
 import dataclasses
+import importlib
 import json
+import sys
 
 import pytest
 import torch
@@ -8,7 +10,10 @@ from PIL import Image
 
 from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion, LossTerms
 from tinydiffusion.sampling import load_for_sampling, sample_from_checkpoint
-from tinydiffusion.training import train_mnist as train_module
+from tinydiffusion.training import checkpoints as ckpt_module
+from tinydiffusion.training import lr as lr_module
+from tinydiffusion.training import model as model_module
+from tinydiffusion.training import train as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import InterruptChoice
@@ -58,12 +63,12 @@ def _records(cfg) -> list[dict]:
 
 
 def test_training_writes_one_metrics_record_per_epoch(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     assert [r["step"] for r in _records(tiny_cfg)] == [0, 1]
 
 
 def test_the_logged_metrics_cover_loss_timesteps_and_throughput(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     record = _records(tiny_cfg)[0]
 
     assert record["train/loss"] > 0
@@ -81,7 +86,7 @@ def test_the_logged_metrics_cover_loss_timesteps_and_throughput(tiny_cfg, fake_l
 def test_the_quartile_losses_average_to_the_epoch_loss(tiny_cfg, fake_loader):
     # Not exactly equal — the quartile means are per batch — but a quartile
     # that had drifted off the loss entirely would show up here.
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     record = _records(tiny_cfg)[0]
     quartiles = [v for k, v in record.items() if k.startswith("train/loss_q")]
     assert min(quartiles) <= record["train/loss"] * 2
@@ -90,13 +95,13 @@ def test_the_quartile_losses_average_to_the_epoch_loss(tiny_cfg, fake_loader):
 
 def test_logging_can_be_turned_off(tiny_cfg, fake_loader, capsys):
     cfg = dataclasses.replace(tiny_cfg, log_console=False, log_jsonl=False)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
     assert not (cfg.log_dir / METRICS_FILENAME).exists()
     assert "train/loss" not in capsys.readouterr().out
 
 
 def test_a_console_table_is_printed_each_epoch(tiny_cfg, fake_loader, capsys):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     out = capsys.readouterr().out
     assert "train/loss" in out
     headers = [line.split("|")[1].strip() for line in out.splitlines() if line.startswith("| step")]
@@ -108,7 +113,7 @@ def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
     cfg = dataclasses.replace(
         tiny_cfg, num_classes=10, class_dropout=0.1, guidance=2.0, sample_every=1
     )
-    diffusion = train_module.train_mnist(cfg)
+    diffusion = train_module.train(cfg)
 
     assert diffusion.net.num_classes == 10
     # The reserved null row is what guidance extrapolates from, so the table
@@ -129,7 +134,7 @@ def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkey
 
     monkeypatch.setattr(train_module, "ddim_sample", spy)
     cfg = dataclasses.replace(tiny_cfg, sample_every=1)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert len(seen) == cfg.num_epochs
     assert all(torch.equal(seen[0], later) for later in seen[1:])
@@ -147,21 +152,19 @@ def test_the_grid_latents_follow_the_seed(tiny_cfg, fake_loader, monkeypatch):
 
     monkeypatch.setattr(train_module, "ddim_sample", spy)
     for seed in (0, 0, 1):
-        train_module.train_mnist(
-            dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1, seed=seed)
-        )
+        train_module.train(dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1, seed=seed))
 
     assert torch.equal(seen[0], seen[1])
     assert not torch.equal(seen[0], seen[2])
 
 
 def test_a_conditional_run_reports_its_classes(tiny_cfg, fake_loader, capsys):
-    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_classes=10))
+    train_module.train(dataclasses.replace(tiny_cfg, num_classes=10))
     assert "10 classes, 0.1 label dropout" in capsys.readouterr().out
 
 
 def test_an_unconditional_run_says_so(tiny_cfg, fake_loader, capsys):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     assert "unconditional" in capsys.readouterr().out
 
 
@@ -169,7 +172,7 @@ def test_a_conditional_checkpoint_reloads(tiny_cfg, fake_loader, tmp_path):
     # The label embedding is part of the state dict, so a conditional run has
     # to round-trip through save/load or --resume breaks.
     cfg = dataclasses.replace(tiny_cfg, num_classes=10)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     diffusion, _, restored = load_for_sampling(cfg.ckpt_dir / "last.pt", "cpu")
     assert restored.num_classes == 10
@@ -181,7 +184,7 @@ def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
     cfg = dataclasses.replace(
         tiny_cfg, variance="learned_range", objective="rescaled_mse", sample_every=1
     )
-    diffusion = train_module.train_mnist(cfg)
+    diffusion = train_module.train(cfg)
 
     assert isinstance(diffusion, GaussianDiffusion)
     assert [r["step"] for r in _records(cfg)] == [0, 1]
@@ -205,14 +208,14 @@ def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
     ],
 )
 def test_the_warmup_factor_ramps_then_holds(step, warmup, expected):
-    assert train_module._warmup_lr(step, warmup) == pytest.approx(expected)
+    assert lr_module._warmup_lr(step, warmup) == pytest.approx(expected)
 
 
 def test_the_learning_rate_ramps_over_the_configured_steps(tiny_cfg, fake_loader):
     # Two batches an epoch over two epochs, so the run ends mid-ramp and the
     # logged rate must still be climbing.
     cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     first, second = (r["train/lr"] for r in _records(cfg))
     assert first == pytest.approx(cfg.lr * 2 / 8)
@@ -221,17 +224,17 @@ def test_the_learning_rate_ramps_over_the_configured_steps(tiny_cfg, fake_loader
 
 def test_the_warmup_survives_a_resume(tiny_cfg, fake_loader, tmp_path):
     cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
-    diffusion = train_module.build_model(cfg)
+    diffusion = model_module.build_model(cfg)
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
     optim = torch.optim.Adam(diffusion.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(
-        optim, lr_lambda=lambda step: train_module._warmup_lr(step, cfg.lr_warmup)
+        optim, lr_lambda=lambda step: lr_module._warmup_lr(step, cfg.lr_warmup)
     )
     scaler = torch.amp.GradScaler("cpu", enabled=False)
-    ckpt = train_module.read_checkpoint(cfg.ckpt_dir / "last.pt")
-    train_module.restore_checkpoint(
+    ckpt = ckpt_module.read_checkpoint(cfg.ckpt_dir / "last.pt")
+    ckpt_module.restore_checkpoint(
         ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
     )
 
@@ -242,16 +245,16 @@ def test_the_warmup_survives_a_resume(tiny_cfg, fake_loader, tmp_path):
 
 def test_a_checkpoint_without_a_schedule_still_restores(tiny_cfg, tmp_path):
     path = _checkpoint(tmp_path, tiny_cfg)
-    ckpt = train_module.read_checkpoint(path)
+    ckpt = ckpt_module.read_checkpoint(path)
     assert ckpt["sched"] is None
 
-    diffusion = train_module.build_model(tiny_cfg)
+    diffusion = model_module.build_model(tiny_cfg)
     ema = EMA(diffusion.net, decay=0.9, warmup=0)
     optim = torch.optim.Adam(diffusion.parameters(), lr=tiny_cfg.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(
-        optim, lr_lambda=lambda step: train_module._warmup_lr(step, 8)
+        optim, lr_lambda=lambda step: lr_module._warmup_lr(step, 8)
     )
-    train_module.restore_checkpoint(ckpt, diffusion=diffusion, ema=ema, sched=sched)
+    ckpt_module.restore_checkpoint(ckpt, diffusion=diffusion, ema=ema, sched=sched)
     assert sched.get_last_lr()[0] == pytest.approx(0.0)
 
 
@@ -260,12 +263,12 @@ def test_a_checkpoint_without_a_schedule_still_restores(tiny_cfg, tmp_path):
 
 def _checkpoint(tmp_path, cfg, *, best_val=None):
     """Write a real checkpoint for `cfg` and return its path."""
-    diffusion = train_module.build_model(cfg)
+    diffusion = model_module.build_model(cfg)
     ema = EMA(diffusion.net, decay=0.9, warmup=0)
     optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler("cpu", enabled=False)
     path = tmp_path / "source.pt"
-    train_module.save_checkpoint(
+    ckpt_module.save_checkpoint(
         path,
         epoch=0,
         diffusion=diffusion,
@@ -279,8 +282,8 @@ def _checkpoint(tmp_path, cfg, *, best_val=None):
 
 
 def test_an_unchanged_config_resumes(tiny_cfg, tmp_path):
-    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
-    train_module.check_resume_compatible(ckpt, tiny_cfg)
+    ckpt = ckpt_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    ckpt_module.check_resume_compatible(ckpt, tiny_cfg)
 
 
 @pytest.mark.parametrize(
@@ -297,32 +300,30 @@ def test_an_unchanged_config_resumes(tiny_cfg, tmp_path):
     ],
 )
 def test_a_changed_architecture_refuses_to_resume(tiny_cfg, tmp_path, field, overrides):
-    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    ckpt = ckpt_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
     changed = dataclasses.replace(tiny_cfg, **overrides)
 
     with pytest.raises(ValueError, match=field):
-        train_module.check_resume_compatible(ckpt, changed)
+        ckpt_module.check_resume_compatible(ckpt, changed)
 
 
 def test_a_changed_batch_size_still_resumes(tiny_cfg, tmp_path):
     """Only the settings the weights depend on are checked."""
-    ckpt = train_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
-    train_module.check_resume_compatible(
-        ckpt, dataclasses.replace(tiny_cfg, batch_size=64, lr=1e-3)
-    )
+    ckpt = ckpt_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    ckpt_module.check_resume_compatible(ckpt, dataclasses.replace(tiny_cfg, batch_size=64, lr=1e-3))
 
 
 def test_a_checkpoint_without_provenance_is_left_to_load_state_dict(tiny_cfg):
-    train_module.check_resume_compatible({"epoch": 0}, tiny_cfg)
+    ckpt_module.check_resume_compatible({"epoch": 0}, tiny_cfg)
 
 
 def test_the_refusal_names_the_file_and_both_values(tiny_cfg, tmp_path):
     path = _checkpoint(tmp_path, tiny_cfg)
-    ckpt = train_module.read_checkpoint(path)
+    ckpt = ckpt_module.read_checkpoint(path)
     changed = dataclasses.replace(tiny_cfg, base_channels=16)
 
     with pytest.raises(ValueError) as excinfo:
-        train_module.check_resume_compatible(ckpt, changed, path=path)
+        ckpt_module.check_resume_compatible(ckpt, changed, path=path)
 
     message = str(excinfo.value)
     assert str(path) in message
@@ -333,7 +334,7 @@ def test_the_refusal_names_the_file_and_both_values(tiny_cfg, tmp_path):
 def test_training_refuses_a_mismatched_resume(tiny_cfg, fake_loader, tmp_path):
     path = _checkpoint(tmp_path, tiny_cfg)
     with pytest.raises(ValueError, match="base_channels"):
-        train_module.train_mnist(dataclasses.replace(tiny_cfg, base_channels=16), resume=path)
+        train_module.train(dataclasses.replace(tiny_cfg, base_channels=16), resume=path)
 
 
 # --- interrupt safety -----------------------------------------------------
@@ -370,15 +371,15 @@ def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loade
     # Two batches per epoch, so this lands on the first batch of epoch 2 —
     # after epoch 1 has already written last.pt.
     interrupt_after(2)
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
 
-    last = tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT
-    interrupted = tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT
+    last = tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT
+    interrupted = tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT
     assert last.exists()
     assert interrupted.exists()
 
-    complete = train_module.read_checkpoint(last)
-    partial = train_module.read_checkpoint(interrupted)
+    complete = ckpt_module.read_checkpoint(last)
+    partial = ckpt_module.read_checkpoint(interrupted)
     # The interrupt landed a full optimiser step past the completed epoch, so
     # if last.pt still holds that epoch's own weights the two must differ.
     key = next(iter(complete["model"]))
@@ -387,18 +388,18 @@ def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loade
 
 def test_an_interrupt_in_the_first_epoch_writes_no_last(tiny_cfg, fake_loader, interrupt_after):
     interrupt_after(1)
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
 
-    assert not (tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT).exists()
-    assert (tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT).exists()
+    assert not (tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT).exists()
+    assert (tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT).exists()
 
 
 def test_the_interrupt_message_points_at_the_file_it_wrote(
     tiny_cfg, fake_loader, interrupt_after, capsys
 ):
     interrupt_after(1)
-    train_module.train_mnist(tiny_cfg)
-    expected = tiny_cfg.ckpt_dir / train_module.INTERRUPTED_CHECKPOINT
+    train_module.train(tiny_cfg)
+    expected = tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT
     assert f"--resume {expected}" in capsys.readouterr().out
 
 
@@ -406,50 +407,50 @@ def test_the_interrupt_message_points_at_the_file_it_wrote(
 
 
 def test_validation_is_logged_and_a_best_checkpoint_is_kept(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
 
     records = _records(tiny_cfg)
     assert all("val/loss" in record for record in records)
     assert all(record["val/best_loss"] <= record["val/loss"] for record in records)
-    assert (tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT).exists()
+    assert (tiny_cfg.ckpt_dir / ckpt_module.BEST_CHECKPOINT).exists()
 
 
 def test_the_best_checkpoint_records_the_score_that_won_it(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
 
-    best = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT)
+    best = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.BEST_CHECKPOINT)
     scores = [record["val/loss"] for record in _records(tiny_cfg)]
     assert best["best_val"] == pytest.approx(min(scores))
 
 
 def test_a_resume_keeps_comparing_against_the_earlier_best(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
-    before = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.BEST_CHECKPOINT)
+    train_module.train(tiny_cfg)
+    before = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.BEST_CHECKPOINT)
 
     longer = dataclasses.replace(tiny_cfg, num_epochs=3)
-    train_module.train_mnist(longer, resume=tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+    train_module.train(longer, resume=tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
 
-    after = train_module.read_checkpoint(longer.ckpt_dir / train_module.BEST_CHECKPOINT)
+    after = ckpt_module.read_checkpoint(longer.ckpt_dir / ckpt_module.BEST_CHECKPOINT)
     assert after["best_val"] <= before["best_val"]
 
 
 def test_validation_can_be_switched_off(tiny_cfg, fake_loader):
     cfg = dataclasses.replace(tiny_cfg, val_every=0)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
-    assert not (cfg.ckpt_dir / train_module.BEST_CHECKPOINT).exists()
+    assert not (cfg.ckpt_dir / ckpt_module.BEST_CHECKPOINT).exists()
     assert all("val/loss" not in record for record in _records(cfg))
 
 
 def test_epoch_snapshots_are_kept_and_pruned(tiny_cfg, fake_loader):
     cfg = dataclasses.replace(tiny_cfg, keep_last=1, num_epochs=3)
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert sorted(p.name for p in cfg.ckpt_dir.glob("epoch_*.pt")) == ["epoch_0003.pt"]
 
 
 def test_no_snapshots_are_kept_by_default(tiny_cfg, fake_loader):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
     assert list(tiny_cfg.ckpt_dir.glob("epoch_*.pt")) == []
 
 
@@ -490,7 +491,7 @@ def shuffle_seeds(monkeypatch):
 
 
 def test_each_epoch_shuffles_from_its_own_seed(tiny_cfg, shuffle_seeds):
-    train_module.train_mnist(tiny_cfg)
+    train_module.train(tiny_cfg)
 
     assert shuffle_seeds == [
         train_module.epoch_seed(tiny_cfg.seed, 0),
@@ -502,11 +503,11 @@ def test_a_resumed_epoch_shuffles_as_it_would_have_unresumed(tiny_cfg, shuffle_s
     # Seeding the loader once at startup made a resumed epoch 1 replay epoch 0's
     # ordering, so a run split across two processes saw different data than the
     # same run trained straight through.
-    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_epochs=1))
+    train_module.train(dataclasses.replace(tiny_cfg, num_epochs=1))
     straight_through = list(shuffle_seeds)
     shuffle_seeds.clear()
 
-    train_module.train_mnist(tiny_cfg, resume=tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+    train_module.train(tiny_cfg, resume=tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
 
     assert straight_through == [train_module.epoch_seed(tiny_cfg.seed, 0)]
     assert shuffle_seeds == [train_module.epoch_seed(tiny_cfg.seed, 1)]
@@ -527,7 +528,7 @@ def test_deterministic_reaches_the_rng_and_leaves_the_autotuner_off(
     )
     cfg = dataclasses.replace(tiny_cfg, deterministic=True, num_epochs=1)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert recorded == {"seed": cfg.seed, "deterministic": True}
     assert torch.backends.cudnn.benchmark is False
@@ -546,7 +547,7 @@ def test_the_model_is_built_with_the_datasets_channel_count():
         val_steps=5,
         device="cpu",
     )
-    diffusion = train_module.build_model(rgb)
+    diffusion = model_module.build_model(rgb)
 
     out = diffusion.net(torch.randn(2, 3, 16, 16), torch.zeros(2, dtype=torch.long))
     assert out.shape == (2, 3, 16, 16)
@@ -556,11 +557,11 @@ def test_a_checkpoint_cannot_resume_into_a_different_dataset(tiny_cfg, fake_load
     # The channel count is the U-Net's input and output width, so the weights
     # do not fit — and a bare load_state_dict would say so only as a wall of
     # size mismatches.
-    train_module.train_mnist(dataclasses.replace(tiny_cfg, num_epochs=1))
-    ckpt = train_module.read_checkpoint(tiny_cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+    train_module.train(dataclasses.replace(tiny_cfg, num_epochs=1))
+    ckpt = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
 
     with pytest.raises(ValueError, match="dataset: checkpoint 'mnist', config 'cifar10'"):
-        train_module.check_resume_compatible(ckpt, dataclasses.replace(tiny_cfg, dataset="cifar10"))
+        ckpt_module.check_resume_compatible(ckpt, dataclasses.replace(tiny_cfg, dataset="cifar10"))
 
 
 def _has_colour(path) -> bool:
@@ -602,7 +603,7 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
     batches = [(torch.randn(4, 3, 16, 16), torch.arange(4, dtype=torch.long)) for _ in range(2)]
     monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     # save_image writes RGB whatever it is handed, so the mode proves nothing:
     # what distinguishes a colour run is that the channels actually differ.
@@ -610,11 +611,11 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
     assert grid.is_file()
     assert _has_colour(grid)
 
-    _, _, loaded = load_for_sampling(cfg.ckpt_dir / train_module.LAST_CHECKPOINT, device="cpu")
+    _, _, loaded = load_for_sampling(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT, device="cpu")
     assert loaded.dataset == "cifar10"
 
     out = sample_from_checkpoint(
-        cfg.ckpt_dir / train_module.LAST_CHECKPOINT,
+        cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT,
         tmp_path / "gen.png",
         num_images=2,
         num_steps=2,
@@ -627,7 +628,7 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
 
 
 def test_the_warmup_ramp_is_unchanged_by_a_constant_schedule():
-    factor = lambda step: train_module.lr_factor(  # noqa: E731
+    factor = lambda step: lr_module.lr_factor(  # noqa: E731
         step, warmup=10, total=100, schedule="constant"
     )
     assert factor(0) == 0.0
@@ -637,7 +638,7 @@ def test_the_warmup_ramp_is_unchanged_by_a_constant_schedule():
 
 
 def test_cosine_decays_from_the_end_of_the_ramp_to_zero():
-    factor = lambda step: train_module.lr_factor(  # noqa: E731
+    factor = lambda step: lr_module.lr_factor(  # noqa: E731
         step, warmup=10, total=100, schedule="cosine"
     )
     # The two terms have to meet at 1: a jump where they join would show up as
@@ -650,12 +651,12 @@ def test_cosine_decays_from_the_end_of_the_ramp_to_zero():
 
 def test_a_run_shorter_than_its_warmup_still_has_a_schedule():
     # total <= warmup would otherwise divide by zero or go negative.
-    assert train_module.lr_factor(3, warmup=10, total=5, schedule="cosine") == pytest.approx(0.3)
+    assert lr_module.lr_factor(3, warmup=10, total=5, schedule="cosine") == pytest.approx(0.3)
 
 
 def test_the_cosine_schedule_is_monotone_after_the_ramp():
     factors = [
-        train_module.lr_factor(step, warmup=4, total=40, schedule="cosine") for step in range(4, 41)
+        lr_module.lr_factor(step, warmup=4, total=40, schedule="cosine") for step in range(4, 41)
     ]
     assert factors == sorted(factors, reverse=True)
 
@@ -677,7 +678,7 @@ def counted_loader(monkeypatch):
 
 
 def _ema_steps(cfg) -> int:
-    ckpt = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)
+    ckpt = ckpt_module.read_checkpoint(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
     return int(ckpt["ema_step"])
 
 
@@ -685,7 +686,7 @@ def test_accumulation_takes_one_optimiser_step_per_group(tiny_cfg, counted_loade
     counted_loader(4)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     # Four batches, two per step: the EMA — and so the LR schedule, which is
     # stepped alongside it — advances twice, not four times.
@@ -698,7 +699,7 @@ def test_a_ragged_accumulation_group_still_steps(tiny_cfg, counted_loader):
     counted_loader(3)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert _ema_steps(cfg) == 2
 
@@ -707,7 +708,7 @@ def test_accumulation_logs_one_step_outcome_per_group(tiny_cfg, counted_loader):
     counted_loader(4)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2, val_every=0)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     # Averaged over the batches that reported it, the skipped-step rate has to
     # stay a rate: recording it per micro-batch would halve it.
@@ -720,7 +721,7 @@ def test_without_accumulation_every_batch_steps(tiny_cfg, counted_loader):
     counted_loader(4)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=1)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert _ema_steps(cfg) == 4
 
@@ -733,9 +734,9 @@ def test_the_optimiser_carries_the_configured_betas_and_decay(tiny_cfg, fake_loa
         tiny_cfg, num_epochs=1, betas=(0.85, 0.995), weight_decay=0.01, lr_warmup=0
     )
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
-    group = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)["optim"][
+    group = ckpt_module.read_checkpoint(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)["optim"][
         "param_groups"
     ][0]
     assert group["betas"] == (0.85, 0.995)
@@ -759,12 +760,12 @@ def test_compiling_leaves_the_checkpoint_an_ordinary_one(tiny_cfg, fake_loader, 
     monkeypatch.setattr(torch, "compile", fake_compile)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, compile=True)
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert compiled, "torch.compile was never called"
-    keys = train_module.read_checkpoint(cfg.ckpt_dir / train_module.LAST_CHECKPOINT)["model"]
+    keys = ckpt_module.read_checkpoint(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)["model"]
     assert not any(key.startswith("_orig_mod.") for key in keys)
-    load_for_sampling(cfg.ckpt_dir / train_module.LAST_CHECKPOINT, device="cpu")
+    load_for_sampling(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT, device="cpu")
 
 
 class _LinearDiffusion(torch.nn.Module):
@@ -794,7 +795,7 @@ class _LinearDiffusion(torch.nn.Module):
 def _weight_after(cfg, batches, monkeypatch):
     monkeypatch.setattr(train_module, "build_model", lambda cfg: _LinearDiffusion())
     monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
-    return train_module.train_mnist(cfg).net.weight.detach().clone()
+    return train_module.train(cfg).net.weight.detach().clone()
 
 
 def test_accumulating_two_batches_updates_as_one_batch_of_both(tiny_cfg, tmp_path, monkeypatch):
@@ -861,7 +862,7 @@ def test_compiling_is_skipped_when_triton_is_missing(tiny_cfg, fake_loader, monk
     monkeypatch.setattr(torch, "compile", lambda *a, **k: pytest.fail("should not compile"))
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, compile=True, device="cuda")
 
-    train_module.train_mnist(cfg)
+    train_module.train(cfg)
 
     assert "Triton is not installed" in capsys.readouterr().out
 
@@ -876,3 +877,23 @@ def test_compiling_needs_triton_on_cuda(monkeypatch):
     assert not train_module._can_compile("cuda")
     monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: object())
     assert train_module._can_compile("cuda")
+
+
+# ---------------------------------------------------------------------------
+# the deprecated train_mnist alias
+# ---------------------------------------------------------------------------
+
+
+def test_the_old_train_mnist_module_still_works_and_warns():
+    """0.2 code imported the loop from train_mnist; that has to keep resolving."""
+    # Dropped from the cache first: the warning fires on import, and an earlier
+    # test in the session may already have paid for it.
+    sys.modules.pop("tinydiffusion.training.train_mnist", None)
+    with pytest.warns(DeprecationWarning, match="tinydiffusion.training.train"):
+        legacy = importlib.import_module("tinydiffusion.training.train_mnist")
+
+    assert legacy.train_mnist is train_module.train
+    assert legacy.build_model is model_module.build_model
+    assert legacy.save_checkpoint is ckpt_module.save_checkpoint
+    assert legacy.lr_factor is lr_module.lr_factor
+    assert legacy.LAST_CHECKPOINT == ckpt_module.LAST_CHECKPOINT

@@ -108,6 +108,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `run.ps1` reported a Python that could not start as one missing the package,
+  which sent you off reinstalling something that was already installed. It
+  probes in two stages now, as `run.sh` already did. Both wrappers additionally
+  recognise the case behind it: a `.venv` whose base interpreter has been moved
+  or uninstalled — `did not find executable at ...` — which `uv sync` does not
+  repair, because it reuses the existing venv rather than rebuilding it. They
+  name the venv and print the two commands that do fix it.
 - A resumed run replayed the batch order of a fresh one. The loader was seeded
   once at startup, so the order depended on how many epochs had run in that
   process: resuming at epoch 5 handed it epoch 0's ordering, and every later
@@ -128,6 +135,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `tinydiffusion.training.train_mnist` is split up, and the MNIST in its name is
+  gone now that the loop trains whatever `DATASETS` holds:
+  `train_mnist.train_mnist` is `training.train.train`, `build_model` is
+  `training.model.build_model`, the checkpoint functions and their constants are
+  `training.checkpoints`, and `lr_factor` is `training.lr`. Sampling, evaluation,
+  FID and the server rebuild a checkpoint before loading it, and previously
+  imported a training loop to do so; they now reach the builder and the
+  checkpoint I/O without it. Importing the old module still works and warns; it
+  goes in 0.3.0.
 - `tinydiffusion.data.mnist` is now `tinydiffusion.data.datasets`, and its
   MNIST-specific names are general: `MNIST_CHANNELS` is `DatasetSpec.channels`,
   `mnist_transform`/`mnist_dataset`/`mnist_dataloader` are

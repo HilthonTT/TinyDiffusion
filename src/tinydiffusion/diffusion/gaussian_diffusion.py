@@ -544,7 +544,7 @@ class GaussianDiffusion(nn.Module):
         """Take one training step's loss, keeping the per-image breakdown.
 
         The counterpart of :meth:`~tinydiffusion.diffusion.ddpm.DDPM.loss_terms`,
-        so :func:`~tinydiffusion.training.train_mnist.train_mnist` drives either
+        so :func:`~tinydiffusion.training.train.train` drives either
         process through the same call. The per-image term is the MSE alone
         whenever there is one: it is the quantity
         :func:`~tinydiffusion.utils.tracking.timestep_quartile_losses` is

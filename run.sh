@@ -57,8 +57,27 @@ else
     )
 fi
 
+# A venv records its base interpreter in pyvenv.cfg and delegates to it at
+# startup. Move or uninstall that Python and every interpreter in the venv stops
+# working, with an error naming the base rather than the venv that is actually
+# the problem -- and `uv sync` reuses such a venv rather than rebuilding it, so
+# the obvious fix does not work either.
+stale_venv_home() {
+    local cfg="$root/.venv/pyvenv.cfg" base
+    [[ -f "$cfg" ]] || return 1
+    base="$(sed -n 's/^[[:space:]]*home[[:space:]]*=[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$cfg" | head -n 1)"
+    [[ -n "$base" && ! -d "$base" ]] || return 1
+    printf '%s\n' "$base"
+}
+
 if ! find_python "${candidates[@]}"; then
-    if [[ -n "$runnable" ]]; then
+    if stale_home="$(stale_venv_home)"; then
+        echo "run.sh: $root/.venv was built against a Python that is no longer there:" >&2
+        echo "        $stale_home" >&2
+        echo "        The venv cannot start, and 'uv sync' will reuse it as is. Rebuild it:" >&2
+        echo "          rm -rf '$root/.venv'" >&2
+        echo "          uv sync --all-extras --dev" >&2
+    elif [[ -n "$runnable" ]]; then
         echo "run.sh: tinydiffusion is not installed in $runnable" >&2
         echo "        install it with:  uv sync --all-extras --dev" >&2
         echo "                     or:  $runnable -m pip install -e ." >&2

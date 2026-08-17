@@ -6,9 +6,10 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from tinydiffusion import evaluation
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, EvalResult, eval_timesteps
+from tinydiffusion.training.checkpoints import save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.train_mnist import build_model, save_checkpoint
+from tinydiffusion.training.model import build_model
 
 TINY = TrainConfig(
     image_size=8,

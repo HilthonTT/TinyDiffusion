@@ -6,9 +6,10 @@ import torch
 from tinydiffusion import sampling
 from tinydiffusion.diffusion.guidance import ClassifierFreeGuidance
 from tinydiffusion.sampling import resolve_labels, sample_from_checkpoint
+from tinydiffusion.training.checkpoints import save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.train_mnist import build_model, save_checkpoint
+from tinydiffusion.training.model import build_model
 
 TINY = TrainConfig(
     image_size=8,

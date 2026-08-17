@@ -13,14 +13,11 @@ from tinydiffusion.diffusion.gaussian_diffusion import (
     ModelVarType,
 )
 from tinydiffusion.diffusion.schedules import linear_beta_schedule
+from tinydiffusion.training.checkpoints import restore_checkpoint, save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.train_mnist import (
-    build_model,
-    restore_checkpoint,
-    save_checkpoint,
-    save_samples,
-)
+from tinydiffusion.training.model import build_model
+from tinydiffusion.training.train import save_samples
 
 T = 20
 SHAPE = (2, 1, 8, 8)

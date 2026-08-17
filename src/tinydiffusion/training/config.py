@@ -25,7 +25,7 @@ class TrainConfig:
     a handful of epochs. Field names mirror the constructor arguments of
     :class:`~tinydiffusion.models.unet.UNet` and
     :class:`~tinydiffusion.diffusion.ddpm.DDPM` so the wiring in
-    :func:`~tinydiffusion.training.train_mnist.build_model` stays a
+    :func:`~tinydiffusion.training.model.build_model` stays a
     rename-free pass-through.
 
     ``predict``, ``variance`` and ``objective`` select the diffusion
@@ -256,7 +256,7 @@ class TrainConfig:
 
         Called from :meth:`__post_init__` so a bad combination fails while the
         config is being read rather than after the dataset has downloaded, and
-        again by :func:`~tinydiffusion.training.train_mnist.build_model`, which
+        again by :func:`~tinydiffusion.training.model.build_model`, which
         is what keeps validation and construction from drifting apart.
 
         Returns:

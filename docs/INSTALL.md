@@ -163,6 +163,30 @@ You ran `python src/tinydiffusion/cli.py`. Use `./run.sh` or `.\run.ps1`, or
 The wrapper found a Python without the package. Run `uv sync --all-extras
 --dev`, or point it at the right interpreter with `$env:PYTHON`.
 
+### `did not find executable at 'C:\Python314\python.exe'`
+
+Or any other path in that message — and on Linux or macOS the same fault reads
+`No such file or directory`. The venv in `.venv/` is stale: it records the
+interpreter it was built against in `.venv/pyvenv.cfg`, and delegates to it
+every time it starts. Upgrade Python, move the install, or uninstall it, and
+every `python` in the venv stops working — the error names the *base*
+interpreter, which is why it does not obviously point at `.venv/` at all.
+
+The catch is that **`uv sync` does not fix this**: it reuses the existing venv
+rather than rebuilding it, so the install appears to succeed and the wrapper
+still fails. Delete the venv first:
+
+```powershell
+Remove-Item -Recurse -Force .venv
+uv sync --all-extras --dev
+```
+
+```bash
+rm -rf .venv && uv sync --all-extras --dev
+```
+
+The wrappers detect this case and print those commands for you.
+
 ### The dataset downloads every time
 
 It should not — MNIST lands in `data/` (63 MB) and is reused. If `data_root`

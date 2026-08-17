@@ -10,9 +10,10 @@ from tinydiffusion.data.datasets import denormalize
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned, cycled_labels
+from tinydiffusion.training.checkpoints import read_checkpoint, restore_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.train_mnist import build_model, read_checkpoint, restore_checkpoint
+from tinydiffusion.training.model import build_model
 from tinydiffusion.utils.device import resolve_device
 from tinydiffusion.utils.seed import seed_everything
 
@@ -27,7 +28,7 @@ def load_for_sampling(
 
     Args:
         checkpoint: file written by
-            :func:`~tinydiffusion.training.train_mnist.save_checkpoint`.
+            :func:`~tinydiffusion.training.checkpoints.save_checkpoint`.
         device: device to load onto. Defaults to CUDA when available.
 
     Returns:
