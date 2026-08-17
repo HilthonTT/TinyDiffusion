@@ -158,6 +158,105 @@ def test_the_grid_latents_follow_the_seed(tiny_cfg, fake_loader, monkeypatch):
     assert not torch.equal(seen[0], seen[2])
 
 
+@pytest.fixture
+def shuffling_loader(monkeypatch):
+    """A loader that reshuffles per epoch, the way the real one does.
+
+    The training loader draws a fresh permutation from its generator at the
+    start of every epoch, so *which* images the loop sees first is a function
+    of the epoch index. A fixture handing back one fixed order would hide
+    anything that depends on it.
+    """
+    images = torch.randn(8, 1, 16, 16)
+    labels = torch.arange(8, dtype=torch.long) % 10
+
+    class Loader:
+        def __init__(self, batch_size, generator):
+            self.batch_size = batch_size
+            self.generator = generator
+
+        def __iter__(self):
+            order = (
+                torch.arange(len(images))
+                if self.generator is None
+                else torch.randperm(len(images), generator=self.generator)
+            )
+            return iter(
+                [
+                    (images[chunk], labels[chunk])
+                    for chunk in order.split(self.batch_size)
+                    if len(chunk)
+                ]
+            )
+
+        def __len__(self):
+            return -(-len(images) // self.batch_size)
+
+    monkeypatch.setattr(
+        train_module,
+        "image_dataloader",
+        lambda *a, batch_size=4, generator=None, **k: Loader(batch_size, generator),
+    )
+    return images, labels
+
+
+@pytest.fixture
+def grid_inputs(monkeypatch):
+    """Record the real strip and labels each epoch's sample grid is built on."""
+    seen = []
+    real_save = train_module.save_samples
+
+    def spy(diffusion, ema, real, cfg, epoch, labels=None, noise=None):
+        seen.append((real.clone(), None if labels is None else labels.clone()))
+        return real_save(diffusion, ema, real, cfg, epoch, labels=labels, noise=noise)
+
+    monkeypatch.setattr(train_module, "save_samples", spy)
+    return seen
+
+
+def test_the_real_strip_is_the_front_of_the_unshuffled_split(
+    tiny_cfg, shuffling_loader, grid_inputs
+):
+    images, labels = shuffling_loader
+    cfg = dataclasses.replace(tiny_cfg, num_classes=10, sample_every=1)
+
+    train_module.train(cfg)
+
+    for real, shown in grid_inputs:
+        assert torch.equal(real, images[: cfg.num_samples])
+        assert torch.equal(shown, labels[: cfg.num_samples])
+
+
+def test_the_real_strip_survives_a_resume(tiny_cfg, shuffling_loader, grid_inputs):
+    """The grids stay a flipbook of one set of images across a --resume.
+
+    Lifting the strip off the loop took it from whichever batch the shuffle put
+    first, which is a function of the epoch — so a resumed run compared against
+    different images than the epochs before it, and being conditional,
+    generated on their labels too.
+    """
+    cfg = dataclasses.replace(tiny_cfg, num_classes=10, sample_every=1)
+    train_module.train(dataclasses.replace(cfg, num_epochs=1))
+    train_module.train(cfg, resume=cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
+
+    (fresh, fresh_labels), (resumed, resumed_labels) = grid_inputs[0], grid_inputs[-1]
+    assert torch.equal(fresh, resumed)
+    assert torch.equal(fresh_labels, resumed_labels)
+
+
+def test_an_unconditional_run_has_no_strip_labels(tiny_cfg, shuffling_loader, grid_inputs):
+    train_module.train(dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1))
+    assert grid_inputs[0][1] is None
+
+
+def test_no_reference_is_read_when_no_grid_is_drawn(tiny_cfg):
+    # sample_every=0 draws no grids, so the extra read is skipped entirely.
+    assert train_module.reference_batch(dataclasses.replace(tiny_cfg, sample_every=0)) == (
+        None,
+        None,
+    )
+
+
 def test_a_conditional_run_reports_its_classes(tiny_cfg, fake_loader, capsys):
     train_module.train(dataclasses.replace(tiny_cfg, num_classes=10))
     assert "10 classes, 0.1 label dropout" in capsys.readouterr().out

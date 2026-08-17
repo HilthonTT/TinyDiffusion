@@ -28,6 +28,7 @@ __all__ = [
     "INTERRUPTED_CHECKPOINT",
     "LAST_CHECKPOINT",
     "check_resume_compatible",
+    "config_from_checkpoint",
     "load_checkpoint",
     "read_checkpoint",
     "restore_checkpoint",
@@ -211,6 +212,34 @@ def restore_checkpoint(
     if sched is not None and ckpt.get("sched") is not None:
         sched.load_state_dict(ckpt["sched"])
     return int(ckpt["epoch"]) + 1
+
+
+def config_from_checkpoint(path: Path) -> TrainConfig:
+    """Recover the config a checkpoint was trained with.
+
+    What ``--resume`` on its own continues from. The alternative — defaulting
+    to :class:`TrainConfig` and letting :func:`check_resume_compatible` object
+    — makes resuming any run that was not trained on the defaults require the
+    original TOML file, which the checkpoint has been carrying all along.
+
+    Args:
+        path: checkpoint file.
+
+    Returns:
+        The stored configuration, including the paths and the device the run
+        used. A caller layering overrides on top should apply them afterwards.
+
+    Raises:
+        ValueError: if the checkpoint predates config provenance, and so has
+            nothing to rebuild.
+    """
+    stored = read_checkpoint(path).get("config")
+    if stored is None:
+        raise ValueError(
+            f"{path} stores no config, so --resume cannot infer the run's settings; "
+            f"pass --config with the file it was trained from"
+        )
+    return TrainConfig.from_mapping(stored)
 
 
 def check_resume_compatible(

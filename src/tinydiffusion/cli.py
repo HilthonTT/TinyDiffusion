@@ -18,6 +18,7 @@ from tinydiffusion.server.config import (
     DEFAULT_PORT,
     ServerConfig,
 )
+from tinydiffusion.training.checkpoints import config_from_checkpoint
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train import train as train_run
 
@@ -55,9 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = subparsers.add_parser("train", help="Train a diffusion model.")
     train.add_argument(
-        "--config", type=Path, help="Path to a training config file. Omit to use the defaults."
+        "--config",
+        type=Path,
+        help="Path to a training config file. Omit to use the defaults, or the "
+        "settings stored in --resume's checkpoint.",
     )
-    train.add_argument("--resume", type=Path, help="Checkpoint to continue training from.")
+    train.add_argument(
+        "--resume",
+        type=Path,
+        help="Checkpoint to continue training from. Its own config is used unless "
+        "--config says otherwise.",
+    )
     train.add_argument(
         "--dataset",
         choices=dataset_names(),
@@ -214,7 +223,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _train(args: argparse.Namespace) -> int:
     """Run the training subcommand."""
-    cfg = load_config(args.config) if args.config else TrainConfig()
+    if args.config is not None:
+        cfg = load_config(args.config)
+    elif args.resume is not None:
+        # A checkpoint carries the config it was trained with, so a bare
+        # --resume continues that run. Falling back to the defaults instead
+        # would refuse every checkpoint not trained on them, by way of a
+        # mismatch report about settings the user never asked to change.
+        cfg = config_from_checkpoint(args.resume)
+    else:
+        cfg = TrainConfig()
     # Only flags the user actually passed override the file.
     overrides = {
         name: getattr(args, name)

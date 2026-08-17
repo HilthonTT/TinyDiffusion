@@ -48,6 +48,7 @@ from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
 __all__ = [
     "QUARTILE_EVERY",
     "epoch_seed",
+    "reference_batch",
     "save_samples",
     "train",
     "validation_batches",
@@ -154,6 +155,48 @@ def validation_batches(cfg: TrainConfig) -> list[tuple[torch.Tensor, torch.Tenso
             break
         batches.append((x, y))
     return batches
+
+
+def reference_batch(cfg: TrainConfig) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Materialise the real strip every sample grid is compared against.
+
+    Read from the front of the *unshuffled* training split rather than taken
+    from whichever batch the loop happens to see first. The shuffle order is a
+    function of the epoch index, so a batch picked off the loop would differ
+    between a straight run and a ``--resume`` — and for a conditional run those
+    labels are what the generated half is drawn from, so the grids would stop
+    being a flipbook of one set of images at exactly the point the run was
+    picked up again. This depends on the dataset alone, which is the same
+    property :data:`~tinydiffusion.training.train.train`'s fixed ``x_T`` has.
+
+    Unaugmented, for the same reason it is unshuffled: a flip that lands
+    differently per read would move the real strip on its own.
+
+    Args:
+        cfg: run configuration. ``num_samples`` bounds the strip, and
+            ``sample_every`` of 0 skips the read entirely.
+
+    Returns:
+        ``(images, labels)`` on the CPU. Labels are None for an unconditional
+        run, and both are None when no grid will ever be drawn.
+    """
+    if cfg.sample_every <= 0:
+        return None, None
+
+    loader = image_dataloader(
+        cfg.dataset_spec(),
+        cfg.data_root,
+        batch_size=cfg.num_samples,
+        train=True,
+        image_size=cfg.image_size,
+        # One batch, so worker processes would cost more to spawn than they save.
+        num_workers=0,
+        shuffle=False,
+        drop_last=False,
+    )
+    for x, y in loader:
+        return x[: cfg.num_samples], y[: cfg.num_samples] if cfg.num_classes is not None else None
+    return None, None
 
 
 def _snapshot_epoch(ckpt_dir: Path, source: Path, *, epoch: int, keep: int) -> None:
@@ -448,9 +491,12 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
     if remaining <= 0:
         print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
 
-    # Kept on the CPU so the sample grid does not pin a training batch in VRAM.
-    reference: torch.Tensor | None = None
-    reference_labels: torch.Tensor | None = None
+    # Fixed real images, read from the front of the split rather than lifted off
+    # the loop: the batch order depends on the epoch, so a resumed run would
+    # otherwise compare against — and, when conditional, generate on the labels
+    # of — a different set of images than the epochs before it. Kept on the CPU
+    # so the sample grid does not pin a batch in VRAM.
+    reference, reference_labels = reference_batch(cfg)
 
     # Fixed latents, so each epoch's grid redraws the same x_T and the sequence of
     # PNGs reads as one set of digits sharpening rather than a fresh draw each time.
@@ -486,10 +532,6 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                     x = x.to(cfg.device, non_blocking=True)
                     if cfg.channels_last:
                         x = x.contiguous(memory_format=torch.channels_last)
-                    if reference is None:
-                        reference = x[: cfg.num_samples].detach().cpu()
-                        if cfg.num_classes is not None:
-                            reference_labels = y[: cfg.num_samples].detach().cpu()
 
                     model: nn.Module = train_net
                     if cfg.num_classes is not None:

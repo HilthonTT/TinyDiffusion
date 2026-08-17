@@ -126,6 +126,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to pick a different kernel on an identical input. It is now left off when
   `deterministic` is set, which is also the first time that setting is
   reachable from a config or the command line.
+- The per-epoch sample grids stopped being a flipbook across a `--resume`. The
+  real strip was lifted off whichever batch the loop saw first, and the batch
+  order is a function of the epoch, so a resumed run compared against different
+  images than the epochs before it — and, being conditional, generated on their
+  labels too, which moved the class of every image in the grid. The strip is
+  now read from the front of the unshuffled, unaugmented split
+  (`training.train.reference_batch`), which depends on the dataset alone, as
+  the fixed starting noise already did.
+- `TrainConfig` accepted several settings that only failed later, or not at all.
+  `ema_decay` outside [0, 1] was the quiet one: the average extrapolates away
+  from the weights it follows, so the loss keeps falling while every sample,
+  every `best.pt` comparison and every shipped checkpoint comes from weights
+  that are diverging. `batch_size`, `num_workers`, `base_channels`,
+  `channel_mult`, `num_res_blocks`, `dropout`, `num_timesteps`, `num_epochs`,
+  `lr`, `grad_clip` and `ema_warmup` are now range-checked alongside the
+  settings that already were, while the run is being read.
 - Held-out validation drew one noise tensor per batch and reused it at every
   scored timestep, so `val/loss` estimated the objective under a single
   realisation and a draw far from the mean biased every timestep the same way.
@@ -135,6 +151,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `train --resume` without `--config` now continues the checkpoint's own
+  config (`training.checkpoints.config_from_checkpoint`) instead of the
+  built-in defaults, which refused every checkpoint not trained on them by way
+  of a mismatch report about settings the user never asked to change. Passing
+  `--config` still wins, and the individual flags still override either.
 - `tinydiffusion.training.train_mnist` is split up, and the MNIST in its name is
   gone now that the loop trains whatever `DATASETS` holds:
   `train_mnist.train_mnist` is `training.train.train`, `build_model` is

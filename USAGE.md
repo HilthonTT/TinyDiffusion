@@ -203,7 +203,10 @@ Each epoch writes a `sample_XXXX.png` grid to `out_dir` — generated digits
 above a strip of real ones, so contrast and stroke weight are directly
 comparable — and a resumable `last.pt` to `ckpt_dir`. A conditional run
 generates on the real strip's own labels, so the comparison is per class: a
-generated 4 sits directly above a real 4. The checkpoint holds the
+generated 4 sits directly above a real 4. Both the strip and the starting
+noise are fixed for the whole run, including across a `--resume`, so the PNGs
+read as one set of digits sharpening rather than a fresh draw each epoch. The
+checkpoint holds the
 model, EMA shadow weights, optimiser moments, AMP scaler state, and the config,
 so a resumed run continues rather than restarts:
 
@@ -213,7 +216,8 @@ so a resumed run continues rather than restarts:
 
 Flags override the config file when passed: `--seed`, `--device`, `--epochs`,
 and the logging flags in [Metrics and logging](#metrics-and-logging).
-`--config` itself is optional — omit it to run the built-in defaults.
+`--config` itself is optional — omit it to run the built-in defaults, or the
+settings stored in the checkpoint when [resuming](#resuming).
 
 ```bash
 ./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
@@ -274,6 +278,21 @@ keep_last = 3      # also keep epoch_0028.pt, epoch_0029.pt, epoch_0030.pt
 
 ### Resuming
 
+`--resume` on its own continues the run the checkpoint came from: the settings
+it was trained with travel inside it, so the TOML file it started from is not
+needed a second time.
+
+```bash
+./run.sh train --resume checkpoints/last.pt
+```
+
+Pass `--config` as well to resume into different settings, and the usual flags
+still override whichever of the two was used:
+
+```bash
+./run.sh train --resume checkpoints/last.pt --epochs 60
+```
+
 `--resume` loads weights into the model the config describes, so the two have
 to agree. They are checked before anything is loaded, and a mismatch names the
 setting that changed:
@@ -289,6 +308,9 @@ Everything the weights depend on is compared — the six architecture fields, th
 schedule, and the three parameterisation fields. Settings that do not change
 the weights, like `batch_size`, `lr` or `num_epochs`, are yours to change
 between resumes.
+
+A checkpoint written before the config travelled with it has nothing to rebuild
+from, so a bare `--resume` on one asks for the config file instead.
 
 ## Metrics and logging
 

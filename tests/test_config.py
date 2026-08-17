@@ -66,6 +66,51 @@ def test_invalid_values_are_rejected():
         TrainConfig(lr_warmup=-1)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("batch_size", 0),
+        ("num_workers", -2),
+        ("base_channels", 0),
+        ("channel_mult", ()),
+        ("channel_mult", (1, 0)),
+        ("num_res_blocks", 0),
+        ("dropout", 1.5),
+        ("num_timesteps", 0),
+        ("num_epochs", -5),
+        ("lr", 0.0),
+        ("lr", -1.0),
+        ("grad_clip", -3.0),
+        ("ema_decay", 2.0),
+        ("ema_decay", -0.1),
+        ("ema_warmup", -1),
+    ],
+)
+def test_out_of_range_sizes_and_rates_are_rejected(field, value):
+    # These used to be accepted and fail somewhere downstream — or, for
+    # ema_decay, not fail at all while quietly extrapolating the average away
+    # from the weights it follows.
+    with pytest.raises(ValueError, match=field):
+        TrainConfig(**{field: value})
+
+
+def test_the_step_counts_are_reported_against_a_usable_schedule():
+    # num_timesteps is checked first: bounded by it, sample_steps would
+    # otherwise blame itself for a schedule that has no steps to index.
+    with pytest.raises(ValueError, match="num_timesteps"):
+        TrainConfig(num_timesteps=0, sample_steps=1)
+
+
+def test_the_disabling_zeroes_are_still_accepted():
+    # 0 means "off" for each of these, and the new range checks must not have
+    # turned any of them into an error.
+    assert TrainConfig(grad_clip=0.0).grad_clip == 0.0
+    assert TrainConfig(ema_warmup=0).ema_warmup == 0
+    assert TrainConfig(num_epochs=0).num_epochs == 0
+    assert TrainConfig(dropout=0.0).dropout == 0.0
+    assert TrainConfig(num_workers=0).num_workers == 0
+
+
 def test_invalid_conditioning_is_rejected():
     with pytest.raises(ValueError, match="num_classes"):
         TrainConfig(num_classes=0)

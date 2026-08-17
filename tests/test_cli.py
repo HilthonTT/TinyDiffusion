@@ -1,11 +1,14 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
+import torch
 
 from tinydiffusion import __version__, cli
 from tinydiffusion import version as version_module
 from tinydiffusion.cli import build_parser, main
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES
+from tinydiffusion.training.config import TrainConfig
 
 
 def test_version_is_exposed():
@@ -199,6 +202,68 @@ def test_serve_builds_a_config_and_runs(capsys, monkeypatch, tmp_path):
 def test_serve_reports_a_missing_checkpoint_before_binding(capsys, tmp_path):
     assert main(["serve", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
     assert "no such checkpoint" in capsys.readouterr().out
+
+
+@pytest.fixture
+def trained(monkeypatch):
+    """Capture the config `main` hands to the training loop."""
+    seen = {}
+
+    def fake_train(cfg, resume=None):
+        seen["cfg"] = cfg
+        seen["resume"] = resume
+
+    monkeypatch.setattr(cli, "train_run", fake_train)
+    return seen
+
+
+def _checkpoint(tmp_path, **overrides) -> Path:
+    """A checkpoint carrying nothing but the config it was trained with."""
+    cfg = dataclasses.replace(TrainConfig(), **overrides)
+    path = tmp_path / "last.pt"
+    stored = {k: str(v) if isinstance(v, Path) else v for k, v in dataclasses.asdict(cfg).items()}
+    torch.save({"config": stored}, path)
+    return path
+
+
+def test_a_bare_resume_continues_the_checkpoints_own_config(tmp_path, trained):
+    # Defaulting to TrainConfig() instead would refuse every checkpoint not
+    # trained on the defaults, over settings the user never asked to change.
+    path = _checkpoint(tmp_path, base_channels=32, num_epochs=7, dataset="cifar10")
+
+    assert main(["train", "--resume", str(path)]) == 0
+
+    assert trained["cfg"].base_channels == 32
+    assert trained["cfg"].num_epochs == 7
+    assert trained["cfg"].dataset == "cifar10"
+    assert trained["resume"] == path
+
+
+def test_an_explicit_config_still_wins_over_the_checkpoints(tmp_path, trained):
+    path = _checkpoint(tmp_path, base_channels=32)
+    config = tmp_path / "cfg.toml"
+    config.write_text("[model]\nbase_channels = 16\n", encoding="utf-8")
+
+    assert main(["train", "--config", str(config), "--resume", str(path)]) == 0
+
+    assert trained["cfg"].base_channels == 16
+
+
+def test_flags_still_override_a_resumed_config(tmp_path, trained):
+    path = _checkpoint(tmp_path, num_epochs=7, seed=3)
+
+    assert main(["train", "--resume", str(path), "--epochs", "9"]) == 0
+
+    assert trained["cfg"].num_epochs == 9
+    assert trained["cfg"].seed == 3
+
+
+def test_a_resume_without_provenance_asks_for_a_config(capsys, tmp_path):
+    path = tmp_path / "old.pt"
+    torch.save({"epoch": 0}, path)
+
+    assert main(["train", "--resume", str(path)]) == 1
+    assert "--config" in capsys.readouterr().out
 
 
 def test_main_reports_a_missing_config(capsys, tmp_path):

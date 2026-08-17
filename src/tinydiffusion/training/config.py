@@ -153,17 +153,41 @@ class TrainConfig:
     def __post_init__(self) -> None:
         """Reject configurations that would only fail an epoch into the run.
 
+        Every field that has a range is checked here rather than left to the
+        first thing that trips over it: some of them fail late and obscurely —
+        a batch size of 0 inside the dataloader, an empty ``channel_mult``
+        inside the U-Net — and ``ema_decay`` outside [0, 1] does not fail at
+        all, it quietly ships diverging weights.
+
         Raises:
             ValueError: if the dataset is unregistered, the schedule is
                 unknown, a step count cannot index the training schedule, a
-                count that must be non-negative is not, or the conditioning
-                settings do not describe a trainable model.
+                size or rate falls outside the range it has to lie in, or the
+                conditioning settings do not describe a trainable model.
         """
         # Raises on an unregistered name, and is what every downstream shape
         # is read from, so it is checked before anything else can use it.
         spec = self.dataset_spec()
         if self.image_size < 1:
             raise ValueError(f"image_size must be positive, got {self.image_size}")
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}")
+        if self.num_workers < 0:
+            raise ValueError(f"num_workers must not be negative, got {self.num_workers}")
+        if self.base_channels < 1:
+            raise ValueError(f"base_channels must be positive, got {self.base_channels}")
+        if not self.channel_mult or any(mult < 1 for mult in self.channel_mult):
+            raise ValueError(
+                f"channel_mult must hold at least one positive multiplier, got {self.channel_mult}"
+            )
+        if self.num_res_blocks < 1:
+            raise ValueError(f"num_res_blocks must be positive, got {self.num_res_blocks}")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError(f"dropout must lie in [0, 1), got {self.dropout}")
+        if self.num_timesteps < 1:
+            # Checked before the two step counts below, which are bounded by it
+            # and would otherwise report an empty range as the problem.
+            raise ValueError(f"num_timesteps must be positive, got {self.num_timesteps}")
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
         if not 1 <= self.sample_steps <= self.num_timesteps:
@@ -178,6 +202,10 @@ class TrainConfig:
             )
         if self.val_batches < 0:
             raise ValueError(f"val_batches must not be negative, got {self.val_batches}")
+        if self.num_epochs < 0:
+            raise ValueError(f"num_epochs must not be negative, got {self.num_epochs}")
+        if self.lr <= 0:
+            raise ValueError(f"lr must be positive, got {self.lr}")
         if self.lr_warmup < 0:
             raise ValueError(f"lr_warmup must not be negative, got {self.lr_warmup}")
         if self.lr_schedule not in ("constant", "cosine"):
@@ -188,8 +216,18 @@ class TrainConfig:
             raise ValueError(f"grad_accum must be positive, got {self.grad_accum}")
         if self.weight_decay < 0:
             raise ValueError(f"weight_decay must not be negative, got {self.weight_decay}")
+        if self.grad_clip < 0:
+            raise ValueError(f"grad_clip must not be negative, got {self.grad_clip}")
         if len(self.betas) != 2 or not all(0.0 <= b < 1.0 for b in self.betas):
             raise ValueError(f"betas must be two values in [0, 1), got {self.betas}")
+        if not 0.0 <= self.ema_decay <= 1.0:
+            # Outside [0, 1] the average extrapolates away from the weights it
+            # is meant to follow, and nothing downstream ever says so: the loss
+            # keeps falling while every sample, every best.pt comparison and
+            # every shipped checkpoint comes from weights that are diverging.
+            raise ValueError(f"ema_decay must lie in [0, 1], got {self.ema_decay}")
+        if self.ema_warmup < 0:
+            raise ValueError(f"ema_warmup must not be negative, got {self.ema_warmup}")
         if self.amp_dtype not in ("fp16", "bf16"):
             raise ValueError(f"unknown amp_dtype {self.amp_dtype!r}, expected 'fp16' or 'bf16'")
         if self.keep_last < 0:
