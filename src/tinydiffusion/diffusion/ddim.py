@@ -8,7 +8,9 @@ over a trained process rather than as a subclass that overrides `sample`.
 import torch
 import torch.nn as nn
 
-from tinydiffusion.diffusion.gaussian_diffusion import Diffusion, GaussianDiffusion
+from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
+from tinydiffusion.diffusion.latents import initial_latent
+from tinydiffusion.diffusion.prediction import predict_xstart_eps
 from tinydiffusion.utils.modules import eval_mode
 
 
@@ -101,18 +103,6 @@ def ddim_sample(
     """
     if not 0.0 <= eta <= 1.0:
         raise ValueError(f"eta must lie in [0, 1], got {eta}")
-    if generator is not None and generator.device.type != torch.device(device).type:
-        # torch raises deep inside the first draw with a message that does not
-        # mention the generator; say it here instead.
-        raise ValueError(
-            f"generator is on {generator.device.type}, but sampling runs on "
-            f"{torch.device(device).type}"
-        )
-    if noise is not None and noise.shape != (num_samples, *size):
-        # Checked here rather than left to broadcast: a mismatch would otherwise
-        # surface several steps into the chain, as a shape error against a
-        # timestep buffer that has nothing to do with the cause.
-        raise ValueError(f"noise must be shaped {(num_samples, *size)}, got {tuple(noise.shape)}")
 
     net = model if model is not None else diffusion.net
 
@@ -127,11 +117,7 @@ def ddim_sample(
     one = alphabar.new_ones(())
 
     with eval_mode(net):
-        x = (
-            noise.to(device)
-            if noise is not None
-            else torch.randn(num_samples, *size, device=device, generator=generator)
-        )
+        x = initial_latent(num_samples, size, device, noise=noise, generator=generator)
 
         for t_cur, t_prev in zip(ts, ts_prev, strict=True):
             ab_t = alphabar[t_cur]
@@ -139,24 +125,12 @@ def ddim_sample(
 
             t_batch = t_cur.repeat(num_samples)
 
-            if isinstance(diffusion, GaussianDiffusion):
-                # The network may emit 2C channels, and may not be predicting
-                # epsilon at all, so the implied x_0 has to come from the
-                # process itself. DDIM's own variance is used either way: a
-                # learned reverse variance describes the full-chain step, not
-                # this strided one.
-                *_, x0 = diffusion.p_mean_variance(
-                    x, t_batch, model=net, clip_denoised=clip_denoised
-                )
-                eps = diffusion.predict_eps_from_xstart(x, t_batch, x0)
-            else:
-                eps = net(x, t_batch)
-                x0 = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
-                if clip_denoised:
-                    x0 = x0.clamp(-1.0, 1.0)
-                    # Re-derive eps so the direction term stays consistent with
-                    # the clamped x_0. Skipping this is a common, subtle bug.
-                    eps = (x - ab_t.sqrt() * x0) / (1 - ab_t).sqrt()
+            # DDIM's own variance is used whatever the process says: a learned
+            # reverse variance describes the full-chain step, not this strided
+            # one.
+            x0, eps = predict_xstart_eps(
+                diffusion, x, t_batch, model=net, clip_denoised=clip_denoised
+            )
 
             # sigma_t from DDIM Eq. 16.
             sigma = eta * (((1 - ab_prev) / (1 - ab_t)) * (1 - ab_t / ab_prev)).sqrt()

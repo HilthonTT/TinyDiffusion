@@ -29,12 +29,14 @@ from tinydiffusion.diffusion.losses import (
     normal_kl,
 )
 from tinydiffusion.diffusion.schedules import ddpm_schedules, linear_beta_schedule
+from tinydiffusion.diffusion.timesteps import TimestepSampler, UniformSampler
 from tinydiffusion.utils.modules import eval_mode
 
 __all__ = [
     "Diffusion",
     "GaussianDiffusion",
     "LossType",
+    "LossWeighting",
     "ModelMeanType",
     "ModelVarType",
 ]
@@ -50,12 +52,20 @@ class ModelMeanType(StrEnum):
         EPSILON: the noise added to x_0. The DDPM default, and the easiest to
             train because the target has unit variance at every timestep.
         START_X: the clean image x_0 directly.
+        V: the velocity ``v = sqrt(abar) * eps - sqrt(1 - abar) * x_0``
+            (Salimans & Ho 2022, https://arxiv.org/abs/2202.00512). It
+            interpolates between the two above — epsilon at high noise, x_0 at
+            low — so no timestep is left with a target the network cannot see
+            the signal in. This is what makes a zero-terminal-SNR schedule and
+            short sampling chains work: at t=T, epsilon prediction says nothing
+            about x_0, and v prediction still does.
         PREVIOUS_X: the previous latent x_{t-1}. Present for completeness;
             it trains poorly and no current model uses it.
     """
 
     EPSILON = "epsilon"
     START_X = "start_x"
+    V = "v"
     PREVIOUS_X = "previous_x"
 
 
@@ -116,6 +126,25 @@ class LossType(StrEnum):
         return self in (LossType.KL, LossType.RESCALED_KL)
 
 
+class LossWeighting(StrEnum):
+    """How the per-timestep MSE terms are weighted against each other.
+
+    Attributes:
+        UNIFORM: every timestep counts the same, which is what L_simple does.
+        MIN_SNR: weight each timestep by ``min(SNR(t), gamma)``, expressed in
+            whatever space the network predicts in (Hang et al. 2023,
+            https://arxiv.org/abs/2303.09556). Uniform weighting of an
+            epsilon-space MSE is implicitly ``1/SNR`` weighting in x_0 space,
+            so the low-noise timesteps — where the model is already nearly
+            right — dominate the gradient and fight the high-noise ones.
+            Clamping the weight at gamma stops that, and typically reaches a
+            given loss in a fraction of the steps.
+    """
+
+    UNIFORM = "uniform"
+    MIN_SNR = "min_snr"
+
+
 class GaussianDiffusion(nn.Module):
     """Gaussian diffusion with configurable parameterisation and objective.
 
@@ -135,11 +164,18 @@ class GaussianDiffusion(nn.Module):
         model_mean_type: how to interpret the network's mean output.
         model_var_type: how to obtain the reverse variance.
         loss_type: which objective to train against.
+        loss_weighting: how to weight the MSE terms across timesteps.
+        min_snr_gamma: the clamp in :attr:`LossWeighting.MIN_SNR`. 5 is the
+            paper's value and is not sensitive; ignored under uniform
+            weighting.
+        timestep_sampler: how training draws its timesteps. Defaults to a
+            uniform draw. See :mod:`tinydiffusion.diffusion.timesteps`.
         clip_denoised: clamp the implied x_0 to [-1, 1] while sampling.
 
     Raises:
-        ValueError: if `betas` has the wrong length, or the loss and variance
-            settings cannot be trained together.
+        ValueError: if `betas` has the wrong length, `min_snr_gamma` is not
+            positive, or the loss, weighting and variance settings cannot be
+            trained together.
     """
 
     betas: torch.Tensor
@@ -155,6 +191,7 @@ class GaussianDiffusion(nn.Module):
     posterior_logvar_clipped: torch.Tensor
     log_betas: torch.Tensor
     fixed_large_logvar: torch.Tensor
+    snr: torch.Tensor
 
     def __init__(
         self,
@@ -164,6 +201,9 @@ class GaussianDiffusion(nn.Module):
         model_mean_type: ModelMeanType = ModelMeanType.EPSILON,
         model_var_type: ModelVarType = ModelVarType.FIXED_SMALL,
         loss_type: LossType = LossType.MSE,
+        loss_weighting: LossWeighting = LossWeighting.UNIFORM,
+        min_snr_gamma: float = 5.0,
+        timestep_sampler: TimestepSampler | None = None,
         clip_denoised: bool = True,
     ) -> None:
         super().__init__()
@@ -172,13 +212,34 @@ class GaussianDiffusion(nn.Module):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
+        self.loss_weighting = loss_weighting
+        self.min_snr_gamma = min_snr_gamma
         self.clip_denoised = clip_denoised
+        # Held as a plain attribute rather than a submodule: it owns sampling
+        # state, not parameters, and nothing about it belongs in a state dict.
+        self.timestep_sampler: TimestepSampler = (
+            UniformSampler(num_timesteps) if timestep_sampler is None else timestep_sampler
+        )
 
         if loss_type is LossType.RESCALED_MSE and not model_var_type.is_learned:
             raise ValueError(
                 "RESCALED_MSE adds a variational term to train a learned variance, "
                 f"but model_var_type is {model_var_type}; use LossType.MSE instead"
             )
+        if min_snr_gamma <= 0:
+            raise ValueError(f"min_snr_gamma must be positive, got {min_snr_gamma}")
+        if loss_weighting is LossWeighting.MIN_SNR:
+            if loss_type.is_variational:
+                # A KL objective has no MSE term to weight, and reweighting the
+                # bound would stop it being one.
+                raise ValueError(
+                    "MIN_SNR weights the MSE term, which a variational objective does not "
+                    f"have; loss_type is {loss_type}"
+                )
+            if model_mean_type is ModelMeanType.PREVIOUS_X:
+                # The weight is derived per parameterisation from how the
+                # target relates to x_0; x_{t-1} has no such closed form here.
+                raise ValueError("MIN_SNR is not defined for PREVIOUS_X prediction")
 
         if isinstance(betas, torch.Tensor):
             beta_t = betas.float()
@@ -334,6 +395,8 @@ class GaussianDiffusion(nn.Module):
         else:
             if self.model_mean_type is ModelMeanType.START_X:
                 pred_xstart = model_output
+            elif self.model_mean_type is ModelMeanType.V:
+                pred_xstart = self._predict_xstart_from_v(x, t, model_output)
             else:
                 pred_xstart = self._predict_xstart_from_eps(x, t, model_output)
             pred_xstart = pred_xstart.clamp(-1.0, 1.0) if clip else pred_xstart
@@ -360,6 +423,26 @@ class GaussianDiffusion(nn.Module):
         return (
             _expand(self.sqrt_recip_ab, t, x_t) * x_t - _expand(self.sqrt_recipm1_ab, t, x_t) * eps
         )
+
+    def _predict_xstart_from_v(
+        self, x_t: torch.Tensor, t: torch.Tensor, v: torch.Tensor
+    ) -> torch.Tensor:
+        """Recover x_0 from a velocity prediction.
+
+        The inverse of :meth:`_loss_target`'s V case, and the reason v
+        prediction survives a zero terminal SNR: it multiplies x_t by
+        sqrt(abar) rather than dividing by it, so the coefficient that blows up
+        at t=T under epsilon prediction goes to zero here instead.
+
+        Args:
+            x_t: latents at timestep `t`.
+            t: ``(B,)`` integer timesteps.
+            v: the predicted velocity.
+
+        Returns:
+            The implied x_0.
+        """
+        return _expand(self.sqrtab, t, x_t) * x_t - _expand(self.sqrtmab, t, x_t) * v
 
     def _predict_xstart_from_xprev(
         self, x_t: torch.Tensor, t: torch.Tensor, xprev: torch.Tensor
@@ -495,9 +578,40 @@ class GaussianDiffusion(nn.Module):
             model_output = mean_out
 
         target = self._loss_target(x_start, x_t, t, eps)
+        # Kept unweighted: this is the term the per-timestep logging buckets,
+        # and a weight would make the buckets incomparable with each other.
         terms["mse"] = mean_flat((target - model_output) ** 2)
-        terms["loss"] = terms["mse"] + terms["vb"] if "vb" in terms else terms["mse"]
+        loss = terms["mse"] * self.loss_weights(t)
+        terms["loss"] = loss + terms["vb"] if "vb" in terms else loss
         return terms
+
+    def loss_weights(self, t: torch.Tensor) -> torch.Tensor:
+        """The per-timestep multiplier :attr:`loss_weighting` asks for.
+
+        Min-SNR is stated in x_0 space, so each parameterisation needs the
+        weight expressed in the space its target lives in: an epsilon-space
+        error is already scaled by 1/SNR relative to x_0, and a velocity-space
+        one by 1/(SNR+1).
+
+        Args:
+            t: ``(B,)`` integer timesteps.
+
+        Returns:
+            Shape ``(B,)`` tensor of weights, all 1 under uniform weighting.
+        """
+        if self.loss_weighting is LossWeighting.UNIFORM:
+            return torch.ones_like(t, dtype=torch.float32)
+
+        snr = self.snr.gather(0, t)
+        clamped = snr.clamp(max=self.min_snr_gamma)
+        match self.model_mean_type:
+            case ModelMeanType.START_X:
+                return clamped
+            case ModelMeanType.V:
+                return clamped / (snr + 1.0)
+            case _:
+                # EPSILON. PREVIOUS_X is rejected in the constructor.
+                return clamped / snr
 
     def _loss_target(
         self,
@@ -522,11 +636,16 @@ class GaussianDiffusion(nn.Module):
                 return eps
             case ModelMeanType.START_X:
                 return x_start
+            case ModelMeanType.V:
+                return (
+                    _expand(self.sqrtab, t, x_start) * eps
+                    - _expand(self.sqrtmab, t, x_start) * x_start
+                )
             case ModelMeanType.PREVIOUS_X:
                 return self.q_posterior_mean_variance(x_start, x_t, t)[0]
 
     def forward(self, x: torch.Tensor, model: nn.Module | None = None) -> torch.Tensor:
-        """Sample timesteps uniformly and return the mean training loss.
+        """Draw timesteps from :attr:`timestep_sampler` and take the mean loss.
 
         Signature-compatible with :class:`~tinydiffusion.diffusion.ddpm.DDPM`,
         so an existing training loop needs no change.
@@ -557,10 +676,18 @@ class GaussianDiffusion(nn.Module):
         Returns:
             The scalar loss, the per-image loss, and the sampled timesteps.
         """
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=x.device)
+        t, weights = self.timestep_sampler.sample(x.shape[0], x.device)
         terms = self.training_losses(x, t, model=model)
+        # Updated with the unweighted loss: the proposal is meant to track how
+        # large each timestep's term actually is, and feeding it the
+        # importance-corrected value would have it chase its own correction.
+        self.timestep_sampler.update(t, terms["loss"])
         per_sample = terms.get("mse", terms["loss"])
-        return LossTerms(loss=terms["loss"].mean(), per_sample=per_sample.detach(), timesteps=t)
+        return LossTerms(
+            loss=(terms["loss"] * weights).mean(),
+            per_sample=per_sample.detach(),
+            timesteps=t,
+        )
 
     def loss_at(
         self,

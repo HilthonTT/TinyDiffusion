@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tinydiffusion import __version__
 from tinydiffusion.data.datasets import dataset_names
+from tinydiffusion.diffusion.samplers import sampler_names
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.sampling import sample_from_checkpoint
@@ -133,7 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fid.add_argument("--batch-size", type=int, help="Override the checkpoint's batch size.")
     fid.add_argument("--data-root", type=Path, help="Override the dataset directory.")
-    fid.add_argument("--steps", type=int, help="DDIM steps. Defaults to the checkpoint's.")
+    fid.add_argument("--steps", type=int, help="Denoising steps. Defaults to the checkpoint's.")
+    fid.add_argument(
+        "--sampler",
+        choices=sampler_names(),
+        help="Sampler to draw with, overriding the checkpoint's. It moves the "
+        "score, so hold it fixed across the checkpoints being compared.",
+    )
     fid.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
     fid.add_argument(
         "--guidance",
@@ -200,7 +207,13 @@ def build_parser() -> argparse.ArgumentParser:
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
-    sample.add_argument("--steps", type=int, help="DDIM steps. Defaults to the checkpoint's.")
+    sample.add_argument("--steps", type=int, help="Denoising steps. Defaults to the checkpoint's.")
+    sample.add_argument(
+        "--sampler",
+        choices=sampler_names(),
+        help="Sampler to draw with, overriding the checkpoint's. 'dpmpp' is "
+        "DPM-Solver++(2M), which needs roughly a third of the steps 'ddim' does.",
+    )
     sample.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
     sample.add_argument(
         "--labels",
@@ -281,6 +294,7 @@ def _fid(args: argparse.Namespace) -> int:
         data_root=args.data_root,
         num_steps=args.steps,
         eta=args.eta,
+        sampler=args.sampler,
         guidance=args.guidance,
         use_ema=args.use_ema,
         seed=args.seed,
@@ -325,6 +339,7 @@ def _sample(args: argparse.Namespace) -> int:
         num_images=args.num_images,
         num_steps=args.steps,
         eta=args.eta,
+        sampler=args.sampler,
         labels=args.labels,
         guidance=args.guidance,
         seed=args.seed,

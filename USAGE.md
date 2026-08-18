@@ -394,8 +394,9 @@ be turned on for one run without editing the TOML.
 | --- | --- | --- |
 | `--checkpoint` | required | Checkpoint to sample from |
 | `--num-images` | 8 | How many images to generate |
-| `--steps` | the checkpoint's `sample_steps` | DDIM steps; fewer is faster, coarser |
-| `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM |
+| `--steps` | the checkpoint's `sample_steps` | Denoising steps; fewer is faster, coarser |
+| `--sampler` | the checkpoint's `sampler` | `ddim` or `dpmpp`; see [Choosing a sampler](#choosing-a-sampler) |
+| `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM. `dpmpp` accepts only 0 |
 | `--labels` | one image per class | Classes to generate, e.g. `7` or `0,1,2` |
 | `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
 | `--out` | `contents/samples.png` | Where to write the grid |
@@ -406,6 +407,35 @@ Checkpoints embed the config they were trained with, so this reconstructs the
 architecture from the `.pt` alone — the TOML that produced it is not needed.
 Sampling always uses the EMA weights, which is what the training grids are
 drawn from.
+
+### Choosing a sampler
+
+Two samplers, both usable with any checkpoint — which one to draw with is a
+runtime choice, not something baked into the weights:
+
+| `--sampler` | What it is | Steps it wants |
+| --- | --- | --- |
+| `ddim` | DDIM (Song et al. 2020), a first-order step along the probability-flow ODE | 50 |
+| `dpmpp` | DPM-Solver++(2M) (Lu et al. 2022), second-order multistep | 15-20 |
+
+`dpmpp` integrates the linear part of the same ODE in closed form and
+approximates only the `x_0` prediction, reusing the previous step's network
+evaluation rather than paying for a second one. A step therefore costs exactly
+what a DDIM step costs, and ten to twenty of them land about where fifty DDIM
+steps do:
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --sampler dpmpp --steps 20
+```
+
+It is deterministic, so `--eta` above 0 is refused rather than ignored — the
+solver has no noise term to scale. `--eta 1` remains available under `ddim`,
+where it reproduces ancestral DDPM sampling.
+
+`sampler` is also a config field, so a run's per-epoch grids are drawn the same
+way, and a checkpoint remembers what it was trained to be sampled with.
+Sampling settings move FID, so hold `--sampler` and `--steps` fixed across the
+checkpoints being compared.
 
 ### Asking for a particular digit
 
@@ -519,7 +549,8 @@ cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
 | `--split` | `train` | Real split to compare against |
 | `--batch-size` | the checkpoint's | Larger is faster |
 | `--data-root` | the checkpoint's | Dataset directory |
-| `--steps` | the checkpoint's | DDIM steps per sample |
+| `--steps` | the checkpoint's | Denoising steps per sample |
+| `--sampler` | the checkpoint's | `ddim` or `dpmpp`; hold it fixed across compared checkpoints |
 | `--eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `--guidance` | the checkpoint's | Classifier-free guidance scale |
 | `--no-ema` | off | Sample the raw weights instead of the EMA |
@@ -796,6 +827,67 @@ this way is not interchangeable with a baseline one. Bad combinations — a
 learned variance under plain `mse`, which would leave the variance head
 untrained — are rejected when the config is read.
 
+### Predicting velocity, and closing the terminal-SNR leak
+
+`predict = "v"` has the network predict the *velocity*
+`v = sqrt(abar)*eps - sqrt(1-abar)*x0` (Salimans & Ho 2022). It interpolates
+between the two obvious targets — epsilon at high noise, `x_0` at low — so no
+timestep is left regressing on something it cannot see the signal in.
+
+It pairs with `zero_snr`, which rescales the beta schedule so the last step
+carries no signal at all (Lin et al. 2024). A schedule that stops short leaves
+`x_T` holding a trace of the image's mean brightness; training always starts
+from a real image and never notices, but sampling starts from pure noise, whose
+mean is zero, and the model spends the chain restoring a brightness that was
+never there. The symptom is samples that are never fully black or fully white,
+and it gets worse the fewer steps you take.
+
+```toml
+[diffusion]
+predict = "v"
+zero_snr = true
+```
+
+`zero_snr` with `predict = "epsilon"` is rejected: with no signal at `t = T`
+there is no epsilon that says anything about `x_0`, which is exactly why the
+rescaling is published alongside `v`. How much it buys depends on the schedule
+— `linear` leaves `sqrt(abar_T)` around 0.006 over 1000 steps, while `cosine`
+clamps its betas at 0.999 and lands within 5e-5 of zero on its own, so there it
+mostly just makes the intent exact.
+
+### Weighting the timesteps
+
+Two independent knobs, both aimed at the same problem: a uniform draw of
+timesteps with uniform weights spends most of the gradient on the steps that
+need it least.
+
+```toml
+[diffusion]
+loss_weighting = "min_snr"      # clamp each timestep's weight at min_snr_gamma
+min_snr_gamma = 5.0             # the paper's value; not sensitive
+timestep_sampler = "loss_second_moment"
+```
+
+`loss_weighting = "min_snr"` (Hang et al. 2023) weights each timestep by
+`min(SNR(t), gamma)`, expressed in whatever space the network predicts in.
+Uniform weighting of an epsilon-space MSE is implicitly `1/SNR` weighting in
+`x_0` space, so the low-noise timesteps — where the model is nearly right
+already — dominate and pull against the high-noise ones. The clamp stops that,
+and usually reaches a given loss in noticeably fewer epochs. It applies to the
+MSE term only: under a hybrid objective the variational term keeps its own
+scale, and under a pure KL objective there is no MSE term to weight, so the
+combination is rejected. The logged `train/loss_q*` buckets stay unweighted, so
+they remain comparable with each other and across runs.
+
+`timestep_sampler = "loss_second_moment"` (Nichol & Dhariwal 2021) attacks the
+other half: which timesteps get drawn at all. It keeps a ten-deep history of
+each timestep's loss, samples in proportion to its RMS, and divides the loss
+back through by the sampling probability so the estimator stays unbiased. The
+draw is uniform until every timestep has a full history. It earns its keep on
+the variational objectives, whose per-timestep terms differ by orders of
+magnitude, and does very little for plain `mse`. The history lives in memory
+only, so a resumed run re-warms it over its first few hundred batches.
+
 ### Class conditioning
 
 `num_classes` opts into class-conditional training. It is off by default, and
@@ -843,9 +935,13 @@ starting it over, not `--resume`.
 | `num_timesteps` | 1000 | Length of the diffusion schedule |
 | `schedule` | `cosine` | `cosine` or `linear` |
 | `beta_start` / `beta_end` | 1e-4 / 0.02 | Linear schedule only |
-| `predict` | `epsilon` | Also `start_x`, `previous_x` |
+| `predict` | `epsilon` | Also `v` (velocity), `start_x`, `previous_x` |
 | `variance` | `fixed_small` | Also `fixed_large`, `learned_range`, `learned` |
 | `objective` | `mse` | Also `rescaled_mse` (hybrid), `kl`, `rescaled_kl` |
+| `zero_snr` | `false` | Rescale the schedule to zero terminal SNR; needs `predict = "v"` or `"start_x"` |
+| `loss_weighting` | `uniform` | Or `min_snr`, clamping each timestep's weight |
+| `min_snr_gamma` | 5.0 | The clamp, under `min_snr` weighting |
+| `timestep_sampler` | `uniform` | Or `loss_second_moment`, importance sampling the draw |
 | `num_epochs` | 30 | |
 | `lr` | 2e-4 | Adam |
 | `lr_warmup` | 500 | Optimiser steps to ramp the LR over; 0 disables |
@@ -864,7 +960,8 @@ starting it over, not `--resume`.
 | `channels_last` | `false` | Worth measuring rather than assuming |
 | `sample_every` | 1 | Epochs between sample grids; 0 disables |
 | `num_samples` | 16 | Images per grid |
-| `sample_steps` | 50 | DDIM steps for those grids |
+| `sampler` | `ddim` | Or `dpmpp` (DPM-Solver++(2M)), which needs about a third of the steps |
+| `sample_steps` | 50 | Denoising steps for those grids; 15-20 is plenty for `dpmpp` |
 | `out_dir` | `contents` | Sample grids |
 | `ckpt_dir` | `checkpoints` | Checkpoints |
 | `device` | auto | `cuda` when available, else `cpu` |

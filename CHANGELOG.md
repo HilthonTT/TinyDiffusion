@@ -8,6 +8,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Velocity prediction (`predict = "v"`, Salimans & Ho 2022) and the
+  zero-terminal-SNR schedule rescaling it pairs with (`zero_snr = true`, Lin et
+  al. 2024). A schedule that stops short of zero signal leaves `x_T` holding a
+  trace of the image's mean brightness — which training sees and sampling,
+  starting from pure noise, never does — and the velocity target is what stays
+  informative once that trace is removed. `zero_snr` with epsilon prediction is
+  rejected when the config is read, since at zero terminal SNR there is no
+  epsilon that says anything about `x_0`.
+- Min-SNR loss weighting (`loss_weighting = "min_snr"`, `min_snr_gamma`, Hang
+  et al. 2023), which clamps each timestep's weight at gamma so the nearly
+  solved low-noise steps stop dominating the gradient. The weight is expressed
+  in whatever space the network predicts in; the logged per-quartile losses
+  stay unweighted, so they remain comparable across buckets and runs.
+- Importance-sampled timesteps (`timestep_sampler = "loss_second_moment"`,
+  Nichol & Dhariwal 2021) in `tinydiffusion.diffusion.timesteps`: a ten-deep
+  per-timestep loss history, a proposal proportional to its RMS, and matching
+  `1/(T*p)` weights so the estimator stays unbiased. Mainly for the variational
+  objectives, whose per-timestep terms differ by orders of magnitude.
+- DPM-Solver++(2M) sampling (`tinydiffusion.diffusion.dpm_solver`, Lu et al.
+  2022) and a sampler registry (`tinydiffusion.diffusion.samplers`). The solver
+  integrates the linear part of the probability-flow ODE in closed form and
+  reuses the previous step's network evaluation for the second-order term, so a
+  step costs what a DDIM step costs and 15-20 of them land where 50 DDIM steps
+  do. Selected by the `sampler` config field and by `--sampler` on `sample` and
+  `fid`; it is deterministic, so a non-zero `eta` is refused rather than
+  ignored.
 - Project scaffolding: `src/` layout, uv-managed environment, ruff, mypy, pytest.
 - GitHub Actions CI (lint, type-check, test matrix, build) and release workflow.
 - Dependabot for `uv` and `github-actions`.

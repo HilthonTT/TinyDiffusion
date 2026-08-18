@@ -113,7 +113,10 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   choices DDPM fixes — what the network predicts, where the reverse variance
   comes from, and what is optimised — explicit, and adds the variational bound
   they are measured against. Set `variance` and `objective` in the config to
-  train Nichol & Dhariwal's improved DDPM with a learned variance.
+  train Nichol & Dhariwal's improved DDPM with a learned variance, `predict =
+  "v"` with `zero_snr` for the velocity parameterisation on a schedule that
+  reaches zero signal at `t = T`, and `loss_weighting = "min_snr"` to stop the
+  low-noise timesteps dominating the gradient.
 - **Conditioning** — `models/embeddings.py` adds a class embedding, summed into
   the timestep embedding so the label rides the FiLM path the ResBlocks already
   have. `diffusion/guidance.py` reserves one embedding row as a null token,
@@ -122,7 +125,9 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   rather than a change to any sampler.
 - **Sampling** — `diffusion/ddim.py` runs the reverse chain over a subsequence
   of timesteps, so 50 steps stand in for 1000. `eta` interpolates between
-  deterministic DDIM and ancestral DDPM.
+  deterministic DDIM and ancestral DDPM. `diffusion/dpm_solver.py` is
+  DPM-Solver++(2M), which reaches the same place in 15 to 20 steps for the same
+  cost per step; `--sampler` and the `sampler` config field pick between them.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
 

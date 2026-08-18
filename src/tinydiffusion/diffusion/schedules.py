@@ -79,4 +79,63 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
         "posterior_logvar": posterior_var.clamp(min=1e-20).log(),
         "posterior_mean_c0": betas * alphabar_prev.sqrt() / (1.0 - alphabar_t),
         "posterior_mean_ct": (1.0 - alphabar_prev) * alpha_t.sqrt() / (1.0 - alphabar_t),
+        # Signal-to-noise ratio of x_t. Only the loss weighting reads it, but it
+        # belongs to the schedule rather than to any one objective.
+        "snr": alphabar_t / (1.0 - alphabar_t),
     }
+
+
+def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch.Tensor:
+    """Rescale a schedule so the last step carries (almost) no signal.
+
+    A schedule that does not reach zero signal-to-noise at its last step
+    leaves x_T holding a trace of the image's mean brightness. Training never
+    notices — it always starts from a real image — but sampling starts from
+    pure noise, whose mean is 0, and the model spends the chain restoring a
+    brightness the noise never had. The symptom is samples that are never
+    fully black or fully white, and it gets worse the fewer steps you take.
+
+    Lin et al. 2024 (https://arxiv.org/abs/2305.08891) fix it by rescaling
+    sqrt(alphabar) linearly so its last entry is zero, holding the first entry
+    fixed, and recovering the betas from the result.
+
+    How much this is worth depends on the schedule.
+    :func:`linear_beta_schedule` leaves sqrt(alphabar_T) at about 0.006 over
+    1000 steps and 0.6 over 100, which is a real leak;
+    :func:`cosine_beta_schedule` clamps its betas at 0.999 and already lands
+    within 5e-5 of zero, so the rescale mostly just makes that exact. Either
+    way it costs nothing at training time, and it is the schedule the short
+    sampling chains were tuned against.
+
+    Args:
+        betas: 1-D tensor of betas, every entry in (0, 1).
+        floor: smallest sqrt(alphabar) the last steps may take. Exactly zero is
+            what the paper asks for, but it puts an infinity in every
+            coefficient that divides by sqrt(alphabar) — the epsilon
+            parameterisation's x_0 recovery, chiefly — and those coefficients
+            are built for the whole schedule whether or not this run uses
+            them. A floor of 1e-4 leaves an SNR of 1e-8, which is zero for
+            every practical purpose, and keeps the buffers finite.
+
+    Returns:
+        1-D tensor of rescaled betas, the same length as the input.
+
+    Raises:
+        ValueError: if any beta falls outside (0, 1), or `floor` is not in
+            (0, 1).
+    """
+    if not (betas > 0).all() or not (betas < 1).all():
+        raise ValueError("all betas must lie in (0, 1)")
+    if not 0.0 < floor < 1.0:
+        raise ValueError(f"floor must lie in (0, 1), got {floor}")
+
+    sqrt_ab = torch.cumprod(1.0 - betas, dim=0).sqrt()
+    first, last = sqrt_ab[0].clone(), sqrt_ab[-1].clone()
+    # Shift the tail to zero, then stretch so the head lands back where it was.
+    sqrt_ab = (sqrt_ab - last) * (first / (first - last))
+    sqrt_ab = sqrt_ab.clamp(min=floor)
+
+    alphabar = sqrt_ab.square()
+    # alpha_t = abar_t / abar_{t-1}, with abar_{-1} = 1.
+    alphas = alphabar / torch.cat([torch.ones(1, dtype=alphabar.dtype), alphabar[:-1]])
+    return 1.0 - alphas

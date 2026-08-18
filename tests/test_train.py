@@ -126,13 +126,13 @@ def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
 def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkeypatch):
     """The grids are a flipbook of one latent set, not a fresh draw per epoch."""
     seen = []
-    real_sample = train_module.ddim_sample
+    real_sample = train_module.get_sampler("ddim")
 
     def spy(*args, **kwargs):
         seen.append(kwargs["noise"])
         return real_sample(*args, **kwargs)
 
-    monkeypatch.setattr(train_module, "ddim_sample", spy)
+    monkeypatch.setattr(train_module, "get_sampler", lambda name: spy)
     cfg = dataclasses.replace(tiny_cfg, sample_every=1)
     train_module.train(cfg)
 
@@ -144,13 +144,13 @@ def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkey
 def test_the_grid_latents_follow_the_seed(tiny_cfg, fake_loader, monkeypatch):
     """Derived from cfg.seed, so a --resume continues the same grid."""
     seen = []
-    real_sample = train_module.ddim_sample
+    real_sample = train_module.get_sampler("ddim")
 
     def spy(*args, **kwargs):
         seen.append(kwargs["noise"])
         return real_sample(*args, **kwargs)
 
-    monkeypatch.setattr(train_module, "ddim_sample", spy)
+    monkeypatch.setattr(train_module, "get_sampler", lambda name: spy)
     for seed in (0, 0, 1):
         train_module.train(dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1, seed=seed))
 

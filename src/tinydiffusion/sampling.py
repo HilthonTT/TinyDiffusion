@@ -7,9 +7,9 @@ import torch
 from torchvision.utils import save_image
 
 from tinydiffusion.data.datasets import denormalize
-from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned, cycled_labels
+from tinydiffusion.diffusion.samplers import get_sampler
 from tinydiffusion.training.checkpoints import read_checkpoint, restore_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
@@ -104,6 +104,7 @@ def sample_from_checkpoint(
     num_images: int = 8,
     num_steps: int | None = None,
     eta: float = 0.0,
+    sampler: str | None = None,
     labels: Sequence[int] | None = None,
     guidance: float | None = None,
     seed: int | None = None,
@@ -115,8 +116,12 @@ def sample_from_checkpoint(
         checkpoint: file to sample from.
         out: image path to write.
         num_images: how many images to generate.
-        num_steps: DDIM steps. Defaults to the checkpoint's ``sample_steps``.
-        eta: 0.0 is deterministic DDIM; 1.0 reproduces DDPM ancestral sampling.
+        num_steps: denoising steps. Defaults to the checkpoint's
+            ``sample_steps``.
+        eta: 0.0 is deterministic DDIM; 1.0 reproduces DDPM ancestral
+            sampling. Only ``ddim`` accepts a non-zero value.
+        sampler: which sampler to draw with, or None for the checkpoint's own.
+            See :data:`~tinydiffusion.diffusion.samplers.SAMPLERS`.
         labels: classes to generate, cycled over the grid. Conditional
             checkpoints only; see :func:`resolve_labels` for the default.
         guidance: classifier-free guidance scale, or None to use the
@@ -129,8 +134,8 @@ def sample_from_checkpoint(
         The path that was written.
 
     Raises:
-        ValueError: if ``num_images`` is not positive, or the conditioning
-            arguments do not match the checkpoint.
+        ValueError: if ``num_images`` is not positive, no sampler goes by that
+            name, or the conditioning arguments do not match the checkpoint.
     """
     if num_images < 1:
         raise ValueError(f"num_images must be positive, got {num_images}")
@@ -146,7 +151,7 @@ def sample_from_checkpoint(
     )
     scale = cfg.guidance if guidance is None else guidance
 
-    images = ddim_sample(
+    images = get_sampler(cfg.sampler if sampler is None else sampler)(
         diffusion,
         num_images,
         (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),

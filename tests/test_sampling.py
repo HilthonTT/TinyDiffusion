@@ -84,7 +84,7 @@ def sampled_model(monkeypatch):
         seen["model"] = kwargs["model"]
         return torch.zeros(num_samples, *size)
 
-    monkeypatch.setattr(sampling, "ddim_sample", spy)
+    monkeypatch.setattr(sampling, "get_sampler", lambda name: spy)
     return seen
 
 

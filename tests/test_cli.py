@@ -63,6 +63,8 @@ def test_sample_defaults():
     # Unset, so the checkpoint's own conditioning settings decide.
     assert args.labels is None
     assert args.guidance is None
+    # Likewise the sampler it was trained to be drawn with.
+    assert args.sampler is None
 
 
 @pytest.mark.parametrize(
@@ -77,6 +79,18 @@ def test_sample_parses_labels(given, expected):
 def test_sample_rejects_labels_that_are_not_whole_numbers(given):
     with pytest.raises(SystemExit):
         build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--labels", given])
+
+
+@pytest.mark.parametrize("command", ["sample", "fid"])
+def test_the_sampler_can_be_chosen_per_command(command):
+    args = build_parser().parse_args([command, "--checkpoint", "m.pt", "--sampler", "dpmpp"])
+    assert args.sampler == "dpmpp"
+
+
+@pytest.mark.parametrize("command", ["sample", "fid"])
+def test_an_unknown_sampler_is_refused_by_the_parser(command):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([command, "--checkpoint", "m.pt", "--sampler", "euler"])
 
 
 def test_sample_parses_the_guidance_scale():

@@ -9,7 +9,14 @@ from typing import Any, Literal, Self
 import torch
 
 from tinydiffusion.data.datasets import DEFAULT_DATASET, DatasetSpec, dataset_spec
-from tinydiffusion.diffusion.gaussian_diffusion import LossType, ModelMeanType, ModelVarType
+from tinydiffusion.diffusion.gaussian_diffusion import (
+    LossType,
+    LossWeighting,
+    ModelMeanType,
+    ModelVarType,
+)
+from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
+from tinydiffusion.diffusion.timesteps import timestep_sampler
 
 # Fields whose declared type is not what TOML (or a checkpoint's provenance
 # dict, which stringifies Paths) hands back, so they need coercing on the way in.
@@ -33,6 +40,22 @@ class TrainConfig:
     :class:`~tinydiffusion.diffusion.ddpm.DDPM` implements, and that is what
     gets built; any other combination is served by
     :class:`~tinydiffusion.diffusion.gaussian_diffusion.GaussianDiffusion`.
+
+    ``predict = "v"`` is the velocity parameterisation, and the one to pair
+    with ``zero_snr = true``: the published schedules leave a little signal in
+    x_T, which the model learns to lean on and pure noise does not have, and
+    rescaling that away costs epsilon prediction its target. Together they are
+    what make a short sampling chain — ``sampler = "dpmpp"`` at 15 or 20
+    ``sample_steps`` — hold up.
+
+    ``loss_weighting = "min_snr"`` clamps each timestep's weight at
+    ``min_snr_gamma`` (Hang et al. 2023). Uniform weighting quietly favours the
+    low-noise timesteps, which are nearly solved already; the clamp stops them
+    drowning out the rest and typically reaches a given loss in far fewer
+    epochs. ``timestep_sampler = "loss_second_moment"`` is the other half of
+    the same problem, attacking the variance of *which* timesteps get drawn
+    rather than what they are worth once drawn; it earns its keep on the
+    variational objectives and does little for plain MSE.
 
     ``dataset`` names an entry in
     :data:`~tinydiffusion.data.datasets.DATASETS`, which is where the channel
@@ -107,9 +130,13 @@ class TrainConfig:
     schedule: Literal["cosine", "linear"] = "cosine"
     beta_start: float = 1e-4
     beta_end: float = 0.02
-    predict: Literal["epsilon", "start_x", "previous_x"] = "epsilon"
+    predict: Literal["epsilon", "start_x", "v", "previous_x"] = "epsilon"
     variance: Literal["fixed_small", "fixed_large", "learned", "learned_range"] = "fixed_small"
     objective: Literal["mse", "rescaled_mse", "kl", "rescaled_kl"] = "mse"
+    zero_snr: bool = False
+    loss_weighting: Literal["uniform", "min_snr"] = "uniform"
+    min_snr_gamma: float = 5.0
+    timestep_sampler: Literal["uniform", "loss_second_moment"] = "uniform"
 
     # optimisation
     num_epochs: int = 30
@@ -137,6 +164,7 @@ class TrainConfig:
     channels_last: bool = False
     sample_every: int = 1
     num_samples: int = 16
+    sampler: str = DEFAULT_SAMPLER
     sample_steps: int = 50
     out_dir: Path = Path("contents")
     ckpt_dir: Path = Path("checkpoints")
@@ -194,6 +222,12 @@ class TrainConfig:
             raise ValueError(
                 f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
             )
+        # Raises on an unregistered name; checked here so a typo costs nothing
+        # rather than being found by the first per-epoch grid.
+        get_sampler(self.sampler)
+        timestep_sampler(self.timestep_sampler, self.num_timesteps)
+        if self.min_snr_gamma <= 0:
+            raise ValueError(f"min_snr_gamma must be positive, got {self.min_snr_gamma}")
         if self.num_samples < 1:
             raise ValueError(f"num_samples must be positive, got {self.num_samples}")
         if not 1 <= self.val_steps <= self.num_timesteps:
@@ -289,8 +323,8 @@ class TrainConfig:
         """
         return dataset_spec(self.dataset)
 
-    def diffusion_types(self) -> tuple[ModelMeanType, ModelVarType, LossType]:
-        """Resolve the three parameterisation fields to their enums.
+    def diffusion_types(self) -> tuple[ModelMeanType, ModelVarType, LossType, LossWeighting]:
+        """Resolve the parameterisation fields to their enums.
 
         Called from :meth:`__post_init__` so a bad combination fails while the
         config is being read rather than after the dataset has downloaded, and
@@ -298,7 +332,7 @@ class TrainConfig:
         is what keeps validation and construction from drifting apart.
 
         Returns:
-            Tuple of ``(mean_type, var_type, loss_type)``.
+            Tuple of ``(mean_type, var_type, loss_type, weighting)``.
 
         Raises:
             ValueError: if a field names no such option, or the combination
@@ -308,8 +342,27 @@ class TrainConfig:
             mean_type = ModelMeanType(self.predict)
             var_type = ModelVarType(self.variance)
             loss_type = LossType(self.objective)
+            weighting = LossWeighting(self.loss_weighting)
         except ValueError as exc:
             raise ValueError(f"bad diffusion parameterisation: {exc}") from exc
+
+        if self.zero_snr and mean_type is ModelMeanType.EPSILON:
+            # At a zero terminal SNR, x_T holds no signal at all, so an epsilon
+            # prediction there says nothing about x_0 and the recovery divides
+            # by a vanishing sqrt(alphabar). v prediction is the pairing the
+            # rescaling was published with.
+            raise ValueError(
+                "zero_snr leaves the last timestep with no signal, which epsilon "
+                "prediction cannot invert; use predict='v' (or 'start_x')"
+            )
+        if weighting is LossWeighting.MIN_SNR:
+            if loss_type.is_variational:
+                raise ValueError(
+                    f"loss_weighting='min_snr' weights the MSE term, which "
+                    f"objective={self.objective!r} does not have; use an MSE objective"
+                )
+            if mean_type is ModelMeanType.PREVIOUS_X:
+                raise ValueError("loss_weighting='min_snr' is not defined for predict='previous_x'")
 
         if var_type.is_learned and loss_type is LossType.MSE:
             # Nothing in L_simple touches the variance head, so it would keep
@@ -323,7 +376,7 @@ class TrainConfig:
                 f"objective='rescaled_mse' adds a variational term to train a learned "
                 f"variance, but variance={self.variance!r}; use objective='mse' instead"
             )
-        return mean_type, var_type, loss_type
+        return mean_type, var_type, loss_type, weighting
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> Self:

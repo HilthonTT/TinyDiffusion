@@ -9,9 +9,9 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from tinydiffusion.data.datasets import image_dataloader
-from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
+from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
 from tinydiffusion.metrics.fid import FeatureStats, fid_from_stats
 from tinydiffusion.metrics.inception import FeatureExtractor
 from tinydiffusion.sampling import load_for_sampling
@@ -125,6 +125,7 @@ def generate_images(
     num_steps: int,
     eta: float,
     guidance: float,
+    sampler: str = DEFAULT_SAMPLER,
 ) -> Iterable[torch.Tensor]:
     """Draw samples in batches, yielding each as it is produced.
 
@@ -137,13 +138,17 @@ def generate_images(
         cfg: the checkpoint's config, for the schedule and image geometry.
         num_images: total images to draw.
         batch_size: images per batch.
-        num_steps: DDIM steps per batch.
+        num_steps: denoising steps per batch.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
         guidance: classifier-free guidance scale, ignored when unconditional.
+        sampler: which sampler to draw with; a key of
+            :data:`~tinydiffusion.diffusion.samplers.SAMPLERS`. Defaults to
+            DDIM, which is what every caller wanted before there was a choice.
 
     Yields:
         ``(b, C, image_size, image_size)`` batches in [-1, 1].
     """
+    draw = get_sampler(sampler)
     produced = 0
     while produced < num_images:
         batch = min(batch_size, num_images - produced)
@@ -158,7 +163,7 @@ def generate_images(
             if cfg.num_classes is None
             else torch.arange(produced, produced + batch, device=cfg.device) % cfg.num_classes
         )
-        yield ddim_sample(
+        yield draw(
             diffusion,
             batch,
             (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
@@ -180,6 +185,7 @@ def fid_for_checkpoint(
     data_root: Path | None = None,
     num_steps: int | None = None,
     eta: float = 0.0,
+    sampler: str | None = None,
     guidance: float | None = None,
     use_ema: bool = True,
     seed: int = 0,
@@ -196,7 +202,7 @@ def fid_for_checkpoint(
     end of a run rather than inside the training loop.
 
     The number is only meaningful in comparison. Hold ``num_images``,
-    ``split``, ``num_steps`` and the extractor fixed across the checkpoints
+    ``split``, ``num_steps``, ``sampler`` and the extractor fixed across the checkpoints
     being compared, since each of them moves the score on its own.
 
     Args:
@@ -207,8 +213,11 @@ def fid_for_checkpoint(
             which is both larger and the distribution the model was fit to.
         batch_size: images per batch, or None to reuse the checkpoint's.
         data_root: dataset directory, or None to reuse the checkpoint's.
-        num_steps: DDIM steps per sample. Defaults to the checkpoint's.
+        num_steps: denoising steps per sample. Defaults to the checkpoint's.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
+        sampler: which sampler to draw with, or None for the checkpoint's own.
+            It moves the score like any other sampling setting, so hold it
+            fixed across the checkpoints being compared.
         guidance: classifier-free guidance scale, or None for the checkpoint's.
             Worth sweeping: guidance trades diversity for fidelity, and FID
             usually has an interior minimum somewhere above 1.
@@ -234,6 +243,7 @@ def fid_for_checkpoint(
     diffusion, ema, cfg = load_for_sampling(checkpoint, device)
     net = ema.module if use_ema else diffusion.net
     steps = num_steps if num_steps is not None else cfg.sample_steps
+    draw_with = cfg.sampler if sampler is None else sampler
     scale = cfg.guidance if guidance is None else guidance
     batch = batch_size if batch_size is not None else cfg.batch_size
 
@@ -289,6 +299,7 @@ def fid_for_checkpoint(
                 num_steps=steps,
                 eta=eta,
                 guidance=scale,
+                sampler=draw_with,
             ),
             desc="fid generated",
             total=-(-num_images // batch),

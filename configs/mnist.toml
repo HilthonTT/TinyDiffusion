@@ -44,9 +44,25 @@ beta_end = 0.02         # linear schedule only
 # GaussianDiffusion. For Nichol & Dhariwal's improved DDPM — which samples well
 # in far fewer steps — set variance = "learned_range" and objective =
 # "rescaled_mse", which also doubles the U-Net's output channels.
-predict = "epsilon"       # "epsilon", "start_x" or "previous_x"
+predict = "epsilon"       # "epsilon", "v", "start_x" or "previous_x"
 variance = "fixed_small"  # "fixed_small", "fixed_large", "learned_range", "learned"
 objective = "mse"         # "mse", "rescaled_mse", "kl" or "rescaled_kl"
+
+# Velocity prediction on a schedule rescaled to zero terminal SNR. The two go
+# together: the rescaling removes the trace of image brightness that x_T
+# otherwise keeps, and epsilon prediction has nothing left to predict at t = T
+# once it is gone, so predict = "v" is required (or "start_x"). Worth having
+# for short sampling chains; see USAGE.md.
+zero_snr = false
+
+# How the timesteps are weighted against each other, and how they are drawn.
+# "min_snr" clamps each timestep's weight at min_snr_gamma so the nearly solved
+# low-noise steps stop dominating the gradient; "loss_second_moment" samples
+# timesteps in proportion to their recent RMS loss, which mostly matters for
+# the variational objectives.
+loss_weighting = "uniform"      # "uniform" or "min_snr"
+min_snr_gamma = 5.0             # the clamp, under "min_snr"
+timestep_sampler = "uniform"    # "uniform" or "loss_second_moment"
 
 [optimisation]
 num_epochs = 30
@@ -65,6 +81,10 @@ deterministic = false
 amp = true
 sample_every = 1
 num_samples = 16
+# "ddim" at 50 steps, or "dpmpp" (DPM-Solver++(2M)) at 15-20 for the same
+# result and a third of the time. The field also decides what `sample` and
+# `fid` default to for checkpoints from this run.
+sampler = "ddim"
 sample_steps = 50
 out_dir = "contents"
 ckpt_dir = "checkpoints"

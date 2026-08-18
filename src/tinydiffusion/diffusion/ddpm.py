@@ -55,6 +55,7 @@ class DDPM(nn.Module):
     posterior_logvar: torch.Tensor
     posterior_mean_c0: torch.Tensor
     posterior_mean_ct: torch.Tensor
+    snr: torch.Tensor
 
     def __init__(
         self,

@@ -23,9 +23,9 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 
 from tinydiffusion.data.datasets import denormalize, image_dataloader
-from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import Conditioned, conditioned, drop_labels
+from tinydiffusion.diffusion.samplers import get_sampler
 from tinydiffusion.training.checkpoints import (
     BEST_CHECKPOINT,
     INTERRUPTED_CHECKPOINT,
@@ -260,7 +260,7 @@ def save_samples(
         index = torch.arange(cfg.num_samples) % labels.shape[0]
         labels = labels[index].to(cfg.device)
 
-    fake = ddim_sample(
+    fake = get_sampler(cfg.sampler)(
         diffusion,
         cfg.num_samples,
         shape,

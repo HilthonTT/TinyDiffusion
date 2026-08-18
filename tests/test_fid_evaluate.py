@@ -148,7 +148,9 @@ def test_the_generated_class_mix_stays_balanced_across_batches(make_checkpoint, 
     monkeypatch.setattr(
         evaluate, "conditioned", lambda net, y, **kw: seen.append(y) or torch.nn.Identity()
     )
-    monkeypatch.setattr(evaluate, "ddim_sample", lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8))
+    monkeypatch.setattr(
+        evaluate, "get_sampler", lambda name: lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8)
+    )
 
     # 26 images in batches of 4 over 4 classes: restarting the cycle each batch
     # would give class 0 seven samples and classes 2 and 3 six each.
@@ -177,7 +179,9 @@ def test_an_unconditional_checkpoint_generates_without_labels(checkpoint, monkey
     monkeypatch.setattr(
         evaluate, "conditioned", lambda net, y, **kw: seen.append(y) or torch.nn.Identity()
     )
-    monkeypatch.setattr(evaluate, "ddim_sample", lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8))
+    monkeypatch.setattr(
+        evaluate, "get_sampler", lambda name: lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8)
+    )
 
     list(
         evaluate.generate_images(

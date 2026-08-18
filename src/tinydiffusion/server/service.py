@@ -12,8 +12,8 @@ import torch
 from torchvision.utils import save_image
 
 from tinydiffusion.data.datasets import denormalize
-from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.guidance import conditioned
+from tinydiffusion.diffusion.samplers import get_sampler
 from tinydiffusion.sampling import grid_width, load_for_sampling, resolve_labels
 from tinydiffusion.server.config import ServerConfig
 
@@ -113,8 +113,10 @@ class SamplerService:
                 checkpoints only.
             guidance: classifier-free guidance scale, or None for the
                 checkpoint's.
-            steps: DDIM steps, or None for the checkpoint's.
+            steps: denoising steps, or None for the checkpoint's.
             eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
+                Only a checkpoint sampled with ``ddim`` accepts a non-zero
+                value; the deterministic solvers reject one.
             seed: seed for this request's own generator, or None to draw from
                 the global RNG.
 
@@ -157,7 +159,7 @@ class SamplerService:
         )
 
         with self._lock:
-            images = ddim_sample(
+            images = get_sampler(self._cfg.sampler)(
                 self._diffusion,
                 num_images,
                 (self._spec.channels, self._cfg.image_size, self._cfg.image_size),
