@@ -73,6 +73,11 @@ class SamplerService:
         """Guidance scale used when a request does not ask for one."""
         return self._cfg.guidance
 
+    @property
+    def default_guidance_rescale(self) -> float:
+        """Guidance rescale factor used when a request does not ask for one."""
+        return self._cfg.guidance_rescale
+
     def image_path(self, filename: str) -> Path:
         """Resolve a served filename to a path inside the image directory.
 
@@ -101,6 +106,7 @@ class SamplerService:
         num_images: int,
         labels: Sequence[int] | None = None,
         guidance: float | None = None,
+        guidance_rescale: float | None = None,
         steps: int | None = None,
         eta: float = 0.0,
         seed: int | None = None,
@@ -113,6 +119,9 @@ class SamplerService:
                 checkpoints only.
             guidance: classifier-free guidance scale, or None for the
                 checkpoint's.
+            guidance_rescale: guidance rescale factor in [0, 1], or None for
+                the checkpoint's. See
+                :func:`~tinydiffusion.diffusion.guidance.rescale_guided`.
             steps: denoising steps, or None for the checkpoint's.
             eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
                 Only a checkpoint sampled with ``ddim`` accepts a non-zero
@@ -126,7 +135,7 @@ class SamplerService:
         Raises:
             ValueError: if the request does not fit the checkpoint — too many
                 images, labels for an unconditional model, a label naming no
-                class, or an out-of-range step count or eta.
+                class, or an out-of-range step count, eta or rescale factor.
         """
         if not 1 <= num_images <= self.config.max_images:
             raise ValueError(
@@ -149,6 +158,7 @@ class SamplerService:
             device=self._cfg.device,
         )
         scale = self._cfg.guidance if guidance is None else guidance
+        rescale = self._cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
 
         # A request-local generator rather than seed_everything: reseeding the
         # process from a request would make one caller's `seed` reach into
@@ -166,7 +176,13 @@ class SamplerService:
                 self._cfg.device,
                 num_steps=num_steps,
                 eta=eta,
-                model=conditioned(self._net, y, num_classes=self._cfg.num_classes, scale=scale),
+                model=conditioned(
+                    self._net,
+                    y,
+                    num_classes=self._cfg.num_classes,
+                    scale=scale,
+                    rescale=rescale,
+                ),
                 generator=generator,
             )
 
@@ -247,6 +263,7 @@ class SamplerService:
             "num_timesteps": self._cfg.num_timesteps,
             "default_steps": self.default_steps,
             "default_guidance": self.default_guidance,
+            "default_guidance_rescale": self.default_guidance_rescale,
             "max_images": self.config.max_images,
             "image_ttl": self.config.image_ttl,
             "keep_images": self.config.keep_images,

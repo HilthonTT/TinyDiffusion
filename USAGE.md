@@ -399,6 +399,7 @@ be turned on for one run without editing the TOML.
 | `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM. `dpmpp` accepts only 0 |
 | `--labels` | one image per class | Classes to generate, e.g. `7` or `0,1,2` |
 | `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
+| `--guidance-rescale` | the checkpoint's `guidance_rescale` | Corrects the scale guidance inflates; 0.7 above `--guidance 3` |
 | `--out` | `contents/samples.png` | Where to write the grid |
 | `--seed` | 0 | Seed applied before sampling |
 | `--device` | auto | `cuda`, `cpu`, `cuda:1`, … |
@@ -457,8 +458,25 @@ model's unconditional prediction — digits get cleaner and more emphatically
 class-typical, variety drops, and every step costs a second forward pass. 2–4
 is the useful range on MNIST; past about 6 strokes start to blow out.
 
-Both flags are errors against an unconditional checkpoint, which has no class
-space to name.
+`--guidance-rescale` is what pushes that ceiling back. Extrapolation makes the
+prediction *larger*, not just better aimed: its standard deviation grows with
+the scale, and since the model was trained on targets of a fixed scale, the
+recovered image ends up driven to the extremes of the range — the blow-out
+above. Lin et al. 2023 §3.4 rescale the guided prediction back onto the
+conditional one's standard deviation, then blend, since going all the way is
+itself too strong:
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --guidance 5 --guidance-rescale 0.7
+```
+
+0.7 is the published blend and a good starting point. 0 is plain guidance and
+the default, since the correction only matters once the scale is high enough to
+need it. It is worth most on a `predict = "v"` model trained with `zero_snr`,
+where the terminal step carries no signal to anchor the scale against.
+
+All three flags are errors against an unconditional checkpoint, which has no
+class space to name.
 
 ## Evaluating a checkpoint
 
@@ -553,6 +571,7 @@ cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
 | `--sampler` | the checkpoint's | `ddim` or `dpmpp`; hold it fixed across compared checkpoints |
 | `--eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `--guidance` | the checkpoint's | Classifier-free guidance scale |
+| `--guidance-rescale` | the checkpoint's | Guidance rescale factor; sweep it jointly with `--guidance` |
 | `--no-ema` | off | Sample the raw weights instead of the EMA |
 | `--seed` | 0 | Fixes the samples; change it to redraw |
 | `--device` | auto | `cuda`, `cpu`, … |
@@ -627,6 +646,7 @@ curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
 | `num_images` | 8 | Images in the grid, up to `--max-images` |
 | `labels` | one per class | Classes to generate. Conditional checkpoints only |
 | `guidance` | the checkpoint's | Classifier-free guidance scale |
+| `guidance_rescale` | the checkpoint's | Guidance rescale factor, in [0, 1] |
 | `steps` | the checkpoint's | DDIM steps |
 | `eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `seed` | null | Fixes the sample; the same seed returns the same image |
@@ -898,6 +918,7 @@ on in both shipped configs — the one place they depart from the defaults:
 num_classes = 10      # MNIST's digits; has to match the dataset's label space
 class_dropout = 0.1   # labels replaced by the null token during training
 guidance = 2.0        # scale used at sample time
+guidance_rescale = 0.0  # correction for the scale guidance inflates
 ```
 
 The three work together. `num_classes` gives the U-Net a class embedding,
@@ -908,6 +929,13 @@ conditional and an unconditional prediction. `guidance` then extrapolates
 between them at sample time, and needs the other two to mean anything;
 combinations that cannot work, such as `guidance` above 1 with
 `class_dropout = 0`, are rejected when the config is read.
+
+`guidance_rescale` corrects the scale that extrapolation inflates, and is what
+keeps a high `guidance` from washing images out; see
+[Asking for a particular digit](#asking-for-a-particular-digit) for what it does and when to
+reach for it. It is 0 by default, and setting it above 0 at `guidance = 1.0` is
+rejected rather than silently ignored, since there is no extrapolation there to
+correct.
 
 The label costs almost nothing: one embedding row per class, and the sample
 grids become class-matched — each generated digit sits directly above a real
@@ -932,6 +960,7 @@ starting it over, not `--resume`.
 | `num_classes` | unset | Classes to condition on; 10 for MNIST |
 | `class_dropout` | 0.1 | Labels replaced by the null token in training |
 | `guidance` | 1.0 | Guidance scale; 1.0 is plain conditional |
+| `guidance_rescale` | 0.0 | Corrects the scale guidance inflates; 0.7 above `guidance` 3 |
 | `num_timesteps` | 1000 | Length of the diffusion schedule |
 | `schedule` | `cosine` | `cosine` or `linear` |
 | `beta_start` / `beta_end` | 1e-4 / 0.02 | Linear schedule only |

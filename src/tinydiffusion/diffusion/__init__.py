@@ -21,6 +21,7 @@ from tinydiffusion.diffusion.guidance import (
     conditioned,
     cycled_labels,
     drop_labels,
+    rescale_guided,
 )
 from tinydiffusion.diffusion.latents import initial_latent
 from tinydiffusion.diffusion.losses import (
@@ -82,6 +83,7 @@ __all__ = [
     "normal_kl",
     "predict_xstart_eps",
     "quadratic_timesteps",
+    "rescale_guided",
     "sampler_names",
     "timestep_sampler",
     "uniform_timesteps",

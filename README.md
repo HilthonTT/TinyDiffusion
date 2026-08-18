@@ -9,13 +9,13 @@ A PyTorch implementation of a diffusion model for image generation: a DDPM
 U-Net trained on MNIST, sampled with DDIM, and conditioned on the digit class
 with classifier-free guidance — so you can ask it for a 7.
 
-![Generated digits after six epochs](docs/sample-epoch-6.png)
+![Generated digits after 10 epochs](docs/sample_0010.png)
 
-*`contents/sample_0006.png`, written automatically after the sixth epoch. The
+_`docs/sample_0010.png`, written automatically after the sixth epoch. The
 top half is generated, the bottom half is real MNIST — every grid pairs them so
 stroke weight and contrast are directly comparable. Six epochs is about 11
 minutes on an RTX 5060; most digits are already well formed, a few strokes are
-still breaking up.*
+still breaking up._
 
 > **Status:** early development. Training and sampling work end to end.
 > MNIST is the default and the best-exercised path; Fashion-MNIST and
@@ -56,7 +56,7 @@ held-out test split:
 ./run.sh eval   --checkpoint checkpoints/last.pt
 ```
 
-`fid` goes further and measures sample *quality*, by comparing generated images
+`fid` goes further and measures sample _quality_, by comparing generated images
 with real ones in Inception-v3 feature space:
 
 ```bash
@@ -77,6 +77,7 @@ asked for a particular one — and for how hard to insist on it:
 ```bash
 ./run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
 ./run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
+./run.sh sample --checkpoint checkpoints/last.pt --guidance 6 --guidance-rescale 0.7
 ```
 
 With no `--labels` the grid holds one image per digit. `--guidance` is the
@@ -94,12 +95,12 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
 
 ## Documentation
 
-| | |
-| --- | --- |
-| [docs/INSTALL.md](docs/INSTALL.md) | Install, GPU setup, verification, troubleshooting |
-| [USAGE.md](USAGE.md) | Downloads and disk use, training, sampling, evaluation, every CLI flag, config reference |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
-| [CHANGELOG.md](CHANGELOG.md) | Release history |
+|                                    |                                                                                          |
+| ---------------------------------- | ---------------------------------------------------------------------------------------- |
+| [docs/INSTALL.md](docs/INSTALL.md) | Install, GPU setup, verification, troubleshooting                                        |
+| [USAGE.md](USAGE.md)               | Downloads and disk use, training, sampling, evaluation, every CLI flag, config reference |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow                                                                     |
+| [CHANGELOG.md](CHANGELOG.md)       | Release history                                                                          |
 
 ## How it works
 
@@ -114,7 +115,7 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   comes from, and what is optimised — explicit, and adds the variational bound
   they are measured against. Set `variance` and `objective` in the config to
   train Nichol & Dhariwal's improved DDPM with a learned variance, `predict =
-  "v"` with `zero_snr` for the velocity parameterisation on a schedule that
+"v"` with `zero_snr` for the velocity parameterisation on a schedule that
   reaches zero signal at `t = T`, and `loss_weighting = "min_snr"` to stop the
   low-noise timesteps dominating the gradient.
 - **Conditioning** — `models/embeddings.py` adds a class embedding, summed into
@@ -122,7 +123,9 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   have. `diffusion/guidance.py` reserves one embedding row as a null token,
   trains it by dropping a fraction of the labels, and extrapolates away from it
   at sample time — classifier-free guidance, as a wrapper round the network
-  rather than a change to any sampler.
+  rather than a change to any sampler. `guidance_rescale` corrects the scale
+  that extrapolation inflates (Lin et al. 2023), which is what keeps a high
+  guidance scale from washing the images out.
 - **Sampling** — `diffusion/ddim.py` runs the reverse chain over a subsequence
   of timesteps, so 50 steps stand in for 1000. `eta` interpolates between
   deterministic DDIM and ancestral DDPM. `diffusion/dpm_solver.py` is

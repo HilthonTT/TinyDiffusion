@@ -63,6 +63,7 @@ def test_sample_defaults():
     # Unset, so the checkpoint's own conditioning settings decide.
     assert args.labels is None
     assert args.guidance is None
+    assert args.guidance_rescale is None
     # Likewise the sampler it was trained to be drawn with.
     assert args.sampler is None
 
@@ -98,6 +99,13 @@ def test_sample_parses_the_guidance_scale():
     assert args.guidance == 2.5
 
 
+def test_sample_parses_the_guidance_rescale():
+    args = build_parser().parse_args(
+        ["sample", "--checkpoint", "m.pt", "--guidance", "5", "--guidance-rescale", "0.7"]
+    )
+    assert (args.guidance, args.guidance_rescale) == (5.0, 0.7)
+
+
 def test_fid_defaults():
     args = build_parser().parse_args(["fid", "--checkpoint", "model.pt"])
     assert args.command == "fid"
@@ -107,6 +115,7 @@ def test_fid_defaults():
     assert args.use_ema is True
     # Unset, so the checkpoint's own settings decide.
     assert (args.steps, args.guidance, args.batch_size, args.data_root) == (None,) * 4
+    assert args.guidance_rescale is None
 
 
 def test_fid_parses_its_overrides():
@@ -123,10 +132,13 @@ def test_fid_parses_its_overrides():
             "20",
             "--guidance",
             "1.5",
+            "--guidance-rescale",
+            "0.7",
             "--no-ema",
         ]
     )
     assert (args.num_images, args.split, args.steps, args.guidance) == (512, "test", 20, 1.5)
+    assert args.guidance_rescale == 0.7
     assert args.use_ema is False
 
 

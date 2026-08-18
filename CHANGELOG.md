@@ -8,6 +8,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Classifier-free guidance rescaling (`guidance_rescale`, `--guidance-rescale`,
+  Lin et al. 2023 §3.4). Guidance extrapolates along `cond - uncond` without
+  regard for distance, so the prediction's standard deviation grows with the
+  scale; past about 3 it outgrows anything the model was trained on and the
+  images come back flat and over-saturated, which the `clip_denoised` clamp
+  hides rather than fixes. The correction puts the guided prediction back on
+  the conditional one's per-sample standard deviation and blends, 0.7 being the
+  published factor. Available on `sample`, `fid`, the sample server and the
+  per-epoch training grids; 0 is the default and leaves guidance exactly as it
+  was. Setting it above 0 at `guidance = 1.0` is rejected when the config is
+  read, since there is no extrapolation there to correct.
 - Velocity prediction (`predict = "v"`, Salimans & Ho 2022) and the
   zero-terminal-SNR schedule rescaling it pairs with (`zero_snr = true`, Lin et
   al. 2024). A schedule that stops short of zero signal leaves `x_T` holding a

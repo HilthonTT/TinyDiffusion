@@ -267,7 +267,13 @@ def save_samples(
         cfg.device,
         num_steps=cfg.sample_steps,
         eta=0.0,
-        model=conditioned(ema.module, labels, num_classes=cfg.num_classes, scale=cfg.guidance),
+        model=conditioned(
+            ema.module,
+            labels,
+            num_classes=cfg.num_classes,
+            scale=cfg.guidance,
+            rescale=cfg.guidance_rescale,
+        ),
         noise=noise,
     )
     reference = real[: cfg.num_samples].to(cfg.device)

@@ -24,7 +24,45 @@ __all__ = [
     "conditioned",
     "cycled_labels",
     "drop_labels",
+    "rescale_guided",
 ]
+
+
+def rescale_guided(guided: torch.Tensor, cond: torch.Tensor, rescale: float) -> torch.Tensor:
+    """Pull an over-extrapolated guided prediction back towards the conditional scale.
+
+    Guidance extrapolates along ``cond - uncond`` without regard for how far it
+    travels, so the guided prediction's standard deviation grows roughly with
+    the scale. The model was trained on targets of a fixed scale, and one that
+    is too large drives the recovered x_0 to the edges of the range — flat,
+    over-saturated images that the fixed ``clip_denoised`` clamp then hides
+    rather than fixes. Lin et al. 2023 §3.4
+    (https://arxiv.org/abs/2305.08891) rescale the guided prediction back to
+    the conditional one's per-sample standard deviation, then blend, since
+    going all the way back is itself too strong and flattens the detail
+    guidance was asked for.
+
+    Args:
+        guided: the extrapolated prediction, ``(B, ...)``.
+        cond: the conditional prediction, whose scale is the reference. Same
+            shape as `guided`.
+        rescale: blend factor phi in [0, 1]. 0 returns `guided` untouched; 1 is
+            the fully rescaled prediction. 0.7 is the paper's recommendation.
+
+    Returns:
+        The blended prediction, shaped like `guided`.
+    """
+    if rescale <= 0.0:
+        return guided
+    # Over every dimension but the batch: the correction is per-sample, since
+    # each image in the batch extrapolates its own distance.
+    dims = list(range(1, guided.ndim))
+    std_cond = cond.std(dim=dims, keepdim=True)
+    # A guided prediction of exactly zero variance is degenerate rather than
+    # impossible — a constant tensor early in a badly initialised run — and
+    # dividing by it would put NaN into the chain with nothing to report it.
+    std_guided = guided.std(dim=dims, keepdim=True).clamp(min=1e-12)
+    return rescale * (guided * (std_cond / std_guided)) + (1.0 - rescale) * guided
 
 
 class _LabelBound(nn.Module):
@@ -89,14 +127,23 @@ class ClassifierFreeGuidance(_LabelBound):
         scale: guidance scale.
         num_classes: the model's class count, whose value doubles as the index
             of the null token.
+        rescale: how much of the guided prediction's scale to correct back
+            towards the conditional one; see :func:`rescale_guided`. 0 is plain
+            guidance.
     """
 
     def __init__(
-        self, net: nn.Module, labels: torch.Tensor, scale: float, num_classes: int
+        self,
+        net: nn.Module,
+        labels: torch.Tensor,
+        scale: float,
+        num_classes: int,
+        rescale: float = 0.0,
     ) -> None:
         super().__init__(net, labels)
         self.scale = scale
         self.null_class = num_classes
+        self.rescale = rescale
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Evaluate conditionally and unconditionally, and extrapolate.
@@ -121,9 +168,14 @@ class ClassifierFreeGuidance(_LabelBound):
             cond_mean, cond_var = cond.split(channels, dim=1)
             uncond_mean, _ = uncond.split(channels, dim=1)
             guided = uncond_mean + self.scale * (cond_mean - uncond_mean)
+            # Rescaled against the mean channels alone: the variance channels
+            # are not being guided, so they are not part of the scale that
+            # guidance inflated.
+            guided = rescale_guided(guided, cond_mean, self.rescale)
             return torch.cat([guided, cond_var], dim=1)
 
-        return uncond + self.scale * (cond - uncond)
+        guided = uncond + self.scale * (cond - uncond)
+        return rescale_guided(guided, cond, self.rescale)
 
 
 def conditioned(
@@ -132,6 +184,7 @@ def conditioned(
     *,
     num_classes: int | None = None,
     scale: float = 1.0,
+    rescale: float = 0.0,
 ) -> nn.Module:
     """Wrap `net` so a process calling ``model(x, t)`` gets the right prediction.
 
@@ -144,20 +197,27 @@ def conditioned(
         scale: guidance scale. At exactly 1 the unconditional pass would be
             multiplied out of the result, so it is skipped and the batch stays
             single-width.
+        rescale: guidance rescale factor; see :func:`rescale_guided`. It has no
+            effect at ``scale=1``, where the guided prediction *is* the
+            conditional one and the correction is the identity, so that path
+            still takes the cheap single-width branch.
 
     Returns:
         A module taking ``(x, t)``.
 
     Raises:
-        ValueError: if guidance is asked for without `num_classes`.
+        ValueError: if guidance is asked for without `num_classes`, or
+            `rescale` falls outside [0, 1].
     """
+    if not 0.0 <= rescale <= 1.0:
+        raise ValueError(f"guidance rescale must lie in [0, 1], got {rescale}")
     if labels is None:
         return net
     if scale == 1.0:
         return Conditioned(net, labels)
     if num_classes is None:
         raise ValueError("guidance needs num_classes to find the null token")
-    return ClassifierFreeGuidance(net, labels, scale, num_classes)
+    return ClassifierFreeGuidance(net, labels, scale, num_classes, rescale)
 
 
 def drop_labels(labels: torch.Tensor, num_classes: int, p: float) -> torch.Tensor:

@@ -149,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
         "worth sweeping, since FID usually bottoms out above 1.",
     )
     fid.add_argument(
+        "--guidance-rescale",
+        type=float,
+        help="How much of the scale guidance inflates to correct back, in [0, 1]. "
+        "Defaults to the checkpoint's; sweep it jointly with --guidance.",
+    )
+    fid.add_argument(
         "--no-ema",
         action="store_false",
         dest="use_ema",
@@ -227,6 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Classifier-free guidance scale. 1.0 is the plain conditional prediction; "
         "higher sharpens class identity. Defaults to the checkpoint's.",
     )
+    sample.add_argument(
+        "--guidance-rescale",
+        type=float,
+        help="How much of the scale guidance inflates to correct back, in [0, 1]. "
+        "0.7 is the published value, and worth setting above --guidance 3, where "
+        "plain guidance starts washing images out. Defaults to the checkpoint's.",
+    )
     sample.add_argument("--out", type=Path, default=Path("contents/samples.png"), help="Output.")
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
@@ -296,6 +309,7 @@ def _fid(args: argparse.Namespace) -> int:
         eta=args.eta,
         sampler=args.sampler,
         guidance=args.guidance,
+        guidance_rescale=args.guidance_rescale,
         use_ema=args.use_ema,
         seed=args.seed,
         device=args.device,
@@ -342,6 +356,7 @@ def _sample(args: argparse.Namespace) -> int:
         sampler=args.sampler,
         labels=args.labels,
         guidance=args.guidance,
+        guidance_rescale=args.guidance_rescale,
         seed=args.seed,
         device=args.device,
     )

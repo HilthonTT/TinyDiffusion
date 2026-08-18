@@ -34,6 +34,9 @@ class SampleRequest(BaseModel):
         labels: classes to generate, cycled over the grid. Conditional
             checkpoints only; omit for one image per class.
         guidance: classifier-free guidance scale, or null for the checkpoint's.
+        guidance_rescale: how much of the scale inflation guidance causes to
+            correct, in [0, 1], or null for the checkpoint's. 0.7 is the
+            published value; worth setting whenever guidance is above about 3.
         steps: DDIM steps, or null for the checkpoint's.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
         seed: seed applied before sampling, or null to leave the RNG alone.
@@ -42,6 +45,7 @@ class SampleRequest(BaseModel):
     num_images: int = Field(default=8, ge=1)
     labels: list[int] | None = None
     guidance: float | None = Field(default=None, ge=0.0)
+    guidance_rescale: float | None = Field(default=None, ge=0.0, le=1.0)
     steps: int | None = Field(default=None, ge=1)
     eta: float = Field(default=0.0, ge=0.0, le=1.0)
     seed: int | None = None
@@ -144,6 +148,7 @@ def create_app(config: ServerConfig) -> FastAPI:
                 num_images=request.num_images,
                 labels=request.labels,
                 guidance=request.guidance,
+                guidance_rescale=request.guidance_rescale,
                 steps=request.steps,
                 eta=request.eta,
                 seed=request.seed,

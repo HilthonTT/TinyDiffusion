@@ -107,6 +107,7 @@ def sample_from_checkpoint(
     sampler: str | None = None,
     labels: Sequence[int] | None = None,
     guidance: float | None = None,
+    guidance_rescale: float | None = None,
     seed: int | None = None,
     device: str | None = None,
 ) -> Path:
@@ -127,6 +128,11 @@ def sample_from_checkpoint(
         guidance: classifier-free guidance scale, or None to use the
             checkpoint's. 1.0 is the plain conditional prediction; higher
             sharpens class identity and costs a second forward pass per step.
+        guidance_rescale: how much of the scale inflation guidance causes to
+            correct, or None for the checkpoint's. See
+            :func:`~tinydiffusion.diffusion.guidance.rescale_guided`; 0.7 is
+            the published value, and it is worth reaching for whenever
+            `guidance` is above about 3.
         seed: seed applied before sampling, or None to leave the RNG alone.
         device: device to sample on. Defaults to CUDA when available.
 
@@ -150,6 +156,7 @@ def sample_from_checkpoint(
         labels, num_images=num_images, num_classes=cfg.num_classes, device=cfg.device
     )
     scale = cfg.guidance if guidance is None else guidance
+    rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
 
     images = get_sampler(cfg.sampler if sampler is None else sampler)(
         diffusion,
@@ -158,7 +165,7 @@ def sample_from_checkpoint(
         cfg.device,
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=eta,
-        model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale),
+        model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)

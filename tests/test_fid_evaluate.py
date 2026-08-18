@@ -283,12 +283,14 @@ def test_result_format_flags_undersampling():
         feature_dim=2048,
         num_steps=50,
         guidance=2.0,
+        guidance_rescale=0.7,
         used_ema=True,
     )
     assert result.undersampled is True
     text = result.format()
     assert "fid 12.500" in text
     assert "guidance 2" in text
+    assert "rescale 0.7" in text
     assert "warning" in text
 
 
@@ -302,8 +304,10 @@ def test_result_format_stays_quiet_when_well_sampled():
         feature_dim=2048,
         num_steps=50,
         guidance=None,
+        guidance_rescale=0.0,
         used_ema=False,
     )
     assert result.undersampled is False
     assert "warning" not in result.format()
     assert "guidance" not in result.format()
+    assert "rescale" not in result.format()

@@ -69,6 +69,16 @@ class TrainConfig:
     prediction for ``guidance`` to extrapolate from; see
     :mod:`~tinydiffusion.diffusion.guidance`.
 
+    ``guidance_rescale`` corrects the scale that extrapolation inflates (Lin et
+    al. 2023 §3.4). Guidance travels along ``cond - uncond`` without regard for
+    distance, so past a scale of about 3 the prediction's standard deviation
+    outgrows anything the model was trained on and the images come back
+    flat and over-saturated; 0.7 is the published blend, and 0 is plain
+    guidance. It is worth most on exactly the configuration ``predict = "v"``
+    with ``zero_snr = true`` produces, where the terminal step carries no
+    signal to anchor the scale, and it does nothing at ``guidance = 1.0``,
+    where there is no extrapolation to correct.
+
     ``lr_warmup`` ramps the learning rate linearly from zero over that many
     optimiser steps before holding it at ``lr``. Diffusion training is unstable
     in the first few hundred steps at full LR; 0 turns the ramp off.
@@ -124,6 +134,7 @@ class TrainConfig:
     num_classes: int | None = None
     class_dropout: float = 0.1
     guidance: float = 1.0
+    guidance_rescale: float = 0.0
 
     # diffusion
     num_timesteps: int = 1000
@@ -295,6 +306,16 @@ class TrainConfig:
             raise ValueError(f"class_dropout must lie in [0, 1), got {self.class_dropout}")
         if self.guidance < 0.0:
             raise ValueError(f"guidance must not be negative, got {self.guidance}")
+        if not 0.0 <= self.guidance_rescale <= 1.0:
+            raise ValueError(f"guidance_rescale must lie in [0, 1], got {self.guidance_rescale}")
+        if self.guidance_rescale > 0.0 and self.guidance == 1.0:
+            # Silently a no-op rather than an error otherwise: at scale 1 the
+            # guided prediction is the conditional one, so the correction is
+            # the identity and the config promises something it cannot do.
+            raise ValueError(
+                f"guidance_rescale={self.guidance_rescale} has nothing to correct at "
+                "guidance=1.0; raise guidance, or leave guidance_rescale at 0.0"
+            )
         if self.guidance != 1.0 and self.num_classes is None:
             raise ValueError(
                 f"guidance={self.guidance} needs a conditional model; set num_classes "

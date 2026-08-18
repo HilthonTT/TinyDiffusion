@@ -36,6 +36,9 @@ class FidResult:
         feature_dim: width of the feature space the score was taken in.
         num_steps: DDIM steps used to draw the samples.
         guidance: the guidance scale used, or None if unconditional.
+        guidance_rescale: the guidance rescale factor used. 0 is plain
+            guidance, and it moves the score like any other sampling setting,
+            so it is recorded alongside the scale it corrects.
         used_ema: whether the EMA weights were sampled.
     """
 
@@ -47,6 +50,7 @@ class FidResult:
     feature_dim: int
     num_steps: int
     guidance: float | None
+    guidance_rescale: float
     used_ema: bool
 
     @property
@@ -73,7 +77,12 @@ class FidResult:
             "",
             f"{self.num_generated} generated vs {self.num_real} real images",
             f"{self.num_steps} ddim steps"
-            + (f" | guidance {self.guidance:g}" if self.guidance is not None else ""),
+            + (f" | guidance {self.guidance:g}" if self.guidance is not None else "")
+            + (
+                f" | rescale {self.guidance_rescale:g}"
+                if self.guidance is not None and self.guidance_rescale > 0
+                else ""
+            ),
         ]
         if self.undersampled:
             lines += [
@@ -125,6 +134,7 @@ def generate_images(
     num_steps: int,
     eta: float,
     guidance: float,
+    guidance_rescale: float = 0.0,
     sampler: str = DEFAULT_SAMPLER,
 ) -> Iterable[torch.Tensor]:
     """Draw samples in batches, yielding each as it is produced.
@@ -141,6 +151,8 @@ def generate_images(
         num_steps: denoising steps per batch.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
         guidance: classifier-free guidance scale, ignored when unconditional.
+        guidance_rescale: guidance rescale factor; see
+            :func:`~tinydiffusion.diffusion.guidance.rescale_guided`.
         sampler: which sampler to draw with; a key of
             :data:`~tinydiffusion.diffusion.samplers.SAMPLERS`. Defaults to
             DDIM, which is what every caller wanted before there was a choice.
@@ -170,7 +182,13 @@ def generate_images(
             cfg.device,
             num_steps=num_steps,
             eta=eta,
-            model=conditioned(net, y, num_classes=cfg.num_classes, scale=guidance),
+            model=conditioned(
+                net,
+                y,
+                num_classes=cfg.num_classes,
+                scale=guidance,
+                rescale=guidance_rescale,
+            ),
         )
         produced += batch
 
@@ -187,6 +205,7 @@ def fid_for_checkpoint(
     eta: float = 0.0,
     sampler: str | None = None,
     guidance: float | None = None,
+    guidance_rescale: float | None = None,
     use_ema: bool = True,
     seed: int = 0,
     device: str | None = None,
@@ -221,6 +240,10 @@ def fid_for_checkpoint(
         guidance: classifier-free guidance scale, or None for the checkpoint's.
             Worth sweeping: guidance trades diversity for fidelity, and FID
             usually has an interior minimum somewhere above 1.
+        guidance_rescale: guidance rescale factor, or None for the
+            checkpoint's. Worth sweeping jointly with `guidance`: correcting
+            the scale is what usually lets the interior minimum sit at a
+            higher scale than it otherwise could.
         use_ema: sample the EMA weights, which is what ``sample`` uses.
         seed: seed applied before generating, making the samples reproducible.
         device: device to score on. Defaults to CUDA when available.
@@ -245,6 +268,7 @@ def fid_for_checkpoint(
     steps = num_steps if num_steps is not None else cfg.sample_steps
     draw_with = cfg.sampler if sampler is None else sampler
     scale = cfg.guidance if guidance is None else guidance
+    rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
     batch = batch_size if batch_size is not None else cfg.batch_size
 
     if extractor is None:
@@ -299,6 +323,7 @@ def fid_for_checkpoint(
                 num_steps=steps,
                 eta=eta,
                 guidance=scale,
+                guidance_rescale=rescale,
                 sampler=draw_with,
             ),
             desc="fid generated",
@@ -322,5 +347,6 @@ def fid_for_checkpoint(
         feature_dim=extractor.dim,
         num_steps=steps,
         guidance=scale if cfg.num_classes is not None else None,
+        guidance_rescale=rescale,
         used_ema=use_ema,
     )

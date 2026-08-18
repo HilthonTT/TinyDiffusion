@@ -149,6 +149,14 @@ def test_labels_are_accepted_by_a_conditional_checkpoint(conditional_client):
     assert r.status_code == 200
 
 
+def test_a_guidance_rescale_is_accepted_by_a_conditional_checkpoint(conditional_client):
+    r = conditional_client.post(
+        "/api/sample",
+        json={"num_images": 4, "steps": 2, "guidance": 5.0, "guidance_rescale": 0.7},
+    )
+    assert r.status_code == 200
+
+
 def test_labels_are_refused_by_an_unconditional_checkpoint(client):
     r = client.post("/api/sample", json={"num_images": 2, "steps": 2, "labels": [1]})
     assert r.status_code == 400
@@ -181,6 +189,8 @@ def test_too_many_steps_are_refused(client):
         {"eta": 1.5},  # outside [0, 1]
         {"steps": 0},  # below the schema minimum
         {"guidance": -1.0},  # negative
+        {"guidance_rescale": 1.5},  # outside [0, 1]
+        {"guidance_rescale": -0.5},  # likewise
     ],
 )
 def test_the_schema_rejects_impossible_requests(client, payload):
