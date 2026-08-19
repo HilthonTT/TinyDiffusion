@@ -1,8 +1,46 @@
 """Building blocks shared by the UNet: normalisation, ResBlocks, attention, resampling."""
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+
+def _checkpointed(
+    body: Callable[..., torch.Tensor], use_checkpoint: bool, *args: torch.Tensor
+) -> torch.Tensor:
+    """Run a block's body under gradient checkpointing where it pays off.
+
+    Checkpointing drops a block's intermediate activations and recomputes them
+    during the backward pass: roughly a third more compute for a large cut in
+    memory, which is what lets a wider model or a bigger batch fit at all.
+
+    There is nothing to save when no backward pass will follow, so a block
+    falls through to the plain call under :func:`torch.no_grad` — which is
+    every sampler, the validation scoring and the FID pass. Recomputing there
+    would be pure overhead, and ``torch.utils.checkpoint`` warns about it.
+
+    ``use_reentrant=False`` picks the non-reentrant implementation. Besides
+    handling inputs that do not require grad, it restores the RNG state before
+    recomputing, so the backward pass sees the same dropout mask the forward
+    drew. The reentrant version does not, and silently differentiates a
+    different network than the one that produced the output.
+
+    Args:
+        body: the block's real forward pass.
+        use_checkpoint: whether this block was built to be checkpointed.
+        *args: the tensors to pass to `body`.
+
+    Returns:
+        Whatever `body` returns.
+    """
+    if use_checkpoint and torch.is_grad_enabled():
+        # torch.utils.checkpoint is annotated as returning Any.
+        return cast(torch.Tensor, checkpoint(body, *args, use_reentrant=False))
+    return body(*args)
 
 
 def group_norm(channels: int, max_groups: int = 32) -> nn.GroupNorm:
@@ -37,12 +75,28 @@ def zero_module(module: nn.Module) -> nn.Module:
 
 
 class ResBlock(nn.Module):
-    """Pre-activation residual block with FiLM time conditioning."""
+    """Pre-activation residual block with FiLM time conditioning.
+
+    Args:
+        in_channels: channels of the incoming feature map.
+        out_channels: channels to produce.
+        time_dim: width of the time embedding the FiLM projection reads.
+        dropout: dropout applied before the second convolution.
+        use_checkpoint: recompute this block's activations in the backward
+            pass rather than holding them. See :func:`_checkpointed`.
+    """
 
     def __init__(
-        self, in_channels: int, out_channels: int, time_dim: int, dropout: float = 0.1
+        self,
+        in_channels: int,
+        out_channels: int,
+        time_dim: int,
+        dropout: float = 0.1,
+        use_checkpoint: bool = False,
     ) -> None:
         super().__init__()
+        self.use_checkpoint = use_checkpoint
+
         self.norm1 = group_norm(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
 
@@ -68,6 +122,10 @@ class ResBlock(nn.Module):
         Returns:
             (B, out_channels, H, W) feature map.
         """
+        return _checkpointed(self._forward, self.use_checkpoint, x, time_emb)
+
+    def _forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        """The block's body, split out so it can be recomputed on demand."""
         h = self.conv1(F.silu(self.norm1(x)))
 
         scale, shift = self.time_proj(F.silu(time_emb))[:, :, None, None].chunk(2, dim=1)
@@ -78,15 +136,26 @@ class ResBlock(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    """Multi-head self-attention over the spatial dimensions."""
+    """Multi-head self-attention over the spatial dimensions.
 
-    def __init__(self, channels: int, num_heads: int = 4) -> None:
+    Args:
+        channels: width of the feature map to attend over.
+        num_heads: attention heads. Must divide `channels`.
+        use_checkpoint: recompute this block's activations in the backward
+            pass rather than holding them. See :func:`_checkpointed`.
+
+    Raises:
+        ValueError: if `channels` is not divisible by `num_heads`.
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4, use_checkpoint: bool = False) -> None:
         super().__init__()
 
         if channels % num_heads != 0:
             raise ValueError(f"{channels} channels not divisible by {num_heads} heads")
 
         self.num_heads = num_heads
+        self.use_checkpoint = use_checkpoint
         self.norm = group_norm(channels)
         self.qkv = nn.Conv2d(channels, 3 * channels, 1)
         self.proj = zero_module(nn.Conv2d(channels, channels, 1))
@@ -100,6 +169,10 @@ class SelfAttention(nn.Module):
         Returns:
             (B, C, H, W) feature map.
         """
+        return _checkpointed(self._forward, self.use_checkpoint, x)
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """The block's body, split out so it can be recomputed on demand."""
         b, c, h, w = x.shape
         qkv = self.qkv(self.norm(x))
         qkv = qkv.reshape(b, 3, self.num_heads, c // self.num_heads, h * w)

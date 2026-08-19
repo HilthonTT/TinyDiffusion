@@ -726,6 +726,14 @@ compile = true          # torch.compile the training step
 channels_last = true    # measure this one; it can lose on a small model
 ```
 
+When the limit is memory rather than speed — a wider `base_channels` or a
+larger `batch_size` than the card will hold — turn on `grad_checkpoint`. It
+drops the U-Net's intermediate activations and recomputes them during the
+backward pass, costing roughly a third more time per step and buying back most
+of the activation memory. Nothing else changes: same weights, same loss, and a
+checkpoint trained with it on resumes fine with it off. Sampling is untouched,
+since there is no backward pass there to save for.
+
 Measured on an RTX 5060 at the `configs/mnist.toml` settings (batch 128, 32px,
 `base_channels = 64`), 25 steps after a warmup:
 
@@ -987,6 +995,7 @@ starting it over, not `--resume`.
 | `amp_dtype` | `fp16` | Or `bf16`, which runs unscaled but wants Ampere or newer |
 | `compile` | `false` | `torch.compile` the training step |
 | `channels_last` | `false` | Worth measuring rather than assuming |
+| `grad_checkpoint` | `false` | Recompute activations in the backward pass: roughly a third more compute for a large cut in memory |
 | `sample_every` | 1 | Epochs between sample grids; 0 disables |
 | `num_samples` | 16 | Images per grid |
 | `sampler` | `ddim` | Or `dpmpp` (DPM-Solver++(2M)), which needs about a third of the steps |

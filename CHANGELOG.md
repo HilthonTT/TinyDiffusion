@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Gradient checkpointing (`grad_checkpoint = true`). Each ResBlock and
+  attention layer drops its intermediate activations and recomputes them in
+  the backward pass, which is what lets a wider model or a larger batch fit on
+  a card that otherwise refuses it — roughly a third more compute per step for
+  a large cut in activation memory. It changes no weights and no result, so a
+  checkpoint resumes across the setting either way, and it is inert under
+  `torch.no_grad`, so no sampler pays for it.
 - Classifier-free guidance rescaling (`guidance_rescale`, `--guidance-rescale`,
   Lin et al. 2023 §3.4). Guidance extrapolates along `cond - uncond` without
   regard for distance, so the prediction's standard deviation grows with the

@@ -59,6 +59,7 @@ def build_model(cfg: TrainConfig) -> Diffusion:
         dropout=cfg.dropout,
         image_size=cfg.image_size,
         num_classes=cfg.num_classes,
+        use_checkpoint=cfg.grad_checkpoint,
     )
     if cfg.schedule == "cosine":
         betas = cosine_beta_schedule(cfg.num_timesteps)

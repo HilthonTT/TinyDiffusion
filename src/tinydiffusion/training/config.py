@@ -103,6 +103,14 @@ class TrainConfig:
     than assuming: it wins on wide convolutional stacks under AMP and can lose
     on a small one.
 
+    ``grad_checkpoint`` drops the U-Net's intermediate activations and
+    recomputes them in the backward pass, which is what makes a wider model or
+    a larger batch fit on a card it otherwise would not. Roughly a third more
+    compute per step, so reach for it when memory rather than speed is the
+    binding constraint. It changes no weights and no result: a checkpoint
+    trained with it on resumes with it off and vice versa. Sampling is
+    unaffected either way, since there is no backward pass to save for.
+
     ``deterministic`` trades throughput for bit-reproducibility: it forces
     deterministic cuDNN/cuBLAS kernels and turns off the cuDNN autotuner, whose
     kernel choice is otherwise free to vary between runs on identical inputs.
@@ -173,6 +181,7 @@ class TrainConfig:
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
     compile: bool = False
     channels_last: bool = False
+    grad_checkpoint: bool = False
     sample_every: int = 1
     num_samples: int = 16
     sampler: str = DEFAULT_SAMPLER

@@ -39,6 +39,10 @@ class UNet(nn.Module):
         num_heads: attention heads used by every SelfAttention layer.
         num_classes: number of classes to condition on, or None for an
             unconditional model. When set, `forward` takes a label per image.
+        use_checkpoint: trade compute for memory by recomputing each ResBlock
+            and attention layer during the backward pass instead of holding
+            its activations. See
+            :func:`~tinydiffusion.models.blocks._checkpointed`.
 
     Raises:
         ValueError: if `image_size` cannot be halved once per level beyond the
@@ -58,6 +62,7 @@ class UNet(nn.Module):
         image_size: int = 32,
         num_heads: int = 4,
         num_classes: int | None = None,
+        use_checkpoint: bool = False,
     ) -> None:
         super().__init__()
 
@@ -72,6 +77,8 @@ class UNet(nn.Module):
                 f"multiple of {divisor} and leave a bottleneck of at least 2x2 "
                 f"(smallest valid size is {2 * divisor})"
             )
+
+        self.use_checkpoint = use_checkpoint
 
         time_dim = base_channels * TIME_EMBED_MULT
         self.time_embed = TimeEmbedding(base_channels, time_dim)
@@ -92,10 +99,12 @@ class UNet(nn.Module):
         for level, mult in enumerate(channel_mult):
             level_channels = base_channels * mult
             for _ in range(num_res_blocks):
-                layers: list[nn.Module] = [ResBlock(channels, level_channels, time_dim, dropout)]
+                layers: list[nn.Module] = [
+                    ResBlock(channels, level_channels, time_dim, dropout, use_checkpoint)
+                ]
                 channels = level_channels
                 if resolution in attn_resolutions:
-                    layers.append(SelfAttention(channels, num_heads))
+                    layers.append(SelfAttention(channels, num_heads, use_checkpoint))
                 self.downs.append(TimestepSequential(*layers))
                 skip_channels.append(channels)
 
@@ -107,9 +116,9 @@ class UNet(nn.Module):
 
         # the bottleneck: stays spatial, no vector collapse
         self.mid = TimestepSequential(
-            ResBlock(channels, channels, time_dim, dropout),
-            SelfAttention(channels, num_heads),
-            ResBlock(channels, channels, time_dim, dropout),
+            ResBlock(channels, channels, time_dim, dropout, use_checkpoint),
+            SelfAttention(channels, num_heads, use_checkpoint),
+            ResBlock(channels, channels, time_dim, dropout, use_checkpoint),
         )
 
         # the decoder
@@ -119,11 +128,17 @@ class UNet(nn.Module):
             # One extra block per level consumes the skip left by the Downsample.
             for block in range(num_res_blocks + 1):
                 layers = [
-                    ResBlock(channels + skip_channels.pop(), level_channels, time_dim, dropout)
+                    ResBlock(
+                        channels + skip_channels.pop(),
+                        level_channels,
+                        time_dim,
+                        dropout,
+                        use_checkpoint,
+                    )
                 ]
                 channels = level_channels
                 if resolution in attn_resolutions:
-                    layers.append(SelfAttention(channels, num_heads))
+                    layers.append(SelfAttention(channels, num_heads, use_checkpoint))
                 if level != 0 and block == num_res_blocks:
                     layers.append(Upsample(channels))
                     resolution *= 2
