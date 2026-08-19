@@ -98,7 +98,9 @@ def evaluate_checkpoint(
         batch_size: images per batch, or None to reuse the checkpoint's.
         data_root: dataset directory, or None to reuse the checkpoint's.
         use_ema: score the EMA weights, which are what sampling uses.
-        seed: seed applied before each batch, making the noise reproducible.
+        seed: base seed for the noise. Each batch draws from ``seed`` offset by
+            its index, so the score is reproducible without every batch being
+            scored against one and the same draw.
         device: device to score on. Defaults to CUDA when available.
         progress: draw a progress bar.
 
@@ -134,7 +136,7 @@ def evaluate_checkpoint(
 
     with eval_mode(net):
         batches = tqdm(loader, desc=f"eval {split}", disable=not progress)
-        for x, y in batches:
+        for index, (x, y) in enumerate(batches):
             x = x.to(cfg.device, non_blocking=True)
             # A conditional model is scored on the true labels, and never with
             # guidance: the objective it was trained on is the conditional
@@ -147,7 +149,11 @@ def evaluate_checkpoint(
             )
             # Reseed per batch so the noise depends only on position in the
             # split, never on batch count or how many timesteps were scored.
-            seed_everything(seed)
+            # Offset by the batch index, or every batch would be scored against
+            # the identical draw: the average would then cover num_images
+            # images but only one noise sample per slot, and carry whatever
+            # bias that single draw happens to have.
+            seed_everything(seed + index)
             for i, step in enumerate(steps):
                 t = step.expand(x.shape[0])
                 totals[i] += diffusion.loss_at(x, t, model=scored).double() * x.shape[0]

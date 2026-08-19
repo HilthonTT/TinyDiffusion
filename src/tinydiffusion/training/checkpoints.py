@@ -32,6 +32,8 @@ __all__ = [
     "load_checkpoint",
     "read_checkpoint",
     "restore_checkpoint",
+    "restore_rng_state",
+    "rng_state",
     "save_checkpoint",
 ]
 
@@ -94,7 +96,8 @@ def save_checkpoint(
     """Write a resumable checkpoint.
 
     Saving only ``model.state_dict()`` makes a run unresumable: the optimiser
-    moments and the EMA shadow weights are both training state.
+    moments and the EMA shadow weights are both training state. So is the
+    global RNG, which travels along under ``"rng"``; see :func:`rng_state`.
 
     Args:
         path: destination file.
@@ -124,11 +127,65 @@ def save_checkpoint(
             "sched": sched.state_dict() if sched is not None else None,
             "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
             "best_val": best_val,
+            "rng": rng_state(),
         },
         tmp,
     )
     # Rename last so an interrupted save cannot corrupt a good checkpoint.
     tmp.replace(path)
+
+
+def rng_state() -> dict[str, Any]:
+    """Snapshot the global RNG, so a resume continues the same random stream.
+
+    The loader's shuffle order is already a function of the epoch index alone
+    (see :func:`~tinydiffusion.training.train.epoch_seed`), but everything else
+    a step draws — the diffusion noise, the timesteps, dropout, and the label
+    dropout that classifier-free guidance is trained on — comes from the global
+    generator, which is seeded once at startup. Without this, epoch 5 of a
+    resumed run sees different noise than epoch 5 of a run trained straight
+    through, and ``deterministic`` does not make the two agree.
+
+    Returns:
+        The CPU generator's state, plus every CUDA device's, under ``"cuda"``.
+    """
+    state: dict[str, Any] = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(ckpt: dict[str, Any]) -> bool:
+    """Put the global RNG back where the checkpoint left it.
+
+    Deliberately not part of :func:`restore_checkpoint`: sampling, evaluation
+    and the server all read checkpoints too, and each seeds the generator for
+    itself. Reaching into the process-wide RNG is the training loop's business
+    alone, so it asks for it by name.
+
+    Note that this is exact only for a checkpoint written at an epoch boundary.
+    :data:`INTERRUPTED_CHECKPOINT` is written mid-epoch but resumes from the
+    start of that epoch, so its stream is a valid one that no straight run
+    would have followed — still reproducible, just not identical.
+
+    Args:
+        ckpt: mapping returned by :func:`read_checkpoint`. One written before
+            this was stored leaves the RNG untouched.
+
+    Returns:
+        Whether a state was found and applied.
+    """
+    state = ckpt.get("rng")
+    if not state:
+        return False
+    torch.set_rng_state(state["cpu"].cpu().to(torch.uint8))
+    cuda = state.get("cuda")
+    # A run moved between machines can have a different device count, and
+    # set_rng_state_all raises on a mismatch. The CPU state is the one that
+    # matters for the data path either way, so a partial restore beats none.
+    if cuda and torch.cuda.is_available() and len(cuda) == torch.cuda.device_count():
+        torch.cuda.set_rng_state_all([s.cpu().to(torch.uint8) for s in cuda])
+    return True
 
 
 def load_checkpoint(

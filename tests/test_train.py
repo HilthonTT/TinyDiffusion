@@ -357,6 +357,45 @@ def test_a_checkpoint_without_a_schedule_still_restores(tiny_cfg, tmp_path):
     assert sched.get_last_lr()[0] == pytest.approx(0.0)
 
 
+# --- rng state ------------------------------------------------------------
+
+
+def test_a_resume_picks_the_random_stream_up_where_it_stopped(tiny_cfg, tmp_path):
+    torch.manual_seed(1234)
+    torch.randn(5)
+    path = _checkpoint(tmp_path, tiny_cfg)
+    # What the run would have drawn next had it never stopped.
+    expected = torch.randn(4)
+
+    # A fresh process seeds from cfg.seed, which is a different stream.
+    torch.manual_seed(9999)
+    ckpt = ckpt_module.read_checkpoint(path)
+    assert ckpt_module.restore_rng_state(ckpt)
+    assert torch.equal(torch.randn(4), expected)
+
+
+def test_a_checkpoint_without_rng_state_leaves_the_stream_alone(tiny_cfg, tmp_path):
+    ckpt = ckpt_module.read_checkpoint(_checkpoint(tmp_path, tiny_cfg))
+    del ckpt["rng"]
+
+    torch.manual_seed(9999)
+    expected = torch.randn(4)
+    torch.manual_seed(9999)
+    assert not ckpt_module.restore_rng_state(ckpt)
+    assert torch.equal(torch.randn(4), expected)
+
+
+def test_a_resumed_run_draws_the_noise_the_epoch_would_have_drawn(tiny_cfg, fake_loader, tmp_path):
+    cfg = dataclasses.replace(tiny_cfg, num_epochs=2, ckpt_dir=tmp_path)
+    train_module.train(cfg)
+    straight = torch.randn(4)
+
+    stopped = dataclasses.replace(cfg, num_epochs=1)
+    train_module.train(stopped)
+    train_module.train(cfg, resume=tmp_path / ckpt_module.LAST_CHECKPOINT)
+    assert torch.equal(torch.randn(4), straight)
+
+
 # --- resume compatibility -------------------------------------------------
 
 

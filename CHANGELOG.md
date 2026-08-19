@@ -145,6 +145,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `eval` scored every batch against the same noise. The seed was reapplied
+  before each batch to keep the score reproducible, but with the same value
+  every time, so a run covering 10,000 images averaged over a single noise
+  draw per slot and carried whatever bias that one draw had. The seed is now
+  offset by the batch index: still reproducible, but the noise varies across
+  the split as the number implies.
+- A resumed run no longer restarts the random stream. The loader's shuffle
+  order was already a function of the epoch index, but the diffusion noise,
+  the timesteps, dropout and label dropout all come from the global generator,
+  which a fresh process seeded from `seed` alone — so epoch 5 of a `--resume`
+  saw different noise than epoch 5 of a run trained straight through, even
+  under `deterministic`. Checkpoints now carry the RNG state, and the training
+  loop restores it. Checkpoints written before this still resume, and say that
+  their stream restarts.
+
 - `run.ps1` reported a Python that could not start as one missing the package,
   which sent you off reinstalling something that was already installed. It
   probes in two stages now, as `run.sh` already did. Both wrappers additionally

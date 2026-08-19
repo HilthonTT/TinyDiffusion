@@ -33,6 +33,7 @@ from tinydiffusion.training.checkpoints import (
     check_resume_compatible,
     read_checkpoint,
     restore_checkpoint,
+    restore_rng_state,
     save_checkpoint,
 )
 from tinydiffusion.training.config import TrainConfig
@@ -458,7 +459,13 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
         )
         best_val = ckpt.get("best_val")
+        # After seed_everything above, so the stored stream wins over the one
+        # cfg.seed set up: the point is for a resumed epoch to draw the noise
+        # that epoch would have drawn, not the noise epoch 0 draws.
+        replayed = restore_rng_state(ckpt)
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
+        if not replayed:
+            print("this checkpoint stores no RNG state, so the random stream restarts at the seed")
 
     held_out = validation_batches(cfg)
 

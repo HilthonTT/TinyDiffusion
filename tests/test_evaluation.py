@@ -94,6 +94,21 @@ def test_evaluation_is_reproducible(checkpoint):
     assert first.per_timestep == second.per_timestep
 
 
+def test_each_batch_draws_its_own_noise(checkpoint, monkeypatch):
+    """Reseeding with one seed would score every batch against one draw."""
+    seeds = []
+    real = evaluation.seed_everything
+
+    def record(seed):
+        seeds.append(seed)
+        real(seed)
+
+    monkeypatch.setattr(evaluation, "seed_everything", record)
+    evaluation.evaluate_checkpoint(checkpoint, num_steps=2, seed=7, progress=False)
+    # Six images at three a batch, so two batches, on consecutive seeds.
+    assert seeds == [7, 8]
+
+
 def test_seed_changes_the_noise(checkpoint):
     first = evaluation.evaluate_checkpoint(checkpoint, num_steps=3, seed=0, progress=False)
     second = evaluation.evaluate_checkpoint(checkpoint, num_steps=3, seed=1, progress=False)
