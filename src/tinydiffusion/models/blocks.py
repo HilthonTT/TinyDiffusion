@@ -43,6 +43,38 @@ def _checkpointed(
     return body(*args)
 
 
+class Float32GroupNorm(nn.GroupNorm):
+    """GroupNorm that normalises in float32 whatever precision it is handed.
+
+    Normalisation is where reduced precision does the most damage — the
+    variance is a sum over a whole group of channels, and float16 runs out of
+    mantissa long before that sum is done — so the weights here are left in
+    float32 by :func:`~tinydiffusion.utils.fp16.convert_module_to_f16` and the
+    input is promoted to meet them.
+
+    The promotion is not merely for accuracy: ``F.group_norm`` refuses a
+    float16 input against a float32 weight outright on CUDA, so a network with
+    half-precision convolutions and full-precision norms does not run at all
+    without it.
+
+    Both casts are free in the two cases that are not
+    :attr:`~tinydiffusion.training.config.TrainConfig.full_fp16`. Under plain
+    float32 they are no-ops, and under autocast GroupNorm is on the float32
+    list already, so this only moves a cast that was going to happen anyway.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalise `x` in float32 and hand it back in its own dtype.
+
+        Args:
+            x: (B, C, ...) feature map.
+
+        Returns:
+            The normalised feature map, in `x`'s dtype.
+        """
+        return super().forward(x.float()).to(x.dtype)
+
+
 def group_norm(channels: int, max_groups: int = 32) -> nn.GroupNorm:
     """GroupNorm using the largest group count <= max_groups that divides channels.
 
@@ -54,10 +86,10 @@ def group_norm(channels: int, max_groups: int = 32) -> nn.GroupNorm:
         max_groups: upper bound on the group count.
 
     Returns:
-        A GroupNorm whose group count divides channels.
+        A :class:`Float32GroupNorm` whose group count divides channels.
     """
     groups = next(g for g in range(min(max_groups, channels), 0, -1) if channels % g == 0)
-    return nn.GroupNorm(groups, channels)
+    return Float32GroupNorm(groups, channels)
 
 
 def zero_module(module: nn.Module) -> nn.Module:
@@ -128,7 +160,12 @@ class ResBlock(nn.Module):
         """The block's body, split out so it can be recomputed on demand."""
         h = self.conv1(F.silu(self.norm1(x)))
 
-        scale, shift = self.time_proj(F.silu(time_emb))[:, :, None, None].chunk(2, dim=1)
+        # The FiLM projection is a Linear, so it keeps float32 weights even
+        # when the convolutions around it do not. Cast its output down rather
+        # than letting the multiply promote `h`: the result feeds conv2, which
+        # would then be a float16 kernel handed a float32 input.
+        projection = self.time_proj(F.silu(time_emb)).to(h.dtype)
+        scale, shift = projection[:, :, None, None].chunk(2, dim=1)
         h = self.norm2(h) * (1 + scale) + shift
 
         h = self.conv2(self.drop(F.silu(h)))

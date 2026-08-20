@@ -96,10 +96,25 @@ class TrainConfig:
 
     ``amp_dtype`` picks the autocast type on CUDA. ``fp16`` needs the gradient
     scaler and can skip a step when it overflows; ``bf16`` has the range not to
-    and so runs unscaled, but wants Ampere or newer. ``compile`` wraps the
-    network in :func:`torch.compile` for training only — the checkpoint, the
-    EMA and every sampler keep the eager module, so a compiled run's
-    checkpoints stay ordinary ones. ``channels_last`` is worth measuring rather
+    and so runs unscaled, but wants Ampere or newer.
+
+    ``full_fp16`` swaps autocast for the other half-precision strategy: the
+    network's convolutions *hold* float16 weights, and the optimiser steps a
+    flattened float32 copy of them (Dhariwal & Nichol 2021's training setup;
+    see :mod:`tinydiffusion.utils.fp16`). Autocast keeps float32 weights and
+    casts at every kernel boundary, so it spends a little bandwidth per
+    operation and holds the weights twice over in effect; this holds them once
+    in half and once in full, and runs the convolutions with no casts at all.
+    The activation saving is the same either way — it is weight memory and cast
+    overhead that differ, so it is worth measuring rather than assuming, and
+    autocast remains the default because it is the one that needs no care.
+    Requires CUDA and ``amp_dtype = "fp16"``; the run says so and falls back
+    where CUDA is missing. Checkpoints are unaffected: the float32 master copy
+    is what gets written, so a run in this mode produces ordinary checkpoints.
+
+    ``compile`` wraps the network in :func:`torch.compile` for training only —
+    the checkpoint, the EMA and every sampler keep the eager module, so a
+    compiled run's checkpoints stay ordinary ones. ``channels_last`` is worth measuring rather
     than assuming: it wins on wide convolutional stacks under AMP and can lose
     on a small one.
 
@@ -179,6 +194,7 @@ class TrainConfig:
     deterministic: bool = False
     amp: bool = True
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
+    full_fp16: bool = False  # float16 weights with a float32 master copy, instead of autocast
     compile: bool = False
     channels_last: bool = False
     grad_checkpoint: bool = False
@@ -284,6 +300,20 @@ class TrainConfig:
             raise ValueError(f"ema_warmup must not be negative, got {self.ema_warmup}")
         if self.amp_dtype not in ("fp16", "bf16"):
             raise ValueError(f"unknown amp_dtype {self.amp_dtype!r}, expected 'fp16' or 'bf16'")
+        if self.full_fp16:
+            # Both of these would otherwise be silently ignored, and the run
+            # would report a precision it is not using.
+            if not self.amp:
+                raise ValueError(
+                    "full_fp16 is a mixed-precision mode and amp=False asks for float32; "
+                    "set amp=true, or turn full_fp16 off"
+                )
+            if self.amp_dtype != "fp16":
+                raise ValueError(
+                    f"full_fp16 holds the weights in float16 and needs the gradient scaler "
+                    f"that goes with them, so amp_dtype={self.amp_dtype!r} has nothing to "
+                    f"do; use amp_dtype='fp16', or drop full_fp16 for plain bf16 autocast"
+                )
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
         self._check_conditioning(spec)

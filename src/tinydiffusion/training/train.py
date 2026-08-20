@@ -26,6 +26,7 @@ from tinydiffusion.data.datasets import denormalize, image_dataloader
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import Conditioned, conditioned, drop_labels
 from tinydiffusion.diffusion.samplers import get_sampler
+from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.checkpoints import (
     BEST_CHECKPOINT,
     INTERRUPTED_CHECKPOINT,
@@ -43,6 +44,15 @@ from tinydiffusion.training.lr import lr_factor
 from tinydiffusion.training.model import build_model
 from tinydiffusion.training.validation import validation_loss
 from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
+from tinydiffusion.utils.fp16 import (
+    make_master_params,
+    master_params_to_model_params,
+    master_params_to_state_dict,
+    model_grads_to_master_grads,
+    model_params_to_master_params,
+    unflatten_master_params,
+    zero_grad,
+)
 from tinydiffusion.utils.seed import seed_everything
 from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
 
@@ -283,6 +293,26 @@ def save_samples(
     save_image(grid, cfg.out_dir / f"sample_{epoch + 1:04d}.png", nrow=min(8, cfg.num_samples))
 
 
+def _model_state(
+    diffusion: Diffusion, master_params: list[nn.Parameter] | None
+) -> dict[str, torch.Tensor] | None:
+    """The weights to checkpoint, in float32 whichever precision the run uses.
+
+    Args:
+        diffusion: the diffusion model.
+        master_params: the run's float32 master copy, or None when the network
+            holds its own weights at full precision.
+
+    Returns:
+        A float32 state dict when there is a master copy to read, and None to
+        leave :func:`~tinydiffusion.training.checkpoints.save_checkpoint` with
+        its default of the network's own.
+    """
+    if master_params is None:
+        return None
+    return master_params_to_state_dict(diffusion.net, master_params)
+
+
 def _save_and_report(
     cfg: TrainConfig,
     *,
@@ -293,6 +323,7 @@ def _save_and_report(
     scaler: torch.amp.GradScaler,
     sched: LRScheduler | None = None,
     best_val: float | None = None,
+    model_state: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Checkpoint a cancelled run and tell the user how to pick it up again.
 
@@ -309,6 +340,8 @@ def _save_and_report(
         sched: LR schedule to restore, or None to skip.
         best_val: lowest held-out loss seen so far, carried through so a resume
             keeps comparing against it.
+        model_state: float32 weights to write in place of the network's own;
+            see :func:`~tinydiffusion.training.checkpoints.save_checkpoint`.
     """
     path = cfg.ckpt_dir / INTERRUPTED_CHECKPOINT
     save_checkpoint(
@@ -321,6 +354,7 @@ def _save_and_report(
         sched=sched,
         cfg=cfg,
         best_val=best_val,
+        model_state=model_state,
     )
     done = max(epoch + 1, 0)
     print(f"saved {path} ({_epochs(done)} complete, plus a partial epoch)")
@@ -361,7 +395,15 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
     seed_everything(cfg.seed, deterministic=cfg.deterministic)
 
     device_type = torch.device(cfg.device).type
-    use_amp = cfg.amp and device_type == "cuda"
+    # Two half-precision strategies, and at most one of them runs. full_fp16
+    # puts float16 in the weights themselves and keeps a float32 master copy
+    # for the optimiser; autocast leaves the weights alone and casts per
+    # kernel. Both want CUDA — half precision on a CPU is emulated, so it is
+    # slower than float32 rather than faster.
+    use_full_fp16 = cfg.full_fp16 and device_type == "cuda"
+    if cfg.full_fp16 and not use_full_fp16:
+        print("full_fp16 needs a CUDA device; training in float32 instead")
+    use_amp = cfg.amp and device_type == "cuda" and not use_full_fp16
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
     if use_amp and amp_dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
         # Pre-Ampere. Saying so beats an unexplained slowdown from a dtype the
@@ -401,10 +443,26 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             "kernels; training eagerly instead (pip install triton-windows on Windows)"
         )
 
+    # Held as a list rather than re-walked: order is what every fp16 helper
+    # below indexes by, and a generator would be exhausted after one of them.
+    model_params: list[torch.Tensor] = list(diffusion.parameters())
+    # The float16 network is not what gets optimised — see
+    # :mod:`tinydiffusion.utils.fp16` for why an Adam step applied to a
+    # float16 weight rounds away to nothing. Built while the weights are still
+    # float32, so the copy is exact, and converted below once the checkpoint
+    # (if any) has been restored into it.
+    master_params = make_master_params(model_params) if use_full_fp16 else None
+    # What the optimiser and the gradient clip act on. Spelled over two
+    # statements because `list` is invariant: a Parameter is a Tensor, but a
+    # list of them is not a list of Tensors until the annotation says so.
+    step_params: list[torch.Tensor] = model_params
+    if master_params is not None:
+        step_params = [*master_params]
+
     # AdamW rather than Adam, and identical to it at the default
     # weight_decay=0: decoupled decay is what the two differ in.
     optim = torch.optim.AdamW(
-        diffusion.parameters(), lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
+        step_params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
     )
 
     # Read before the resume so a mismatch names the setting that changed
@@ -449,15 +507,36 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         device_type,
         # bf16 carries fp32's exponent range, so there is nothing to scale
         # against and no step to skip when the scale would have overflowed.
-        enabled=use_amp and amp_dtype is torch.float16,
+        # full_fp16 is the opposite case and needs it most: with the weights
+        # themselves in half precision there is no unscaled path at all, and
+        # diffusion gradients sit close enough to float16's floor that an
+        # unscaled backward pass flushes a good share of them to zero.
+        enabled=use_full_fp16 or (use_amp and amp_dtype is torch.float16),
     )
 
     start_epoch = 0
     best_val: float | None = None
     if ckpt is not None:
+        # AdamW's moments are stored per parameter tensor, and full_fp16 gives
+        # it one flattened tensor where every other mode gives it a few hundred
+        # — so the moments cannot cross that boundary, however well the weights
+        # do. Dropping them and saying so beats both a raw size-mismatch dump
+        # and refusing a resume whose weights are perfectly good.
+        was_full_fp16 = bool((ckpt.get("config") or {}).get("full_fp16", False))
+        moments_fit = was_full_fp16 == use_full_fp16
         start_epoch = restore_checkpoint(
-            ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
+            ckpt,
+            diffusion=diffusion,
+            ema=ema,
+            optim=optim if moments_fit else None,
+            scaler=scaler,
+            sched=sched,
         )
+        if not moments_fit:
+            print(
+                f"this checkpoint was trained with full_fp16={was_full_fp16}, which lays the "
+                f"optimiser state out differently; resuming with fresh AdamW moments"
+            )
         best_val = ckpt.get("best_val")
         # After seed_everything above, so the stored stream wins over the one
         # cfg.seed set up: the point is for a resumed epoch to draw the noise
@@ -466,6 +545,17 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
         if not replayed:
             print("this checkpoint stores no RNG state, so the random stream restarts at the seed")
+
+    if master_params is not None:
+        # Both halves matter, and in this order. The master copy picks up
+        # whatever the restore just wrote — which is still float32 at this
+        # point, so a resumed run continues from the checkpoint's own weights
+        # rather than from the checkpoint rounded to half. Only then does the
+        # network go to float16.
+        model_params_to_master_params(model_params, master_params)
+        # build_model always builds a UNet, and it is the only thing that knows
+        # which of its parts can safely hold half precision.
+        cast(UNet, diffusion.net).convert_to_fp16()
 
     held_out = validation_batches(cfg)
 
@@ -488,7 +578,15 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         if held_out
         else "no validation"
     )
-    precision = f"amp {cfg.amp_dtype}" if use_amp else "amp off"
+    if use_full_fp16:
+        precision = "fp16 weights (float32 master)"
+    elif use_amp:
+        # The resolved dtype, not the requested one: a pre-Ampere card asks for
+        # bf16 and is quietly given fp16 above, and the plan line is where that
+        # would otherwise go unmentioned.
+        precision = f"amp {'bf16' if amp_dtype is torch.bfloat16 else 'fp16'}"
+    else:
+        precision = "amp off"
     if cfg.compile:
         precision += " | compiled"
     if cfg.channels_last:
@@ -569,6 +667,11 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
 
                     if batch == group_start:
                         optim.zero_grad(set_to_none=True)
+                        if master_params is not None:
+                            # Accumulation happens on the network's own float16
+                            # gradients, which the optimiser never sees, so
+                            # clearing its master gradient is not enough.
+                            zero_grad(model_params)
                     with torch.amp.autocast(
                         device_type, dtype=amp_dtype if use_amp else None, enabled=use_amp
                     ):
@@ -584,14 +687,19 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                     grad_norm: float | None = None
                     stepped = True
                     if applies:
+                        if master_params is not None:
+                            # The optimiser steps the master copy, so this is
+                            # the last moment the gradients exist anywhere it
+                            # can reach them — and it has to be before the
+                            # unscale below, which only touches what the
+                            # optimiser holds.
+                            model_grads_to_master_grads(model_params, master_params)
                         if cfg.grad_clip > 0:
                             # Unscale first, or the clip threshold is applied to scaled grads.
                             scaler.unscale_(optim)
                             # The pre-clip norm comes back for free; it is the first
                             # thing to look at when a loss curve goes flat or spikes.
-                            grad_norm = float(
-                                nn.utils.clip_grad_norm_(diffusion.parameters(), cfg.grad_clip)
-                            )
+                            grad_norm = float(nn.utils.clip_grad_norm_(step_params, cfg.grad_clip))
 
                         scale_before = scaler.get_scale()
                         scaler.step(optim)
@@ -601,7 +709,22 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                         # of the EMA warmup.
                         stepped = scaler.get_scale() >= scale_before
                         if stepped:
-                            ema.update(diffusion.net)
+                            if master_params is not None:
+                                # Only on a step that landed: a skipped one
+                                # leaves the master copy alone, so the network
+                                # already agrees with it.
+                                master_params_to_model_params(model_params, master_params)
+                                # Averaged from the master copy rather than the
+                                # network — at a decay of 0.9999 the increment
+                                # is far below what float16 can represent, and
+                                # an EMA fed half-precision weights would stop
+                                # moving. Buffers still come from the module.
+                                ema.update(
+                                    diffusion.net,
+                                    unflatten_master_params(model_params, master_params),
+                                )
+                            else:
+                                ema.update(diffusion.net)
                             sched.step()
 
                     value = loss.item()
@@ -645,6 +768,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                                 scaler=scaler,
                                 best_val=best_val,
                                 sched=sched,
+                                model_state=_model_state(diffusion, master_params),
                             )
                         else:
                             print("cancelled without saving")
@@ -656,7 +780,10 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                 **{
                     "train/lr": float(optim.param_groups[0]["lr"]),
                     "train/ema_decay": ema.current_decay,
-                    "train/amp_scale": float(scaler.get_scale()) if use_amp else 1.0,
+                    # Asked of the scaler rather than of the config: it is
+                    # disabled under bf16 and off CUDA, and enabled for
+                    # full_fp16, none of which `amp` alone distinguishes.
+                    "train/amp_scale": float(scaler.get_scale()) if scaler.is_enabled() else 1.0,
                     "time/epoch_seconds": elapsed,
                     "time/images_per_second": images / elapsed if elapsed > 0 else 0.0,
                 }
@@ -713,6 +840,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                 sched=sched,
                 cfg=cfg,
                 best_val=best_val,
+                model_state=_model_state(diffusion, master_params),
             )
             _snapshot_epoch(cfg.ckpt_dir, last, epoch=epoch, keep=cfg.keep_last)
 
@@ -721,6 +849,12 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                 # Copied rather than re-serialised: identical bytes, half the I/O.
                 shutil.copy2(last, best)
                 print(f"val/loss {new_best:.5f} is a new best; wrote {best}")
+
+    if master_params is not None:
+        # Back to an ordinary float32 network before it leaves this function.
+        # Nothing downstream — the samplers, FID, the server — knows about the
+        # master copy, and the EMA weights loaded in below are float32 anyway.
+        cast(UNet, diffusion.net).convert_to_fp32()
 
     # Ship the EMA weights: they are what the sample grids were drawn from.
     diffusion.net.load_state_dict(ema.module.state_dict())

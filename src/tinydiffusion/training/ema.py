@@ -1,6 +1,7 @@
 """Exponential moving average of model weights."""
 
 import copy
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -49,7 +50,7 @@ class EMA:
         return self.decay
 
     @torch.no_grad()
-    def update(self, model: nn.Module) -> None:
+    def update(self, model: nn.Module, params: Sequence[torch.Tensor] | None = None) -> None:
         """Fold one optimiser step of `model` into the averaged weights.
 
         The parameter average goes through ``torch._foreach_lerp_``, which is
@@ -59,22 +60,44 @@ class EMA:
         otherwise a measurable slice of a small model's step time.
 
         Args:
-            model: the live model, after its parameter update.
+            model: the live model, after its parameter update. Its buffers are
+                copied across either way.
+            params: the weights to average in, in
+                :meth:`~torch.nn.Module.parameters` order, when `model`'s own
+                are not the ones to read. That is the
+                :attr:`~tinydiffusion.training.config.TrainConfig.full_fp16`
+                case: the model holds float16 weights there, and averaging at a
+                decay of 0.9999 means folding in a change four orders of
+                magnitude smaller than the value it lands on, which float16
+                cannot represent at all — the average would simply stop moving.
+                Defaults to `model`'s parameters.
 
         Raises:
-            ValueError: if `model` does not have the same tensors as the module
-                the average was built from.
+            ValueError: if the weights do not match the module the average was
+                built from, in count or in dtype.
         """
         decay = self.current_decay
         self.step += 1
 
-        params: list[torch.Tensor] = list(model.parameters())
-        if len(params) != len(self._params):
+        live: list[torch.Tensor] = list(model.parameters() if params is None else params)
+        if len(live) != len(self._params):
             raise ValueError(
-                f"model has {len(params)} parameter tensors, but this EMA was built from "
+                f"model has {len(live)} parameter tensors, but this EMA was built from "
                 f"{len(self._params)}"
             )
-        torch._foreach_lerp_(self._params, params, 1.0 - decay)
+        pairs = enumerate(zip(self._params, live, strict=True))
+        mismatched = next((i for i, (held, new) in pairs if held.dtype != new.dtype), None)
+        if mismatched is not None:
+            # torch._foreach_lerp_ rejects a mixed-dtype pair outright, several
+            # frames down and without naming the tensor. Saying which one, and
+            # that a reduced-precision model wants the `params` argument, is
+            # the difference between a two-minute fix and an afternoon.
+            raise ValueError(
+                f"parameter {mismatched} is {live[mismatched].dtype} but this EMA holds "
+                f"{self._params[mismatched].dtype}; pass full-precision weights as `params` "
+                f"when the model itself is a reduced-precision copy"
+            )
+        torch._foreach_lerp_(self._params, live, 1.0 - decay)
 
         # Left as a loop: buffers are few, are not necessarily floating point,
         # and are copied rather than averaged.

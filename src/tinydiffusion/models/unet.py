@@ -19,6 +19,7 @@ from tinydiffusion.models.blocks import (
     zero_module,
 )
 from tinydiffusion.models.embeddings import LabelEmbedding, TimeEmbedding
+from tinydiffusion.utils.fp16 import convert_module_to_f16, convert_module_to_f32
 
 # DDPM projects the sinusoidal embedding to 4x the base width before conditioning.
 TIME_EMBED_MULT = 4
@@ -26,6 +27,10 @@ TIME_EMBED_MULT = 4
 
 class UNet(nn.Module):
     """DDPM UNet.
+
+    The network is built in float32 and stays there unless
+    :meth:`convert_to_fp16` is called; see it for what a half-precision network
+    keeps in full precision, and why.
 
     Args:
         in_channels: channels of the noisy input image.
@@ -79,6 +84,9 @@ class UNet(nn.Module):
             )
 
         self.use_checkpoint = use_checkpoint
+        # Flipped by convert_to_fp16(). forward() reads it to meet the
+        # convolutions in whatever precision they are currently holding.
+        self.dtype = torch.float32
 
         time_dim = base_channels * TIME_EMBED_MULT
         self.time_embed = TimeEmbedding(base_channels, time_dim)
@@ -150,6 +158,48 @@ class UNet(nn.Module):
             zero_module(nn.Conv2d(channels, out_channels, 3, padding=1)),
         )
 
+    def _convolutional_stack(self) -> tuple[nn.Module, ...]:
+        """The parts of the network whose precision `convert_to_fp16` changes.
+
+        Everything else — the timestep and label embeddings, the FiLM
+        projections inside each ResBlock, every GroupNorm, and the output head
+        — is deliberately left in float32. Between them they are a rounding
+        error in both parameter count and FLOPs, and they are exactly the
+        places where half precision costs accuracy: sums over a whole channel
+        group, a table lookup that is added to everything downstream, and the
+        final projection whose output the loss is taken on.
+
+        Returns:
+            The modules to hand to
+            :func:`~tinydiffusion.utils.fp16.convert_module_to_f16`.
+        """
+        return (self.init_conv, self.downs, self.mid, self.ups)
+
+    def convert_to_fp16(self) -> None:
+        """Put the convolutional stack into float16, in place.
+
+        Half the weight memory and half the activation memory, with the
+        convolutions running as float16 kernels end to end rather than being
+        cast per operation the way autocast does it. What makes it trainable is
+        that the optimiser keeps stepping a float32 copy of these weights; see
+        :mod:`tinydiffusion.utils.fp16`, and do not call this without that copy.
+        """
+        for module in self._convolutional_stack():
+            module.apply(convert_module_to_f16)
+        self.dtype = torch.float16
+
+    def convert_to_fp32(self) -> None:
+        """Put the convolutional stack back into float32, undoing `convert_to_fp16`.
+
+        The dtype round trip does not restore the mantissa bits float16 threw
+        away, so this is for handing the network back to code that expects an
+        ordinary float32 model — the samplers, the EMA copy at the end of a run
+        — rather than for recovering precision.
+        """
+        for module in self._convolutional_stack():
+            module.apply(convert_module_to_f32)
+        self.dtype = torch.float32
+
     def forward(
         self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -180,7 +230,9 @@ class UNet(nn.Module):
         elif y is not None:
             raise ValueError("this UNet was built without num_classes, so it takes no labels")
 
-        h = self.init_conv(x)
+        # A no-op unless convert_to_fp16 has run. The time embedding stays in
+        # float32 either way: each ResBlock casts it down as it applies it.
+        h = self.init_conv(x.to(self.dtype))
         skips = [h]
         for module in self.downs:
             h = module(h, time_emb)
@@ -191,4 +243,10 @@ class UNet(nn.Module):
         for module in self.ups:
             h = module(torch.cat([h, skips.pop()], dim=1), time_emb)
 
+        if self.dtype is not torch.float32:
+            # The output head kept its float32 weights, so the cast back
+            # happens here. Guarded rather than unconditional: under autocast
+            # `h` is already half and forcing it up would only make autocast
+            # cast it down again for the final convolution.
+            h = h.float()
         return self.out(h)

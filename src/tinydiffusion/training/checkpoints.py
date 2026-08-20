@@ -92,6 +92,7 @@ def save_checkpoint(
     cfg: TrainConfig,
     sched: LRScheduler | None = None,
     best_val: float | None = None,
+    model_state: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Write a resumable checkpoint.
 
@@ -113,13 +114,21 @@ def save_checkpoint(
         best_val: lowest held-out loss seen so far, or None if the run is not
             validating. Stored so a ``--resume`` does not restart the
             comparison and overwrite a better ``best.pt``.
+        model_state: the weights to write, when ``diffusion.net``'s own are not
+            the ones to keep. That is the
+            :attr:`~tinydiffusion.training.config.TrainConfig.full_fp16` case,
+            where the network holds a float16 rounding of the float32 master
+            copy the optimiser actually steps; see
+            :func:`~tinydiffusion.utils.fp16.master_params_to_state_dict`.
+            Defaults to ``diffusion.net.state_dict()``, so every checkpoint
+            this project writes is a float32 one however it was trained.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(
         {
             "epoch": epoch,
-            "model": diffusion.net.state_dict(),
+            "model": diffusion.net.state_dict() if model_state is None else model_state,
             "ema": ema.module.state_dict(),
             "ema_step": ema.step,
             "optim": optim.state_dict(),
@@ -252,7 +261,8 @@ def restore_checkpoint(
         diffusion: model to load weights into.
         ema: EMA wrapper to load shadow weights into.
         optim: optimiser to restore, or None to skip (e.g. sampling only).
-        scaler: AMP scaler to restore, or None to skip.
+        scaler: AMP scaler to restore, or None to skip. A checkpoint from a run
+            that had no scaler enabled leaves it at its own initial scale.
         sched: LR schedule to restore, or None to skip. Checkpoints written
             before schedules existed carry no entry, and leave it at step 0.
 
@@ -264,7 +274,12 @@ def restore_checkpoint(
     ema.step = ckpt.get("ema_step", 0)
     if optim is not None and "optim" in ckpt:
         optim.load_state_dict(ckpt["optim"])
-    if scaler is not None and "scaler" in ckpt:
+    if scaler is not None and ckpt.get("scaler"):
+        # Truthiness rather than presence: a run whose scaler was disabled —
+        # bf16, CPU, amp off — stores an empty dict, and GradScaler refuses to
+        # load one rather than treating it as "nothing to restore". That would
+        # make an fp16 run unable to pick up a bf16 run's checkpoint even
+        # though its weights fit perfectly, so the scale simply starts fresh.
         scaler.load_state_dict(ckpt["scaler"])
     if sched is not None and ckpt.get("sched") is not None:
         sched.load_state_dict(ckpt["sched"])

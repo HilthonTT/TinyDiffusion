@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Pure float16 training (`full_fp16 = true`), the alternative to autocast: the
+  U-Net's convolutions hold float16 weights and the optimiser steps a
+  flattened float32 master copy of them, so the convolutions run with no
+  per-operation casts. Norms, embeddings, FiLM projections and the output head
+  stay in float32, and the gradient scaler is always on — without float32
+  weights to fall back on there is no unscaled path. Checkpoints are written
+  from the master copy, so a run in this mode produces ordinary float32
+  checkpoints; only AdamW's moments cannot cross the setting, and a `--resume`
+  that does says so and starts them fresh. Needs CUDA and `amp_dtype = "fp16"`.
 - Gradient checkpointing (`grad_checkpoint = true`). Each ResBlock and
   attention layer drops its intermediate activations and recomputes them in
   the backward pass, which is what lets a wider model or a larger batch fit on
@@ -152,6 +161,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The AMP gradient scaler is no longer restored from a checkpoint written by a
+  run that had it disabled. `GradScaler` refuses the empty state dict such a
+  run stores, so an fp16 run could not resume a bf16, CPU or `amp = false`
+  checkpoint even though its weights fit; the scale now simply starts fresh.
+- The startup line reports the precision a run actually used. A pre-Ampere card
+  asking for `bf16` is quietly given fp16, and the line said `bf16` anyway.
 - `eval` scored every batch against the same noise. The seed was reapplied
   before each batch to keep the score reproducible, but with the same value
   every time, so a run covering 10,000 images averaged over a single noise

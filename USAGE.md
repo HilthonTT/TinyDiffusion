@@ -726,6 +726,41 @@ compile = true          # torch.compile the training step
 channels_last = true    # measure this one; it can lose on a small model
 ```
 
+`full_fp16` is the other half-precision strategy, and an alternative to
+autocast rather than an addition to it. Autocast leaves the weights in float32
+and casts each operand on the way into a kernel; `full_fp16` puts float16 in
+the convolutions themselves and hands the optimiser a flattened float32 copy —
+the master parameters — to step instead. The convolutions then run end to end
+with no per-operation casts, and the weights are stored once in half rather
+than once in full.
+
+```toml
+[bookkeeping]
+full_fp16 = true        # float16 weights, float32 master copy; needs CUDA
+```
+
+The norms, the timestep and label embeddings, the FiLM projections and the
+output head all stay in float32 — they are a rounding error in both parameter
+count and FLOPs, and they are exactly where half precision costs accuracy. The
+gradient scaler is not optional here and is always on: with no float32 weights
+to fall back on, an unscaled backward pass flushes a good share of a diffusion
+model's gradients to float16's floor.
+
+Everything downstream is unaffected. The float32 master copy is what gets
+written, so a `full_fp16` run produces ordinary float32 checkpoints, the EMA is
+averaged in float32, and `train` hands back a normal float32 model. The one
+thing that does not carry across is AdamW's moments: they are stored per
+parameter tensor, and this mode gives the optimiser one flat tensor where every
+other mode gives it a few hundred. Resuming across the setting keeps the
+weights, the EMA and the schedule and says on startup that it is starting the
+moments fresh.
+
+Whether it is faster than autocast depends on the card and the width — measure
+it rather than assume it. `amp = true` and `amp_dtype = "fp16"` are its
+prerequisites, and both are the defaults; anything else is refused rather than
+ignored, and CUDA is required, with a float32 fallback and a printed line where
+there is no GPU.
+
 When the limit is memory rather than speed — a wider `base_channels` or a
 larger `batch_size` than the card will hold — turn on `grad_checkpoint`. It
 drops the U-Net's intermediate activations and recomputes them during the
@@ -993,6 +1028,7 @@ starting it over, not `--resume`.
 | `deterministic` | `false` | Force deterministic CUDA kernels and disable the cuDNN autotuner, at a throughput cost |
 | `amp` | `true` | Autocast; ignored off CUDA |
 | `amp_dtype` | `fp16` | Or `bf16`, which runs unscaled but wants Ampere or newer |
+| `full_fp16` | `false` | float16 weights with a float32 master copy, instead of autocast; needs CUDA and `amp_dtype = "fp16"` |
 | `compile` | `false` | `torch.compile` the training step |
 | `channels_last` | `false` | Worth measuring rather than assuming |
 | `grad_checkpoint` | `false` | Recompute activations in the backward pass: roughly a third more compute for a large cut in memory |
