@@ -2,11 +2,14 @@
 
 import argparse
 import dataclasses
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from tinydiffusion import __version__
 from tinydiffusion.data.datasets import dataset_names
+from tinydiffusion.diffusion.ddim import spacing_names
 from tinydiffusion.diffusion.samplers import sampler_names
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
@@ -45,6 +48,40 @@ def class_labels(value: str) -> list[int]:
     return labels
 
 
+def config_override(value: str) -> tuple[str, Any]:
+    """Parse one ``--set field=value`` pair into a config field and its value.
+
+    The value is read as a TOML value, so it types itself exactly as the same
+    text would in a config file: ``lr=1e-4`` is a float, ``amp=false`` a bool,
+    ``channel_mult=[1,2,2]`` a list. Anything TOML cannot parse is taken as a
+    bare string, which is what makes ``dataset=cifar10`` and
+    ``out_dir=runs/sweep`` work without shell-hostile quoting —
+    :meth:`~tinydiffusion.training.config.TrainConfig.from_mapping` coerces
+    the string to whatever the field actually holds.
+
+    Args:
+        value: the raw argument, e.g. ``"batch_size=64"``.
+
+    Returns:
+        The field name and its parsed value.
+
+    Raises:
+        argparse.ArgumentTypeError: if there is no ``=``, or the name is empty.
+    """
+    name, sep, raw = value.partition("=")
+    name = name.strip()
+    if not sep or not name:
+        raise argparse.ArgumentTypeError(f"expected field=value, got {value!r}")
+    try:
+        # A one-key document is the cheapest way to borrow TOML's own literals;
+        # anything it rejects is a bare string, which is the common case for
+        # paths and registry names.
+        parsed = tomllib.loads(f"value = {raw}")["value"]
+    except tomllib.TOMLDecodeError:
+        return name, raw
+    return name, parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -73,6 +110,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=dataset_names(),
         help="Dataset to train on, overriding the config. A conditional run's "
         "num_classes has to match it.",
+    )
+    train.add_argument(
+        "--set",
+        type=config_override,
+        action="append",
+        dest="overrides",
+        metavar="FIELD=VALUE",
+        help="Override any config field, repeatable: --set lr=1e-4 --set batch_size=64 "
+        "--set sample_spacing=quadratic. Values are read as TOML, so quoting rules "
+        "match the config file; a bare word is a string. Applied last, so it wins "
+        "over the other flags.",
     )
     train.add_argument("--seed", type=int, help="Random seed, overriding the config.")
     train.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
@@ -141,6 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sampler to draw with, overriding the checkpoint's. It moves the "
         "score, so hold it fixed across the checkpoints being compared.",
     )
+    fid.add_argument(
+        "--spacing",
+        choices=spacing_names(),
+        help="Timestep spacing, overriding the checkpoint's. Like --sampler it "
+        "moves the score, so hold it fixed across the checkpoints being compared.",
+    )
     fid.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
     fid.add_argument(
         "--guidance",
@@ -159,6 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         dest="use_ema",
         help="Sample the raw weights, not the EMA.",
+    )
+    fid.add_argument(
+        "--no-cache",
+        action="store_false",
+        dest="cache",
+        help="Recompute the real images' features instead of reusing the cached "
+        "ones. They do not depend on the checkpoint, so a sweep normally wants "
+        "the cache; this is for forcing a rebuild.",
     )
     fid.add_argument("--seed", type=int, default=0, help="Random seed.")
     fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
@@ -220,6 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sampler to draw with, overriding the checkpoint's. 'dpmpp' is "
         "DPM-Solver++(2M), which needs roughly a third of the steps 'ddim' does.",
     )
+    sample.add_argument(
+        "--spacing",
+        choices=spacing_names(),
+        help="Which subsequence of the training schedule to visit, overriding the "
+        "checkpoint's. 'quadratic' packs the steps towards t=0 and is worth trying "
+        "whenever --steps is low; it costs no extra network evaluations.",
+    )
     sample.add_argument("--eta", type=float, default=0.0, help="0 is DDIM, 1 is ancestral DDPM.")
     sample.add_argument(
         "--labels",
@@ -260,7 +329,7 @@ def _train(args: argparse.Namespace) -> int:
     else:
         cfg = TrainConfig()
     # Only flags the user actually passed override the file.
-    overrides = {
+    overrides: dict[str, Any] = {
         name: getattr(args, name)
         for name in (
             "dataset",
@@ -274,7 +343,15 @@ def _train(args: argparse.Namespace) -> int:
         )
         if getattr(args, name) is not None
     }
-    cfg = dataclasses.replace(cfg, **overrides)
+    # Applied last, so `--set` wins wherever it and a named flag spell the same
+    # field. It is the escape hatch: whatever the file and the flags worked out
+    # between them, this is the value.
+    overrides.update(dict(args.overrides or ()))
+    # Rebuilt through from_mapping rather than dataclasses.replace: it is what
+    # knows a --set of a path or a tuple field arrives as a string or a list,
+    # and it is what reports an unknown field name as such rather than as a
+    # TypeError about an unexpected keyword argument.
+    cfg = TrainConfig.from_mapping({**dataclasses.asdict(cfg), **overrides})
 
     train_run(cfg, resume=args.resume)
     print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}, metrics in {cfg.log_dir}")
@@ -308,9 +385,11 @@ def _fid(args: argparse.Namespace) -> int:
         num_steps=args.steps,
         eta=args.eta,
         sampler=args.sampler,
+        spacing=args.spacing,
         guidance=args.guidance,
         guidance_rescale=args.guidance_rescale,
         use_ema=args.use_ema,
+        cache=args.cache,
         seed=args.seed,
         device=args.device,
     )
@@ -354,6 +433,7 @@ def _sample(args: argparse.Namespace) -> int:
         num_steps=args.steps,
         eta=args.eta,
         sampler=args.sampler,
+        spacing=args.spacing,
         labels=args.labels,
         guidance=args.guidance,
         guidance_rescale=args.guidance_rescale,

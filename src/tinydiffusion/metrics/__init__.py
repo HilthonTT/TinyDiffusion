@@ -1,3 +1,9 @@
+from tinydiffusion.metrics.cache import (
+    CACHE_DIRNAME,
+    load_reference_stats,
+    reference_stats_path,
+    save_reference_stats,
+)
 from tinydiffusion.metrics.evaluate import (
     DEFAULT_FID_IMAGES,
     FidResult,
@@ -17,6 +23,7 @@ from tinydiffusion.metrics.inception import (
 )
 
 __all__ = [
+    "CACHE_DIRNAME",
     "DEFAULT_FID_IMAGES",
     "INCEPTION_DIM",
     "FeatureExtractor",
@@ -28,4 +35,7 @@ __all__ = [
     "fid_for_checkpoint",
     "fid_from_stats",
     "generate_images",
+    "load_reference_stats",
+    "reference_stats_path",
+    "save_reference_stats",
 ]

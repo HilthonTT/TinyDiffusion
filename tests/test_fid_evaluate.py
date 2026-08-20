@@ -55,6 +55,11 @@ def make_checkpoint(tmp_path, monkeypatch, wake):
     """Write a real checkpoint over a tiny model, and stand in for MNIST."""
 
     def build(cfg=TINY):
+        # Under tmp_path so the reference-feature cache these scores write
+        # lands with the test rather than in the repo's own data directory —
+        # where a stale entry would silently feed one test's fake images to
+        # the next.
+        cfg = dataclasses.replace(cfg, data_root=tmp_path / "data")
         diffusion = build_model(cfg)
         wake(diffusion.net)
         ema = EMA(diffusion.net, decay=0.9, warmup=0)

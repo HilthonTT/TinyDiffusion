@@ -5,6 +5,8 @@ the DDPM loss can be sampled with either method, so this lives as a function
 over a trained process rather than as a subclass that overrides `sample`.
 """
 
+from typing import Protocol
+
 import torch
 import torch.nn as nn
 
@@ -12,6 +14,17 @@ from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.latents import initial_latent
 from tinydiffusion.diffusion.prediction import predict_xstart_eps
 from tinydiffusion.utils.modules import eval_mode
+
+__all__ = [
+    "DEFAULT_SPACING",
+    "SPACINGS",
+    "TimestepSpacing",
+    "ddim_sample",
+    "get_spacing",
+    "quadratic_timesteps",
+    "spacing_names",
+    "uniform_timesteps",
+]
 
 
 def _check_num_steps(num_timesteps: int, num_steps: int) -> None:
@@ -58,6 +71,53 @@ def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
     return torch.unique(steps).flip(0)
 
 
+class TimestepSpacing(Protocol):
+    """How a sampler picks which timesteps of the training schedule to visit."""
+
+    def __call__(self, num_timesteps: int, num_steps: int) -> torch.Tensor:
+        """Return a descending subsequence of ``[0, num_timesteps - 1]``."""
+        ...
+
+
+SPACINGS: dict[str, TimestepSpacing] = {
+    "uniform": uniform_timesteps,
+    "quadratic": quadratic_timesteps,
+}
+"""Name to spacing. ``uniform`` is the safe default; ``quadratic`` is denser near t=0."""
+
+DEFAULT_SPACING = "uniform"
+"""What a config that says nothing gets, and what every sampler used before there was a choice."""
+
+
+def spacing_names() -> tuple[str, ...]:
+    """The registered spacing names.
+
+    Returns:
+        The keys of :data:`SPACINGS`, sorted, for error messages and CLI choices.
+    """
+    return tuple(sorted(SPACINGS))
+
+
+def get_spacing(name: str) -> TimestepSpacing:
+    """Resolve a spacing name to the function that builds the subsequence.
+
+    Args:
+        name: a key of :data:`SPACINGS`.
+
+    Returns:
+        The spacing function.
+
+    Raises:
+        ValueError: if no spacing is registered under that name.
+    """
+    try:
+        return SPACINGS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown timestep spacing {name!r}, expected one of {', '.join(spacing_names())}"
+        ) from None
+
+
 @torch.no_grad()
 def ddim_sample(
     diffusion: Diffusion,
@@ -71,6 +131,7 @@ def ddim_sample(
     clip_denoised: bool = True,
     noise: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
+    spacing: str = DEFAULT_SPACING,
 ) -> torch.Tensor:
     """Sample by running the DDIM reverse chain over a timestep subsequence.
 
@@ -93,13 +154,16 @@ def ddim_sample(
             per-step noise. None uses the global RNG. Passing one is how a
             caller gets a reproducible sample without reseeding the process —
             which matters for anything serving concurrent requests.
+        spacing: which subsequence of the training schedule to visit; a key of
+            :data:`SPACINGS`. Ignored when `timesteps` is given explicitly.
 
     Returns:
         Tensor of shape (num_samples, *size).
 
     Raises:
-        ValueError: if `eta` falls outside [0, 1], `noise` is not shaped
-            ``(num_samples, *size)``, or `generator` is on another device.
+        ValueError: if `eta` falls outside [0, 1], no spacing goes by that
+            name, `noise` is not shaped ``(num_samples, *size)``, or
+            `generator` is on another device.
     """
     if not 0.0 <= eta <= 1.0:
         raise ValueError(f"eta must lie in [0, 1], got {eta}")
@@ -107,7 +171,7 @@ def ddim_sample(
     net = model if model is not None else diffusion.net
 
     if timesteps is None:
-        timesteps = uniform_timesteps(diffusion.num_timesteps, num_steps)
+        timesteps = get_spacing(spacing)(diffusion.num_timesteps, num_steps)
     ts = timesteps.to(device)
     # Pair each t with its predecessor; the last step lands on the t=-1 sentinel,
     # for which alphabar is defined as 1 (a noise-free x_0).

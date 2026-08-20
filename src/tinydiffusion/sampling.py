@@ -105,6 +105,7 @@ def sample_from_checkpoint(
     num_steps: int | None = None,
     eta: float = 0.0,
     sampler: str | None = None,
+    spacing: str | None = None,
     labels: Sequence[int] | None = None,
     guidance: float | None = None,
     guidance_rescale: float | None = None,
@@ -123,6 +124,10 @@ def sample_from_checkpoint(
             sampling. Only ``ddim`` accepts a non-zero value.
         sampler: which sampler to draw with, or None for the checkpoint's own.
             See :data:`~tinydiffusion.diffusion.samplers.SAMPLERS`.
+        spacing: which subsequence of the training schedule to visit, or None
+            for the checkpoint's own. ``quadratic`` packs the steps towards
+            ``t = 0`` and is worth trying at low `num_steps`; see
+            :data:`~tinydiffusion.diffusion.ddim.SPACINGS`.
         labels: classes to generate, cycled over the grid. Conditional
             checkpoints only; see :func:`resolve_labels` for the default.
         guidance: classifier-free guidance scale, or None to use the
@@ -140,8 +145,9 @@ def sample_from_checkpoint(
         The path that was written.
 
     Raises:
-        ValueError: if ``num_images`` is not positive, no sampler goes by that
-            name, or the conditioning arguments do not match the checkpoint.
+        ValueError: if ``num_images`` is not positive, no sampler or spacing
+            goes by that name, or the conditioning arguments do not match the
+            checkpoint.
     """
     if num_images < 1:
         raise ValueError(f"num_images must be positive, got {num_images}")
@@ -166,6 +172,7 @@ def sample_from_checkpoint(
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=eta,
         model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
+        spacing=cfg.sample_spacing if spacing is None else spacing,
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)

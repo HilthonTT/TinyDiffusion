@@ -1,3 +1,4 @@
+import argparse
 import dataclasses
 from pathlib import Path
 
@@ -300,3 +301,142 @@ def test_main_reports_a_missing_config(capsys, tmp_path):
 def test_main_reports_a_missing_checkpoint(capsys, tmp_path):
     assert main(["sample", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
     assert "error:" in capsys.readouterr().out
+
+
+# --- --set config overrides -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("batch_size=64", ("batch_size", 64)),
+        ("lr=1e-4", ("lr", 1e-4)),
+        ("amp=false", ("amp", False)),
+        ("channel_mult=[1, 2, 2]", ("channel_mult", [1, 2, 2])),
+        # TOML cannot read these as values, so they arrive as bare strings and
+        # from_mapping coerces them — which is what keeps paths and registry
+        # names free of shell-hostile quoting.
+        ("dataset=cifar10", ("dataset", "cifar10")),
+        ("out_dir=runs/sweep", ("out_dir", "runs/sweep")),
+        ("sample_spacing=quadratic", ("sample_spacing", "quadratic")),
+        # A quoted string is still a string, and spaces around the name are not
+        # part of it.
+        ('device="cuda:1"', ("device", "cuda:1")),
+        (" seed = 5", ("seed", 5)),
+    ],
+)
+def test_config_override_types_itself_like_the_config_file(raw, expected):
+    assert cli.config_override(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["batch_size", "", "=64"])
+def test_config_override_rejects_a_malformed_pair(raw):
+    with pytest.raises(argparse.ArgumentTypeError, match="field=value"):
+        cli.config_override(raw)
+
+
+def test_set_overrides_the_config_file(tmp_path, trained):
+    config = tmp_path / "cfg.toml"
+    config.write_text("[data]\nbatch_size = 128\n", encoding="utf-8")
+
+    assert main(["train", "--config", str(config), "--set", "batch_size=64"]) == 0
+
+    assert trained["cfg"].batch_size == 64
+
+
+def test_set_is_repeatable(tmp_path, trained):
+    assert (
+        main(
+            [
+                "train",
+                "--set",
+                "lr=1e-3",
+                "--set",
+                "num_workers=0",
+                "--set",
+                "sample_spacing=quadratic",
+            ]
+        )
+        == 0
+    )
+    assert trained["cfg"].lr == 1e-3
+    assert trained["cfg"].num_workers == 0
+    assert trained["cfg"].sample_spacing == "quadratic"
+
+
+def test_set_coerces_paths_and_tuples(trained):
+    assert main(["train", "--set", "out_dir=runs/sweep", "--set", "channel_mult=[1, 2]"]) == 0
+    assert trained["cfg"].out_dir == Path("runs/sweep")
+    assert trained["cfg"].channel_mult == (1, 2)
+
+
+def test_set_overrides_a_resumed_config(tmp_path, trained):
+    path = _checkpoint(tmp_path, base_channels=32, batch_size=128)
+
+    assert main(["train", "--resume", str(path), "--set", "batch_size=32"]) == 0
+
+    assert trained["cfg"].base_channels == 32
+    assert trained["cfg"].batch_size == 32
+
+
+def test_set_wins_over_a_named_flag_for_the_same_field(trained):
+    # `--set` is applied last, so it is the escape hatch rather than one more
+    # voice in the vote.
+    assert main(["train", "--epochs", "9", "--set", "num_epochs=3"]) == 0
+    assert trained["cfg"].num_epochs == 3
+
+
+def test_set_leaves_the_rest_of_the_config_alone(trained):
+    assert main(["train", "--set", "batch_size=64"]) == 0
+    default = TrainConfig()
+    assert trained["cfg"].lr == default.lr
+    assert trained["cfg"].base_channels == default.base_channels
+
+
+def test_set_reports_an_unknown_field(capsys, trained):
+    assert main(["train", "--set", "batch_sizes=64"]) == 1
+    out = capsys.readouterr().out
+    assert "unknown config field" in out
+    assert "batch_sizes" in out
+
+
+def test_set_still_validates_the_result(capsys, trained):
+    assert main(["train", "--set", "batch_size=0"]) == 1
+    assert "batch_size must be positive" in capsys.readouterr().out
+
+
+def test_no_set_leaves_the_config_untouched(tmp_path, trained):
+    config = tmp_path / "cfg.toml"
+    config.write_text("[data]\nbatch_size = 64\n", encoding="utf-8")
+
+    assert main(["train", "--config", str(config)]) == 0
+
+    assert trained["cfg"].batch_size == 64
+
+
+# --- --spacing --------------------------------------------------------------
+
+
+def test_sample_and_fid_default_the_spacing_to_the_checkpoints():
+    parser = build_parser()
+    assert parser.parse_args(["sample", "--checkpoint", "m.pt"]).spacing is None
+    assert parser.parse_args(["fid", "--checkpoint", "m.pt"]).spacing is None
+
+
+def test_sample_parses_the_spacing():
+    args = build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--spacing", "quadratic"])
+    assert args.spacing == "quadratic"
+
+
+def test_an_unregistered_spacing_is_refused_by_the_parser():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--spacing", "linear"])
+
+
+def test_fid_defaults_to_using_the_cache():
+    assert build_parser().parse_args(["fid", "--checkpoint", "m.pt"]).cache is True
+
+
+def test_no_cache_turns_the_cache_off():
+    args = build_parser().parse_args(["fid", "--checkpoint", "m.pt", "--no-cache"])
+    assert args.cache is False

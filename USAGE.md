@@ -223,6 +223,39 @@ settings stored in the checkpoint when [resuming](#resuming).
 ./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
 ```
 
+### Overriding any config field
+
+`--set field=value` reaches every field in
+[the config reference](#configuration) without editing a file, which is what
+makes a sweep a shell loop rather than a directory of near-identical TOMLs.
+It is repeatable:
+
+```bash
+./run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
+```
+
+```bash
+for lr in 1e-4 2e-4 4e-4; do
+  ./run.sh train --config configs/mnist.toml     --set lr=$lr --set log_dir=runs/lr-$lr --set ckpt_dir=checkpoints/lr-$lr
+done
+```
+
+Values are read exactly as the config file would read them, so the types come
+out right without you saying which is which: `batch_size=64` is an integer,
+`lr=1e-4` a float, `amp=false` a boolean, `channel_mult=[1,2,2]` a list.
+Anything TOML cannot parse as a value is taken as a plain string, which is what
+lets `dataset=cifar10` and `out_dir=runs/sweep` go unquoted.
+
+A field name that does not exist is an error rather than a silent no-op, and
+the value is validated exactly as the file's would be — `--set batch_size=0` is
+refused before the dataset is touched. `--set` is applied last, so it also wins
+over `--epochs` and the other named flags:
+
+```console
+$ ./run.sh train --set batch_sizes=64
+error: unknown config field(s): batch_sizes
+```
+
 ### Stopping a run early
 
 `Ctrl+C` does not kill the run outright. At the next batch boundary training
@@ -396,6 +429,7 @@ be turned on for one run without editing the TOML.
 | `--num-images` | 8 | How many images to generate |
 | `--steps` | the checkpoint's `sample_steps` | Denoising steps; fewer is faster, coarser |
 | `--sampler` | the checkpoint's `sampler` | `ddim` or `dpmpp`; see [Choosing a sampler](#choosing-a-sampler) |
+| `--spacing` | the checkpoint's `sample_spacing` | `uniform` or `quadratic`; see [Spacing the steps](#spacing-the-steps) |
 | `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM. `dpmpp` accepts only 0 |
 | `--labels` | one image per class | Classes to generate, e.g. `7` or `0,1,2` |
 | `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
@@ -437,6 +471,35 @@ where it reproduces ancestral DDPM sampling.
 way, and a checkpoint remembers what it was trained to be sampled with.
 Sampling settings move FID, so hold `--sampler` and `--steps` fixed across the
 checkpoints being compared.
+
+### Spacing the steps
+
+`--steps` says how many timesteps of the 1000-step training schedule to visit.
+`--spacing` says *which*:
+
+| `--spacing` | Where the steps go |
+| --- | --- |
+| `uniform` | Evenly across the schedule |
+| `quadratic` | Packed towards `t = 0`, the low-noise end |
+
+Both take the same number of network evaluations, so this is free to try. It
+matters when `--steps` is small: the last few steps are where a short chain has
+the least room to correct itself, and spending more of the budget there is what
+the DDIM paper found better on CIFAR-10 at low step counts.
+
+```bash
+./run.sh sample --checkpoint checkpoints/last.pt --steps 15 --spacing quadratic
+```
+
+At 50 steps or more the two are hard to tell apart, so the default stays
+`uniform`. Like `--sampler` it is also a config field — `sample_spacing` — so
+the per-epoch grids and the [sampling server](#serving-a-checkpoint-over-http)
+follow whatever the run was configured with, and it moves FID like any other
+sampling setting.
+
+Note that `sample_spacing` is unrelated to `timestep_sampler`, which decides
+which timesteps a *training* batch is drawn at; see
+[Weighting the timesteps](#weighting-the-timesteps).
 
 ### Asking for a particular digit
 
@@ -554,11 +617,42 @@ checkpoints/last.pt | train split | ema weights
 fid 18.472
 
 10000 generated vs 10000 real images
-50 ddim steps | guidance 2
+50 ddim steps (uniform spacing) | guidance 2
 ```
 
 The Inception weights (~100 MB) download on first use into the usual torch hub
 cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
+
+### The reference features are cached
+
+Half of every score is the real images, and that half does not depend on the
+checkpoint or on any sampling setting: for a given dataset, split, resolution
+and image count it is the same images through the same network every time. So
+it is computed once and kept, under `<data_root>/fid_cache`.
+
+This is what makes a sweep affordable. Without it, five guidance scales at
+`--num-images 10000` push 50,000 real images through Inception-v3 to compute
+one number five times:
+
+```bash
+for g in 1 2 3 4 5; do
+  ./run.sh fid --checkpoint checkpoints/last.pt --guidance $g
+done
+```
+
+Only the first of those pays for the real half; the rest read it back and go
+straight to generating.
+
+Everything that moves the statistics is part of the entry's name, so changing
+`--split`, `--num-images`, `image_size` or the feature network is a miss rather
+than a stale read, and a file that cannot be read is treated as absent. Nothing
+you can do to the cache changes a score — only how long it takes.
+
+An entry is about 33 MB (the covariance is 2048 x 2048 in float64, which is the
+precision the accumulation needs). Delete `<data_root>/fid_cache` whenever you
+want the space back; the next score simply recomputes. `--no-cache` skips the
+cache for one run without deleting anything, which is the flag to reach for if
+you ever want to confirm an entry against a fresh pass.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -569,10 +663,12 @@ cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
 | `--data-root` | the checkpoint's | Dataset directory |
 | `--steps` | the checkpoint's | Denoising steps per sample |
 | `--sampler` | the checkpoint's | `ddim` or `dpmpp`; hold it fixed across compared checkpoints |
+| `--spacing` | the checkpoint's | `uniform` or `quadratic`; hold it fixed too |
 | `--eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `--guidance` | the checkpoint's | Classifier-free guidance scale |
 | `--guidance-rescale` | the checkpoint's | Guidance rescale factor; sweep it jointly with `--guidance` |
 | `--no-ema` | off | Sample the raw weights instead of the EMA |
+| `--no-cache` | off | Recompute the real images' features instead of reusing them |
 | `--seed` | 0 | Fixes the samples; change it to redraw |
 | `--device` | auto | `cuda`, `cpu`, … |
 
@@ -1042,6 +1138,7 @@ starting it over, not `--resume`.
 | `num_samples` | 16 | Images per grid |
 | `sampler` | `ddim` | Or `dpmpp` (DPM-Solver++(2M)), which needs about a third of the steps |
 | `sample_steps` | 50 | Denoising steps for those grids; 15-20 is plenty for `dpmpp` |
+| `sample_spacing` | `uniform` | Or `quadratic`, which packs the steps near `t = 0`; free, and worth it at low `sample_steps` |
 | `out_dir` | `contents` | Sample grids |
 | `ckpt_dir` | `checkpoints` | Checkpoints |
 | `device` | auto | `cuda` when available, else `cpu` |

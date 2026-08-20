@@ -77,6 +77,86 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
 
+  smoke:
+    name: End-to-end smoke run
+    runs-on: ubuntu-latest
+    # The unit tests mock the dataloader and never run the CLI, so nothing else
+    # here would notice a config field that stopped reaching the trainer, a
+    # checkpoint that no longer round-trips, or a subcommand wired to the wrong
+    # argument. This runs the quickstart from the README, start to finish, on
+    # the config that exists for exactly that purpose.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --no-sources
+
+      # MNIST is 63 MB from a third-party mirror. Caching it keeps a run from
+      # depending on that mirror being up, and takes the download off every
+      # build but the first.
+      - name: Cache MNIST
+        uses: actions/cache@v4
+        with:
+          path: data/MNIST
+          key: mnist-v1
+
+      - name: Train one epoch
+        run: uv run tinydiffusion train --config configs/smoke.toml --set num_workers=2
+
+      - name: Sample the checkpoint
+        run: >-
+          uv run tinydiffusion sample
+          --checkpoint runs/smoke/checkpoints/last.pt
+          --out runs/smoke/gen.png --num-images 8 --labels 0,1,2,3
+
+      # The other spacing and the other sampler, so neither can rot unnoticed:
+      # only this job ever runs them against a real checkpoint.
+      - name: Sample with the fast solver on a quadratic grid
+        run: >-
+          uv run tinydiffusion sample
+          --checkpoint runs/smoke/checkpoints/last.pt
+          --out runs/smoke/gen_dpmpp.png --num-images 8
+          --sampler dpmpp --steps 15 --spacing quadratic
+
+      - name: Score the checkpoint
+        run: uv run tinydiffusion eval --checkpoint runs/smoke/checkpoints/best.pt
+
+      - name: Resume from the checkpoint
+        # Nothing to run — the checkpoint already covers the config's one epoch
+        # — but it exercises the compatibility check and the config round trip,
+        # which is where a resume actually breaks.
+        run: uv run tinydiffusion train --resume runs/smoke/checkpoints/last.pt
+
+      - name: Check the run produced what it promises
+        run: |
+          set -euo pipefail
+          expected=(
+            runs/smoke/checkpoints/last.pt
+            runs/smoke/checkpoints/best.pt
+            runs/smoke/contents/sample_0001.png
+            runs/smoke/metrics.jsonl
+            runs/smoke/gen.png
+            runs/smoke/gen_dpmpp.png
+          )
+          for f in "${expected[@]}"; do
+            test -s "$f" || { echo "missing or empty: $f"; exit 1; }
+          done
+
+      - name: Upload the generated digits
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-samples
+          path: runs/smoke/*.png
+          if-no-files-found: warn
+
   build:
     name: Build distribution
     runs-on: ubuntu-latest

@@ -8,6 +8,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Selectable sampling timestep spacing (`sample_spacing`, `--spacing`). The
+  quadratic subsequence had been implemented and tested since the DDIM sampler
+  landed but no config or flag could reach it, so every sampler ran uniform.
+  `quadratic` packs the steps towards `t = 0`, where a short chain has least
+  room to correct itself, for the same number of network evaluations — the
+  DDIM paper's finding on CIFAR-10 at low step counts. Registered the same way
+  samplers are, so both `ddim` and `dpmpp` take it, and available on `sample`,
+  `fid`, the sample server and the per-epoch training grids. `uniform` remains
+  the default, since the two are hard to tell apart above about 50 steps.
+- A disk cache for the reference half of a FID score
+  (`tinydiffusion.metrics.cache`). The real images' features depend on the
+  dataset, split, resolution and image count and on nothing else — not the
+  checkpoint, not any sampling setting — so sweeping `--guidance` over five
+  values was pushing 50,000 real images through Inception-v3 to compute one
+  number five times. They are now computed once and kept under
+  `<data_root>/fid_cache`, keyed on every input that moves them, which makes a
+  stale read a miss rather than a wrong score; an unreadable or truncated entry
+  is treated as absent. Roughly halves every score after the first, and
+  `--no-cache` opts out. Entries are about 33 MB each, since the covariance is
+  2048 x 2048 in the float64 the accumulation needs.
+- `--set field=value` on `train`, repeatable, reaching every config field
+  without editing a file — which is what makes a sweep a shell loop rather than
+  a directory of near-identical TOMLs. Values are parsed as TOML, so they type
+  themselves exactly as the same text would in a config file, and anything TOML
+  cannot read is taken as a bare string so paths and registry names need no
+  quoting. Unknown field names are refused and the result is validated as a
+  file's would be. Applied after the named flags, so it wins where both spell
+  the same field.
+- An end-to-end smoke job in CI: `configs/smoke.toml` trained for one epoch,
+  then sampled with both samplers and both spacings, scored, and resumed. The
+  unit tests mock the dataloader and never run the CLI, so nothing else in CI
+  would notice a config field that stopped reaching the trainer or a subcommand
+  wired to the wrong argument. The generated grid is uploaded as an artifact.
+- `FeatureStats.state_dict` / `from_state_dict`, the round trip the FID cache
+  is built on. The raw moments are what is stored, so a restored accumulator
+  can still be extended with `merge` or `update`.
 - Pure float16 training (`full_fp16 = true`), the alternative to autocast: the
   U-Net's convolutions hold float16 weights and the optimiser steps a
   flattened float32 master copy of them, so the convolutions run with no
@@ -232,6 +268,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Values shift slightly against runs scored before this change.
 
 ### Changed
+
+- The training loop no longer reads the loss and gradient norm back from the
+  device on every batch. Both were fetched with `.item()` purely to log them,
+  and each fetch blocks the CPU until the GPU catches up, which stops the loop
+  queueing the next batch's work — the cost is the pipeline bubble, not the
+  copy. They are now buffered on the device and fetched a run of batches at a
+  time (`DRAIN_EVERY`), which is the same reasoning `QUARTILE_EVERY` already
+  applied to the per-quartile losses. Every logged number is unchanged, down to
+  the smoothed loss, and there is a test that asserts exactly that; the only
+  visible difference is that the progress bar's loss updates every eighth batch
+  rather than every batch. The gradient scaler's own scale check remains a sync
+  on fp16, which is inherent to it.
+- `fid` reports the sampler and spacing it drew with alongside the step count,
+  both of which move the score.
+- The sample server's status endpoint reports its `sampler` and
+  `sample_spacing`.
 
 - `train --resume` without `--config` now continues the checkpoint's own
   config (`training.checkpoints.config_from_checkpoint`) instead of the

@@ -62,6 +62,7 @@ from tinydiffusion.utils.seed import seed_everything
 from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
 
 __all__ = [
+    "DRAIN_EVERY",
     "QUARTILE_EVERY",
     "epoch_seed",
     "reference_batch",
@@ -80,6 +81,71 @@ ever read as an epoch mean, and every batch draws its timesteps independently,
 so sampling one batch in eight measures the same thing for an eighth of the
 overhead.
 """
+
+DRAIN_EVERY = 8
+"""Batches between host reads of the per-batch metrics.
+
+Same reasoning as :data:`QUARTILE_EVERY`, applied to the two values every batch
+produces: the loss and the gradient norm. Reading either with ``.item()`` blocks
+the CPU until the GPU has caught up, which stops the loop queueing the next
+batch's work while the current one is still running — so the cost is not the
+copy but the pipeline bubble behind it.
+
+Nothing needs those values *at* the batch that produced them. They are logged as
+an epoch mean and displayed as a smoothed average, so they are buffered on the
+device and fetched a run at a time by :func:`_drain_metrics`, which turns a
+sync per batch into one per eight. The numbers are unchanged — the same values
+in the same order, read later.
+
+The progress bar's loss therefore updates every eighth batch rather than every
+batch, which is the whole of the visible difference.
+"""
+
+
+def _drain_metrics(
+    pending: list[dict[str, torch.Tensor | float]],
+    logger: RunLogger,
+    loss_ema: float | None,
+) -> float | None:
+    """Read a run of buffered per-batch metrics back to the host, in one transfer.
+
+    Every device tensor across every buffered batch is stacked and copied in a
+    single operation, so the whole run costs one synchronisation rather than
+    one per value. The batches are then replayed into the logger in the order
+    they were produced, which is what keeps the smoothed loss identical to the
+    one an unbuffered loop would have computed.
+
+    Args:
+        pending: buffered metrics, oldest first. Values may be device tensors
+            or plain floats; the list is emptied.
+        logger: where the resolved metrics are accumulated.
+        loss_ema: the smoothed loss so far, or None before the first batch.
+
+    Returns:
+        The smoothed loss after replaying every buffered batch, or `loss_ema`
+        unchanged if there was nothing buffered.
+    """
+    if not pending:
+        return loss_ema
+
+    tensors = [
+        value for batch in pending for value in batch.values() if isinstance(value, torch.Tensor)
+    ]
+    # One stack, one copy. Built in the same order the substitution below walks,
+    # so the values land back on the keys they came from.
+    values = iter(torch.stack(tensors).tolist() if tensors else ())
+
+    for batch in pending:
+        resolved = {
+            key: next(values) if isinstance(value, torch.Tensor) else value
+            for key, value in batch.items()
+        }
+        loss = resolved["train/loss"]
+        loss_ema = loss if loss_ema is None else 0.9 * loss_ema + 0.1 * loss
+        logger.accumulate(**resolved)
+
+    pending.clear()
+    return loss_ema
 
 
 def _can_compile(device_type: str) -> bool:
@@ -291,6 +357,7 @@ def save_samples(
             rescale=cfg.guidance_rescale,
         ),
         noise=noise,
+        spacing=cfg.sample_spacing,
     )
     reference = real[: cfg.num_samples].to(cfg.device)
     grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
@@ -644,6 +711,9 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             loss_ema: float | None = None
             epoch_start = time.perf_counter()
             images = 0
+            # Metrics for batches whose values are still on the device. Drained
+            # a run at a time; see DRAIN_EVERY.
+            pending: list[dict[str, torch.Tensor | float]] = []
 
             with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
                 for batch, (x, y) in enumerate(pbar):
@@ -691,7 +761,10 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                     # untyped call.
                     scaler.scale(loss / group_size).backward()  # type: ignore[no-untyped-call]
 
-                    grad_norm: float | None = None
+                    # Left as a device tensor rather than read here: it is
+                    # only ever logged, so it rides the same deferred transfer
+                    # the loss does.
+                    grad_norm: torch.Tensor | None = None
                     stepped = True
                     if applies:
                         if master_params is not None:
@@ -706,7 +779,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                             scaler.unscale_(optim)
                             # The pre-clip norm comes back for free; it is the first
                             # thing to look at when a loss curve goes flat or spikes.
-                            grad_norm = float(nn.utils.clip_grad_norm_(step_params, cfg.grad_clip))
+                            grad_norm = nn.utils.clip_grad_norm_(step_params, cfg.grad_clip)
 
                         scale_before = scaler.get_scale()
                         scaler.step(optim)
@@ -734,19 +807,21 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                                 ema.update(diffusion.net)
                             sched.step()
 
-                    value = loss.item()
-                    loss_ema = value if loss_ema is None else 0.9 * loss_ema + 0.1 * value
-                    pbar.set_postfix(loss=f"{loss_ema:.4f}")
-
                     images += x.shape[0]
-                    batch_metrics = {"train/loss": value}
+                    # Detached and normalised to float32 so the whole buffer
+                    # stacks: under autocast the loss can come back as float16
+                    # while the gradient norm, taken on float32 parameters,
+                    # does not.
+                    batch_metrics: dict[str, torch.Tensor | float] = {
+                        "train/loss": loss.detach().float()
+                    }
                     if applies:
                         # Only meaningful where a step was attempted; recording
                         # them per micro-batch would dilute the rate by
                         # grad_accum and log a stale norm alongside it.
                         batch_metrics["train/skipped_step"] = float(not stepped)
                     if grad_norm is not None:
-                        batch_metrics["train/grad_norm"] = grad_norm
+                        batch_metrics["train/grad_norm"] = grad_norm.detach().float()
                     if batch % QUARTILE_EVERY == 0:
                         batch_metrics |= {
                             f"train/{name}": quartile_loss
@@ -754,7 +829,12 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                                 terms.per_sample.float(), terms.timesteps, cfg.num_timesteps
                             ).items()
                         }
-                    logger.accumulate(**batch_metrics)
+                    pending.append(batch_metrics)
+
+                    if len(pending) >= DRAIN_EVERY:
+                        loss_ema = _drain_metrics(pending, logger, loss_ema)
+                        if loss_ema is not None:
+                            pbar.set_postfix(loss=f"{loss_ema:.4f}")
 
                     if interrupts.requested:
                         # Batch boundary: model, optimiser and EMA all agree, so
@@ -781,6 +861,10 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                             print("cancelled without saving")
                         cancelled = True
                         break
+
+            # Covers both a completed epoch and the partial one a Ctrl+C ends
+            # on, so the last few batches reach the flush below either way.
+            loss_ema = _drain_metrics(pending, logger, loss_ema)
 
             elapsed = time.perf_counter() - epoch_start
             logger.set(

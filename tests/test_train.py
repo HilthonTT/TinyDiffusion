@@ -1035,3 +1035,159 @@ def test_the_old_train_mnist_module_still_works_and_warns():
     assert legacy.save_checkpoint is ckpt_module.save_checkpoint
     assert legacy.lr_factor is lr_module.lr_factor
     assert legacy.LAST_CHECKPOINT == ckpt_module.LAST_CHECKPOINT
+
+
+# --- deferred per-batch metrics ---------------------------------------------
+
+
+def test_drain_replays_every_batch_in_order():
+    from tinydiffusion.utils.tracking import null_logger
+
+    pending = [{"train/loss": torch.tensor(float(i))} for i in (1.0, 2.0, 3.0)]
+    with null_logger() as logger:
+        loss_ema = train_module._drain_metrics(pending, logger, None)
+        # Exactly the smoothing an unbuffered loop would have computed.
+        expected = None
+        for value in (1.0, 2.0, 3.0):
+            expected = value if expected is None else 0.9 * expected + 0.1 * value
+        assert loss_ema == pytest.approx(expected)
+        assert logger.means["train/loss"] == pytest.approx(2.0)
+    assert pending == []
+
+
+def test_drain_carries_the_smoothed_loss_across_calls():
+    from tinydiffusion.utils.tracking import null_logger
+
+    with null_logger() as logger:
+        first = train_module._drain_metrics([{"train/loss": torch.tensor(1.0)}], logger, None)
+        second = train_module._drain_metrics([{"train/loss": torch.tensor(2.0)}], logger, first)
+    assert first == pytest.approx(1.0)
+    assert second == pytest.approx(0.9 * 1.0 + 0.1 * 2.0)
+
+
+def test_drain_of_nothing_leaves_the_smoothed_loss_alone():
+    from tinydiffusion.utils.tracking import null_logger
+
+    with null_logger() as logger:
+        assert train_module._drain_metrics([], logger, 0.5) == 0.5
+        assert train_module._drain_metrics([], logger, None) is None
+
+
+def test_drain_keeps_tensor_and_float_metrics_on_their_own_keys():
+    from tinydiffusion.utils.tracking import null_logger
+
+    pending = [
+        {
+            "train/loss": torch.tensor(2.0),
+            "train/skipped_step": 0.0,
+            "train/grad_norm": torch.tensor(7.0),
+        },
+        {"train/loss": torch.tensor(4.0), "train/skipped_step": 1.0},
+    ]
+    with null_logger() as logger:
+        train_module._drain_metrics(pending, logger, None)
+        means = logger.means
+    assert means["train/loss"] == pytest.approx(3.0)
+    assert means["train/grad_norm"] == pytest.approx(7.0)
+    assert means["train/skipped_step"] == pytest.approx(0.5)
+
+
+def test_drain_handles_a_batch_of_floats_only():
+    from tinydiffusion.utils.tracking import null_logger
+
+    with null_logger() as logger:
+        loss_ema = train_module._drain_metrics([{"train/loss": 3.0}], logger, None)
+    assert loss_ema == pytest.approx(3.0)
+
+
+@pytest.fixture
+def many_batches(monkeypatch):
+    """Enough batches that the buffer drains several times mid-epoch."""
+    g = torch.Generator().manual_seed(0)
+    batches = [
+        (
+            torch.randn(4, 1, 16, 16, generator=g),
+            torch.arange(4, dtype=torch.long) % 10,
+        )
+        for _ in range(20)
+    ]
+    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+
+
+DETERMINISTIC_KEYS = ("train/loss", "train/grad_norm", "train/lr", "train/skipped_step")
+
+
+def test_buffering_does_not_change_a_single_logged_number(tmp_path, many_batches, monkeypatch):
+    # The whole claim of DRAIN_EVERY: the same values, read later. Draining
+    # every batch is the old behaviour, so the two runs must agree exactly.
+    def run(log_dir, drain_every):
+        monkeypatch.setattr(train_module, "DRAIN_EVERY", drain_every)
+        cfg = TrainConfig(
+            image_size=16,
+            batch_size=4,
+            num_workers=0,
+            base_channels=8,
+            channel_mult=(1,),
+            num_res_blocks=1,
+            attn_resolutions=(),
+            num_timesteps=10,
+            num_epochs=1,
+            ema_warmup=0,
+            lr_warmup=0,
+            amp=False,
+            device="cpu",
+            sample_every=0,
+            num_samples=2,
+            sample_steps=5,
+            out_dir=tmp_path / f"c{drain_every}",
+            ckpt_dir=tmp_path / f"k{drain_every}",
+            log_dir=log_dir,
+        )
+        train_module.train(cfg)
+        return _records(cfg)[0]
+
+    every_batch = run(tmp_path / "eager", 1)
+    buffered = run(tmp_path / "buffered", 8)
+
+    for key in DETERMINISTIC_KEYS:
+        assert buffered[key] == pytest.approx(every_batch[key], rel=0, abs=0), key
+    quartiles = {k for k in every_batch if k.startswith("train/loss_q")}
+    assert quartiles
+    for key in quartiles:
+        assert buffered[key] == pytest.approx(every_batch[key], rel=0, abs=0), key
+
+
+def test_a_partial_final_run_still_reaches_the_log(tmp_path, many_batches, monkeypatch):
+    # 20 batches over a buffer of 8 leaves 4 undrained at the end of the epoch.
+    monkeypatch.setattr(train_module, "DRAIN_EVERY", 8)
+    seen = []
+    real_drain = train_module._drain_metrics
+
+    def counting(pending, logger, loss_ema):
+        seen.append(len(pending))
+        return real_drain(pending, logger, loss_ema)
+
+    monkeypatch.setattr(train_module, "_drain_metrics", counting)
+    cfg = TrainConfig(
+        image_size=16,
+        batch_size=4,
+        num_workers=0,
+        base_channels=8,
+        channel_mult=(1,),
+        num_res_blocks=1,
+        attn_resolutions=(),
+        num_timesteps=10,
+        num_epochs=1,
+        ema_warmup=0,
+        lr_warmup=0,
+        amp=False,
+        device="cpu",
+        sample_every=0,
+        num_samples=2,
+        sample_steps=5,
+        out_dir=tmp_path / "contents",
+        ckpt_dir=tmp_path / "checkpoints",
+        log_dir=tmp_path / "runs",
+    )
+    train_module.train(cfg)
+    assert seen == [8, 8, 4]

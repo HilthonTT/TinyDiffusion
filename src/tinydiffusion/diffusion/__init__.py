@@ -1,8 +1,13 @@
 """Forward/reverse diffusion processes, noise schedules and samplers."""
 
 from tinydiffusion.diffusion.ddim import (
+    DEFAULT_SPACING,
+    SPACINGS,
+    TimestepSpacing,
     ddim_sample,
+    get_spacing,
     quadratic_timesteps,
+    spacing_names,
     uniform_timesteps,
 )
 from tinydiffusion.diffusion.ddpm import DDPM, LossTerms
@@ -53,7 +58,9 @@ from tinydiffusion.diffusion.timesteps import (
 __all__ = [
     "DDPM",
     "DEFAULT_SAMPLER",
+    "DEFAULT_SPACING",
     "SAMPLERS",
+    "SPACINGS",
     "ClassifierFreeGuidance",
     "Conditioned",
     "Diffusion",
@@ -66,6 +73,7 @@ __all__ = [
     "ModelVarType",
     "Sampler",
     "TimestepSampler",
+    "TimestepSpacing",
     "UniformSampler",
     "conditioned",
     "cosine_beta_schedule",
@@ -77,6 +85,7 @@ __all__ = [
     "drop_labels",
     "enforce_zero_terminal_snr",
     "get_sampler",
+    "get_spacing",
     "initial_latent",
     "linear_beta_schedule",
     "mean_flat",
@@ -85,6 +94,7 @@ __all__ = [
     "quadratic_timesteps",
     "rescale_guided",
     "sampler_names",
+    "spacing_names",
     "timestep_sampler",
     "uniform_timesteps",
 ]

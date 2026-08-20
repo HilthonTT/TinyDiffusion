@@ -46,6 +46,13 @@ end to end (~28 s per epoch on an RTX 5060, ~3.5 min on a CPU). The real run is
 ./run.sh train --config configs/mnist.toml
 ```
 
+Any config field can be overridden from the command line with `--set`, which is
+what turns a sweep into a shell loop:
+
+```bash
+./run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
+```
+
 MNIST (63 MB) downloads itself on first use. Each epoch writes a sample grid —
 generated digits above real ones — and a resumable checkpoint. Afterwards,
 `sample` generates images from any checkpoint and `eval` scores it on the
@@ -62,6 +69,10 @@ with real ones in Inception-v3 feature space:
 ```bash
 ./run.sh fid --checkpoint checkpoints/last.pt --num-images 10000
 ```
+
+The real images' half of that score does not depend on the checkpoint, so it is
+computed once and cached under `data/fid_cache` — which is what makes sweeping
+`--guidance` or `--steps` affordable.
 
 `serve` puts a checkpoint behind a JSON API, for anything that is not a shell:
 
@@ -131,6 +142,8 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   deterministic DDIM and ancestral DDPM. `diffusion/dpm_solver.py` is
   DPM-Solver++(2M), which reaches the same place in 15 to 20 steps for the same
   cost per step; `--sampler` and the `sampler` config field pick between them.
+  `--spacing quadratic` puts that budget of steps where a short chain needs it,
+  packed towards `t = 0`, for no extra network evaluations.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
 

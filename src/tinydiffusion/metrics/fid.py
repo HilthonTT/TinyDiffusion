@@ -1,5 +1,8 @@
 """Frechet Inception Distance, and the streaming statistics it is computed from."""
 
+from collections.abc import Mapping
+from typing import Any
+
 import torch
 
 
@@ -163,6 +166,56 @@ class FeatureStats:
         self.n += other.n
         self.sum += other.sum.to(self.device)
         self.outer += other.outer.to(self.device)
+
+    def state_dict(self) -> dict[str, torch.Tensor | int]:
+        """The accumulator's contents, in a form that survives a round trip to disk.
+
+        The raw sums rather than the mean and covariance they derive: they are
+        what :meth:`merge` adds, so a restored set can still be extended, and
+        the covariance stays a function of the accumulated moments rather than
+        of a value that was rounded on the way out.
+
+        Returns:
+            A mapping of plain tensors and ints, ready for :func:`torch.save`
+            under ``weights_only``.
+        """
+        return {"dim": self.dim, "n": self.n, "sum": self.sum.cpu(), "outer": self.outer.cpu()}
+
+    @classmethod
+    def from_state_dict(
+        cls, state: Mapping[str, Any], *, device: torch.device | str = "cpu"
+    ) -> FeatureStats:
+        """Rebuild statistics from a :meth:`state_dict`.
+
+        Args:
+            state: a mapping produced by :meth:`state_dict`.
+            device: device to accumulate on from here on.
+
+        Returns:
+            The restored statistics.
+
+        Raises:
+            ValueError: if a key is missing, or the tensors do not have the
+                shapes ``dim`` calls for. Both mean the payload is not one this
+                class wrote, so it is rejected rather than half-loaded.
+        """
+        try:
+            dim, n = int(state["dim"]), int(state["n"])
+            total, outer = state["sum"], state["outer"]
+        except KeyError as exc:
+            raise ValueError(f"feature statistics are missing {exc} key") from None
+        stats = cls(dim, device=device)
+        if total.shape != (dim,) or outer.shape != (dim, dim):
+            raise ValueError(
+                f"feature statistics for dim={dim} must hold ({dim},) and ({dim}, {dim}) "
+                f"tensors, got {tuple(total.shape)} and {tuple(outer.shape)}"
+            )
+        if n < 0:
+            raise ValueError(f"feature count must not be negative, got {n}")
+        stats.n = n
+        stats.sum = total.to(device=stats.device, dtype=torch.float64)
+        stats.outer = outer.to(device=stats.device, dtype=torch.float64)
+        return stats
 
     def reset(self) -> None:
         """Drop everything seen so far, keeping the dimension and device."""

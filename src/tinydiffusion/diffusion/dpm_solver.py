@@ -15,7 +15,7 @@ project produces can be drawn from with either.
 import torch
 import torch.nn as nn
 
-from tinydiffusion.diffusion.ddim import uniform_timesteps
+from tinydiffusion.diffusion.ddim import DEFAULT_SPACING, get_spacing
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.latents import initial_latent
 from tinydiffusion.diffusion.prediction import predict_xstart_eps
@@ -37,6 +37,7 @@ def dpmpp_sample(
     clip_denoised: bool = True,
     noise: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
+    spacing: str = DEFAULT_SPACING,
 ) -> torch.Tensor:
     """Sample with the second-order multistep DPM-Solver++.
 
@@ -63,13 +64,18 @@ def dpmpp_sample(
             a fresh one.
         generator: RNG for the starting latent. None uses the global RNG. The
             chain itself is deterministic, so this is the only draw there is.
+        spacing: which subsequence of the training schedule to visit; a key of
+            :data:`~tinydiffusion.diffusion.ddim.SPACINGS`. The step ratio the
+            second-order term is built from is computed per step, so a
+            non-uniform grid stays correct. Ignored when `timesteps` is given.
 
     Returns:
         Tensor of shape ``(num_samples, *size)``.
 
     Raises:
-        ValueError: if `eta` is not 0, `noise` is not shaped
-            ``(num_samples, *size)``, or `generator` is on another device.
+        ValueError: if `eta` is not 0, no spacing goes by that name, `noise` is
+            not shaped ``(num_samples, *size)``, or `generator` is on another
+            device.
     """
     if eta != 0.0:
         raise ValueError(f"dpmpp is a deterministic solver, so eta must be 0, got {eta}")
@@ -77,7 +83,7 @@ def dpmpp_sample(
     net = model if model is not None else diffusion.net
 
     if timesteps is None:
-        timesteps = uniform_timesteps(diffusion.num_timesteps, num_steps)
+        timesteps = get_spacing(spacing)(diffusion.num_timesteps, num_steps)
     ts = timesteps.to(device)
     # As in DDIM, the last step lands on a t=-1 sentinel whose alphabar is 1.
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])

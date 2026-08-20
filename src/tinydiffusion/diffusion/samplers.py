@@ -41,6 +41,7 @@ class Sampler(Protocol):
         clip_denoised: bool = ...,
         noise: torch.Tensor | None = ...,
         generator: torch.Generator | None = ...,
+        spacing: str = ...,
     ) -> torch.Tensor:
         """Draw ``num_samples`` images. See :func:`ddim_sample` for the arguments."""
         ...

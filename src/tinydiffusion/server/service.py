@@ -184,6 +184,7 @@ class SamplerService:
                     rescale=rescale,
                 ),
                 generator=generator,
+                spacing=self._cfg.sample_spacing,
             )
 
         path = self.image_dir / f"{uuid.uuid4().hex}.png"
@@ -262,6 +263,8 @@ class SamplerService:
             "num_classes": self._cfg.num_classes,
             "num_timesteps": self._cfg.num_timesteps,
             "default_steps": self.default_steps,
+            "sampler": self._cfg.sampler,
+            "sample_spacing": self._cfg.sample_spacing,
             "default_guidance": self.default_guidance,
             "default_guidance_rescale": self.default_guidance_rescale,
             "max_images": self.config.max_images,

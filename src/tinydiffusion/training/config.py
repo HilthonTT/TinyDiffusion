@@ -9,6 +9,7 @@ from typing import Any, Literal, Self
 import torch
 
 from tinydiffusion.data.datasets import DEFAULT_DATASET, DatasetSpec, dataset_spec
+from tinydiffusion.diffusion.ddim import DEFAULT_SPACING, get_spacing
 from tinydiffusion.diffusion.gaussian_diffusion import (
     LossType,
     LossWeighting,
@@ -56,6 +57,16 @@ class TrainConfig:
     the same problem, attacking the variance of *which* timesteps get drawn
     rather than what they are worth once drawn; it earns its keep on the
     variational objectives and does little for plain MSE.
+
+    ``sample_spacing`` chooses which subsequence of the training schedule a
+    sampler visits. ``uniform`` spreads the steps evenly; ``quadratic`` packs
+    them towards ``t = 0``, which is where a short chain has the least room to
+    correct itself and is what the DDIM paper found better on CIFAR-10 at low
+    step counts. It costs nothing either way — the same number of network
+    evaluations, differently placed — so it is worth trying whenever
+    ``sample_steps`` is small enough to matter. Note that this is a *sampling*
+    setting and unrelated to ``timestep_sampler``, which decides which
+    timesteps a training batch is drawn at.
 
     ``dataset`` names an entry in
     :data:`~tinydiffusion.data.datasets.DATASETS`, which is where the channel
@@ -202,6 +213,7 @@ class TrainConfig:
     num_samples: int = 16
     sampler: str = DEFAULT_SAMPLER
     sample_steps: int = 50
+    sample_spacing: str = DEFAULT_SPACING
     out_dir: Path = Path("contents")
     ckpt_dir: Path = Path("checkpoints")
     keep_best: bool = True
@@ -258,9 +270,10 @@ class TrainConfig:
             raise ValueError(
                 f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
             )
-        # Raises on an unregistered name; checked here so a typo costs nothing
-        # rather than being found by the first per-epoch grid.
+        # Both raise on an unregistered name; checked here so a typo costs
+        # nothing rather than being found by the first per-epoch grid.
         get_sampler(self.sampler)
+        get_spacing(self.sample_spacing)
         timestep_sampler(self.timestep_sampler, self.num_timesteps)
         if self.min_snr_gamma <= 0:
             raise ValueError(f"min_snr_gamma must be positive, got {self.min_snr_gamma}")

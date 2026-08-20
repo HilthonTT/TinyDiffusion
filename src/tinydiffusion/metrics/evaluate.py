@@ -9,9 +9,15 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from tinydiffusion.data.datasets import image_dataloader
+from tinydiffusion.diffusion.ddim import DEFAULT_SPACING
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
+from tinydiffusion.metrics.cache import (
+    load_reference_stats,
+    reference_stats_path,
+    save_reference_stats,
+)
 from tinydiffusion.metrics.fid import FeatureStats, fid_from_stats
 from tinydiffusion.metrics.inception import FeatureExtractor
 from tinydiffusion.sampling import load_for_sampling
@@ -35,6 +41,10 @@ class FidResult:
         num_real: how many real images they were compared against.
         feature_dim: width of the feature space the score was taken in.
         num_steps: DDIM steps used to draw the samples.
+        sampler: which sampler drew them.
+        spacing: which timestep spacing they were drawn over. Like the sampler
+            it moves the score without changing the model, so it is recorded
+            with the count of steps it placed.
         guidance: the guidance scale used, or None if unconditional.
         guidance_rescale: the guidance rescale factor used. 0 is plain
             guidance, and it moves the score like any other sampling setting,
@@ -52,6 +62,8 @@ class FidResult:
     guidance: float | None
     guidance_rescale: float
     used_ema: bool
+    sampler: str = DEFAULT_SAMPLER
+    spacing: str = DEFAULT_SPACING
 
     @property
     def undersampled(self) -> bool:
@@ -76,7 +88,7 @@ class FidResult:
             f"fid {self.fid:.3f}",
             "",
             f"{self.num_generated} generated vs {self.num_real} real images",
-            f"{self.num_steps} ddim steps"
+            f"{self.num_steps} {self.sampler} steps ({self.spacing} spacing)"
             + (f" | guidance {self.guidance:g}" if self.guidance is not None else "")
             + (
                 f" | rescale {self.guidance_rescale:g}"
@@ -136,6 +148,7 @@ def generate_images(
     guidance: float,
     guidance_rescale: float = 0.0,
     sampler: str = DEFAULT_SAMPLER,
+    spacing: str = DEFAULT_SPACING,
 ) -> Iterable[torch.Tensor]:
     """Draw samples in batches, yielding each as it is produced.
 
@@ -156,6 +169,8 @@ def generate_images(
         sampler: which sampler to draw with; a key of
             :data:`~tinydiffusion.diffusion.samplers.SAMPLERS`. Defaults to
             DDIM, which is what every caller wanted before there was a choice.
+        spacing: which subsequence of the training schedule to visit; a key of
+            :data:`~tinydiffusion.diffusion.ddim.SPACINGS`.
 
     Yields:
         ``(b, C, image_size, image_size)`` batches in [-1, 1].
@@ -189,6 +204,7 @@ def generate_images(
                 scale=guidance,
                 rescale=guidance_rescale,
             ),
+            spacing=spacing,
         )
         produced += batch
 
@@ -204,12 +220,14 @@ def fid_for_checkpoint(
     num_steps: int | None = None,
     eta: float = 0.0,
     sampler: str | None = None,
+    spacing: str | None = None,
     guidance: float | None = None,
     guidance_rescale: float | None = None,
     use_ema: bool = True,
     seed: int = 0,
     device: str | None = None,
     extractor: FeatureExtractor | None = None,
+    cache: bool = True,
     progress: bool = True,
 ) -> FidResult:
     """Sample a checkpoint and score the samples against real images.
@@ -237,6 +255,9 @@ def fid_for_checkpoint(
         sampler: which sampler to draw with, or None for the checkpoint's own.
             It moves the score like any other sampling setting, so hold it
             fixed across the checkpoints being compared.
+        spacing: which timestep spacing to draw over, or None for the
+            checkpoint's own. Also a sampling setting, and held fixed for the
+            same reason.
         guidance: classifier-free guidance scale, or None for the checkpoint's.
             Worth sweeping: guidance trades diversity for fidelity, and FID
             usually has an interior minimum somewhere above 1.
@@ -249,6 +270,12 @@ def fid_for_checkpoint(
         device: device to score on. Defaults to CUDA when available.
         extractor: feature network, or None to load Inception-v3, downloading
             the weights on first use.
+        cache: reuse the real side's features from disk when an entry for this
+            exact reference set exists, and write one when it does not. The
+            real half of the score does not depend on the checkpoint or on any
+            sampling setting, so a sweep over ``guidance`` or ``num_steps``
+            otherwise recomputes the identical statistics once per point. See
+            :mod:`tinydiffusion.metrics.cache`; False forces the recomputation.
         progress: draw progress bars.
 
     Returns:
@@ -256,7 +283,8 @@ def fid_for_checkpoint(
 
     Raises:
         ValueError: if ``num_images`` is below 2, leaving the covariance
-            undefined, or ``split`` is not ``"train"`` or ``"test"``.
+            undefined, ``split`` is not ``"train"`` or ``"test"``, or no
+            sampler or spacing goes by the name given.
     """
     if num_images < 2:
         raise ValueError(f"num_images must be at least 2 for a covariance, got {num_images}")
@@ -267,6 +295,7 @@ def fid_for_checkpoint(
     net = ema.module if use_ema else diffusion.net
     steps = num_steps if num_steps is not None else cfg.sample_steps
     draw_with = cfg.sampler if sampler is None else sampler
+    space_with = cfg.sample_spacing if spacing is None else spacing
     scale = cfg.guidance if guidance is None else guidance
     rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
     batch = batch_size if batch_size is not None else cfg.batch_size
@@ -286,30 +315,47 @@ def fid_for_checkpoint(
         # anything else is the caller's to place.
         extractor = extractor.to(cfg.device)
 
-    loader = image_dataloader(
-        cfg.dataset_spec(),
-        data_root if data_root is not None else cfg.data_root,
-        batch_size=batch,
-        train=split == "train",
+    root = data_root if data_root is not None else cfg.data_root
+    # Every input the reference statistics depend on is in the path, so a hit
+    # is the same set of images through the same network — and a change to any
+    # of them is a miss rather than a stale read.
+    cache_path = reference_stats_path(
+        root,
+        dataset=cfg.dataset,
+        split=split,
+        num_images=num_images,
         image_size=cfg.image_size,
-        num_workers=cfg.num_workers,
-        # Fixed order and no dropped tail, so the reference side of the score
-        # depends only on the split and the image count.
-        shuffle=False,
-        drop_last=False,
+        extractor=extractor,
     )
-    real_batches = (x.to(cfg.device, non_blocking=True) for x, _ in loader)
+    real = load_reference_stats(cache_path, dim=extractor.dim) if cache else None
+    if real is None:
+        loader = image_dataloader(
+            cfg.dataset_spec(),
+            root,
+            batch_size=batch,
+            train=split == "train",
+            image_size=cfg.image_size,
+            num_workers=cfg.num_workers,
+            # Fixed order and no dropped tail, so the reference side of the
+            # score depends only on the split and the image count — which is
+            # also what makes it safe to cache.
+            shuffle=False,
+            drop_last=False,
+        )
+        real_batches = (x.to(cfg.device, non_blocking=True) for x, _ in loader)
 
-    real = accumulate_features(
-        tqdm(
-            real_batches,
-            desc=f"fid real ({split})",
-            total=-(-num_images // batch),
-            disable=not progress,
-        ),
-        extractor,
-        limit=num_images,
-    )
+        real = accumulate_features(
+            tqdm(
+                real_batches,
+                desc=f"fid real ({split})",
+                total=-(-num_images // batch),
+                disable=not progress,
+            ),
+            extractor,
+            limit=num_images,
+        )
+        if cache:
+            save_reference_stats(cache_path, real)
 
     seed_everything(seed)
     generated = accumulate_features(
@@ -325,6 +371,7 @@ def fid_for_checkpoint(
                 guidance=scale,
                 guidance_rescale=rescale,
                 sampler=draw_with,
+                spacing=space_with,
             ),
             desc="fid generated",
             total=-(-num_images // batch),
@@ -349,4 +396,6 @@ def fid_for_checkpoint(
         guidance=scale if cfg.num_classes is not None else None,
         guidance_rescale=rescale,
         used_ema=use_ema,
+        sampler=draw_with,
+        spacing=space_with,
     )
