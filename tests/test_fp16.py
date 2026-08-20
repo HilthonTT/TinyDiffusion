@@ -342,6 +342,24 @@ def test_full_fp16_falls_back_to_float32_off_cuda(fp16_cfg, fake_loader, capsys)
 
 
 @pytest.mark.gpu
+def test_a_bf16_run_falls_back_to_fp16_where_the_card_only_emulates_it(
+    fp16_cfg, fake_loader, monkeypatch, capsys
+):
+    # torch reports emulated bf16 as supported, and emulating it costs nearly
+    # five times what the fp16 it was chosen over does. The run has to notice.
+    monkeypatch.setattr(train_module, "bf16_supported", lambda: False)
+    cfg = dataclasses.replace(fp16_cfg, device="cuda", full_fp16=False, amp=True, amp_dtype="bf16")
+
+    train_module.train(cfg)
+
+    out = capsys.readouterr().out
+    assert "emulates bfloat16" in out
+    # And the plan line reports what it actually ran, not what was asked for.
+    assert "amp fp16" in out
+    assert "amp bf16" not in out
+
+
+@pytest.mark.gpu
 def test_a_full_fp16_run_trains_and_hands_back_a_float32_model(fp16_cfg, fake_loader):
     diffusion = train_module.train(dataclasses.replace(fp16_cfg, device="cuda"))
 

@@ -721,10 +721,16 @@ grad_accum = 2          # effective batch of batch_size * grad_accum
 lr_schedule = "cosine"  # decay to zero over the run, after the warmup ramp
 
 [bookkeeping]
-amp_dtype = "bf16"      # no gradient scaler, no skipped steps
+amp_dtype = "bf16"      # no gradient scaler, no skipped steps; Ampere or newer
 compile = true          # torch.compile the training step
 channels_last = true    # measure this one; it can lose on a small model
 ```
+
+`bf16` wants bfloat16 *hardware*, which means Ampere or newer. Older cards can
+emulate it, and emulation is far slower than the fp16 it would be replacing —
+on a Turing card, roughly 1210ms/step against fp16's 258ms — so a run on one
+says so at startup and uses fp16 instead. There is nothing to configure: the
+fallback is automatic, and the startup line reports the dtype actually used.
 
 `full_fp16` is the other half-precision strategy, and an alternative to
 autocast rather than an addition to it. Autocast leaves the weights in float32
@@ -1027,7 +1033,7 @@ starting it over, not `--resume`.
 | `seed` | 0 | Python, NumPy and torch RNGs; with the epoch index, fixes the batch order |
 | `deterministic` | `false` | Force deterministic CUDA kernels and disable the cuDNN autotuner, at a throughput cost |
 | `amp` | `true` | Autocast; ignored off CUDA |
-| `amp_dtype` | `fp16` | Or `bf16`, which runs unscaled but wants Ampere or newer |
+| `amp_dtype` | `fp16` | Or `bf16`, which runs unscaled but needs Ampere or newer; older cards fall back to fp16 rather than emulate it |
 | `full_fp16` | `false` | float16 weights with a float32 master copy, instead of autocast; needs CUDA and `amp_dtype = "fp16"` |
 | `compile` | `false` | `torch.compile` the training step |
 | `channels_last` | `false` | Worth measuring rather than assuming |

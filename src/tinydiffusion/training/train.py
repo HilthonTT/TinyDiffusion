@@ -43,7 +43,12 @@ from tinydiffusion.training.interrupt import interrupt_guard
 from tinydiffusion.training.lr import lr_factor
 from tinydiffusion.training.model import build_model
 from tinydiffusion.training.validation import validation_loss
-from tinydiffusion.utils.device import describe_device, enable_tf32, resolve_device
+from tinydiffusion.utils.device import (
+    bf16_supported,
+    describe_device,
+    enable_tf32,
+    resolve_device,
+)
 from tinydiffusion.utils.fp16 import (
     make_master_params,
     master_params_to_model_params,
@@ -405,10 +410,12 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         print("full_fp16 needs a CUDA device; training in float32 instead")
     use_amp = cfg.amp and device_type == "cuda" and not use_full_fp16
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
-    if use_amp and amp_dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+    if use_amp and amp_dtype is torch.bfloat16 and not bf16_supported():
         # Pre-Ampere. Saying so beats an unexplained slowdown from a dtype the
-        # hardware only emulates.
-        print("this GPU has no bfloat16 support, falling back to fp16")
+        # hardware only emulates — and emulated is exactly what torch reports
+        # as supported, which is why this asks `bf16_supported` rather than
+        # torch directly.
+        print("this GPU emulates bfloat16 rather than running it, falling back to fp16")
         amp_dtype = torch.float16
     if device_type == "cuda":
         # Input shapes are fixed for the whole run, so autotuning pays off once

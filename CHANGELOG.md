@@ -161,6 +161,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `amp_dtype = "bf16"` no longer runs emulated on a card without bfloat16
+  units. The startup check asked `torch.cuda.is_bf16_supported()`, which
+  counts the emulation path and so answers True on pre-Ampere hardware, and
+  the fallback it guards never fired. Measured on a Turing card at the
+  `configs/mnist.toml` settings, that left a bf16 run at ~1210ms/step against
+  fp16's ~258ms and float32's ~326ms — nearly five times slower than either
+  dtype it would have been chosen over, with the startup line still reporting
+  `amp bf16`. The check now asks for native support only.
 - The AMP gradient scaler is no longer restored from a checkpoint written by a
   run that had it disabled. `GradScaler` refuses the empty state dict such a
   run stores, so an fp16 run could not resume a bf16, CPU or `amp = false`
