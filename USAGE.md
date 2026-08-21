@@ -411,6 +411,32 @@ A metric that went to NaN or an infinity — a diverged run, most often — is
 stored as `null`. The bare `NaN` token Python's `json` would otherwise write is
 not JSON, and `jq` and `pandas.read_json` reject a file containing one outright.
 
+### Plotting a run
+
+`plot` turns those records into a figure, which is the shape the questions
+actually have — whether the loss is still falling, whether the held-out score
+has turned back up, and which quarter of the schedule the error sits in. It
+needs the `plots` extra (`uv sync --all-extras`, or
+`pip install 'tinydiffusion[plots]'`):
+
+```bash
+./run.sh plot runs/mnist --out contents/metrics.png
+```
+
+Panels are chosen from what the run logged, so an unconditional run with no
+validation split gets no empty `val/loss` axis. Pass more than one run and they
+share every axis, one line per run, which is how a sweep is read:
+
+```bash
+./run.sh plot runs/baseline runs/min_snr --out contents/compare.png
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `RUN...` | required | Run log directories, or `metrics.jsonl` files |
+| `--out` | `contents/metrics.png` | Image to write; the extension picks the format, so `.svg` works |
+| `--dpi` | 120 | Resolution for raster formats |
+
 TensorBoard is optional and off by default. It needs the `tracking` extra
 (`uv sync --all-extras`, or `pip install 'tinydiffusion[tracking]'`) and writes
 to `log_dir/tb`:
@@ -613,12 +639,17 @@ One caveat: this is a proxy. Lower held-out loss means the network predicts
 noise better, which correlates with sample quality but does not measure it
 directly. For that, use `fid` below — and keep looking at the grids.
 
-## Measuring sample quality with FID
+## Measuring sample quality
 
 `eval` scores the training objective; `fid` scores the thing you actually care
 about. It draws samples, pushes them and an equal number of real images through
-a pretrained Inception-v3, and measures the Frechet distance between the two
-clouds of activations. Lower is better.
+a pretrained Inception-v3, and measures the distance between the two clouds of
+activations.
+
+FID is the default and always reported. Two more are available on request, and
+each answers something FID cannot: `--kid` is unbiased, so it survives the
+small sample counts a single GPU can afford, and `--precision-recall` splits a
+bad score into the two different problems it might be.
 
 ```bash
 ./run.sh fid --checkpoint checkpoints/last.pt
@@ -634,6 +665,94 @@ fid 18.472
 
 The Inception weights (~100 MB) download on first use into the usual torch hub
 cache; see [What gets downloaded, and where](#what-gets-downloaded-and-where).
+
+### KID, when 10,000 samples is too many
+
+FID fits a Gaussian to each cloud, and a 2048-dimensional covariance estimated
+from fewer than ~2048 images is singular. The error that introduces does not
+average out: it is a bias, always upwards, and its size depends on the sample
+count. A FID over 1,000 images is therefore not a noisier estimate of the FID
+over 50,000 — it is a different number, and the two cannot be compared.
+
+KID has no Gaussian in it. It is a kernel distance between the two sets in the
+unbiased form, so its expected value does not move with the sample count, and a
+score over 1,000 images means the same thing as one over 50,000. It also comes
+with a spread, which FID cannot offer at all:
+
+```bash
+./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid
+```
+
+```
+checkpoints/last.pt | train split | ema weights
+fid 34.118
+kid 0.02170 +- 0.00184 (100 subsets of 1000)
+
+2000 generated vs 2000 real images
+50 ddim steps (uniform spacing) | guidance 2
+
+warning: fewer than 2048 images per side, so the covariance is singular and
+the fid is biased upwards. Compare it only with scores taken at the same image
+count.
+```
+
+The warning is about the FID on the line above it, and not about the KID: at
+2,000 images the first number is mostly reporting its own sample count and the
+second is not. Without `--kid` the report says so and points here.
+
+The spread is the useful part. It is how much one subset of 1,000 images
+disagrees with another, so two checkpoints whose KIDs differ by less than it
+have not been told apart — which is exactly the judgement a bare FID invites
+you to get wrong. Hold `--kid-subset-size` fixed across the checkpoints you
+compare, since the spread is a spread over subsets of that size.
+
+This is the metric to reach for during a run, where 10,000 samples through the
+full sampling chain is a long wait for one number.
+
+### Precision and recall, when the score is bad and you need to know why
+
+A single number cannot distinguish a model that makes beautiful images of three
+digits from one that makes all ten badly. They call for opposite fixes, and FID
+and KID both score them the same.
+
+Precision and recall estimate the two clouds' *manifolds* instead — a ball
+around each feature vector reaching its k-th nearest neighbour — and ask how
+much of each lands inside the other:
+
+- **precision** is the fraction of generated images inside the real manifold:
+  how much of what the model makes is realistic.
+- **recall** is the fraction of real images inside the generated manifold: how
+  much of the real data the model reaches.
+
+```bash
+./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --precision-recall
+```
+
+```
+checkpoints/last.pt | train split | ema weights
+fid 34.118
+precision 0.681 | recall 0.412 (k=3)
+
+2000 generated vs 2000 real images
+50 ddim steps (uniform spacing) | guidance 2
+
+warning: fewer than 2048 images per side, so the covariance is singular and
+this score is biased upwards. Compare it only with scores taken at the same
+image count.
+--kid is unbiased at this count and does not have that problem.
+```
+
+Both fractions are honest at this count — it is the FID above them the warning
+is about. The two flags combine, and at these counts they usually should.
+
+Guidance moves them in opposite directions, which is the clearest thing either
+number does: sweeping `--guidance` and watching precision climb while recall
+falls shows you the trade being made, where the FID minimum only tells you
+where it balances.
+
+The cost is quadratic in `--num-images` — every generated image is measured
+against every real one — so this is a flag for the low thousands, not for
+50,000.
 
 ### The reference features are cached
 
@@ -666,6 +785,15 @@ want the space back; the next score simply recomputes. `--no-cache` skips the
 cache for one run without deleting anything, which is the flag to reach for if
 you ever want to confirm an entry against a fresh pass.
 
+`--kid` and `--precision-recall` need the feature vectors themselves rather
+than their moments, so they write a second entry alongside — same name, plus
+`_features`. That one grows with the image count: about 8 KB an image, so 80 MB
+at `--num-images 10000` against the moments' flat 33 MB. It is only written when
+one of those flags actually asked for it, so a FID-only sweep keeps paying the
+smaller price. A moments entry cannot stand in for a feature one, so the first
+`--kid` run re-reads the real images even if a plain `fid` has already been
+scored over the same set.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--checkpoint` | required | Checkpoint to score |
@@ -681,6 +809,11 @@ you ever want to confirm an entry against a fresh pass.
 | `--guidance-rescale` | the checkpoint's | Guidance rescale factor; sweep it jointly with `--guidance` |
 | `--no-ema` | off | Sample the raw weights instead of the EMA |
 | `--no-cache` | off | Recompute the real images' features instead of reusing them |
+| `--kid` | off | Also report the Kernel Inception Distance, with its spread |
+| `--kid-subsets` | 100 | Subsets the KID is averaged over |
+| `--kid-subset-size` | 1000 | Images per KID subset, per side; hold it fixed across compared checkpoints |
+| `--precision-recall` | off | Also report manifold precision and recall |
+| `--neighbours` | 3 | k for the precision/recall manifolds |
 | `--seed` | 0 | Fixes the samples; change it to redraw |
 | `--device` | auto | `cuda`, `cpu`, … |
 
@@ -692,8 +825,8 @@ Read the number as a comparison, never as an absolute:
 - **Small sample counts inflate it.** The Inception feature space is 2048-dimensional,
   so a covariance estimated from fewer than ~2048 images per side is singular and
   the score is biased upwards by an amount that depends on the count. Below that
-  the report says so. Use 10k when the number needs to mean anything, and a few
-  hundred only for a quick smoke test.
+  the report says so, and points at `--kid`, which does not have the problem.
+  Use 10k when the FID needs to mean anything, and `--kid` below that.
 - **It is not the published FID.** Those numbers come from the original
   TensorFlow Inception graph; torchvision's port differs enough to shift the
   absolute value. The ordering it induces over checkpoints is what carries over.

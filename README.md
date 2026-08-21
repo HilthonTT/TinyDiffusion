@@ -74,6 +74,29 @@ The real images' half of that score does not depend on the checkpoint, so it is
 computed once and cached under `data/fid_cache` — which is what makes sweeping
 `--guidance` or `--steps` affordable.
 
+FID needs those 10,000 images to mean anything: it fits a 2048-dimensional
+Gaussian, and a smaller sample biases the score upwards by an amount that
+depends on the sample count. Two more metrics are available for when that is
+the wrong shape of answer:
+
+```bash
+./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid --precision-recall
+```
+
+`--kid` is unbiased, so a score over 2,000 images means the same thing as one
+over 50,000, and it reports a spread — which says whether two checkpoints have
+actually been told apart. `--precision-recall` splits a bad score into its two
+causes: how much of what the model draws is realistic, and how much of the real
+data it reaches. Guidance trades one for the other, and no single number can
+show that.
+
+`plot` draws a run's `metrics.jsonl` — losses, the timestep quartiles, the
+learning rate — as a figure, and several runs on shared axes:
+
+```bash
+./run.sh plot runs/mnist --out contents/metrics.png
+```
+
 `serve` puts a checkpoint behind a JSON API, for anything that is not a shell:
 
 ```bash
@@ -146,6 +169,12 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   packed towards `t = 0`, for no extra network evaluations.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
+- **Measurement** — `metrics/fid.py` summarises a feature set as two moments,
+  which is all FID needs and all that fits in constant memory.
+  `metrics/features.py` keeps the vectors instead, for the two metrics that
+  read pairwise structure: `metrics/kid.py`, an unbiased kernel distance that
+  stays comparable across sample counts, and `metrics/precision_recall.py`,
+  which measures each set's manifold against the other's.
 
 ## Development
 

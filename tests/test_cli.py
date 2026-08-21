@@ -9,6 +9,8 @@ from tinydiffusion import __version__, cli
 from tinydiffusion import version as version_module
 from tinydiffusion.cli import build_parser, main
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES
+from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
+from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
 from tinydiffusion.training.config import TrainConfig
 
 
@@ -440,3 +442,90 @@ def test_fid_defaults_to_using_the_cache():
 def test_no_cache_turns_the_cache_off():
     args = build_parser().parse_args(["fid", "--checkpoint", "m.pt", "--no-cache"])
     assert args.cache is False
+
+
+def test_fid_defaults_leave_the_opt_in_metrics_off():
+    args = build_parser().parse_args(["fid", "--checkpoint", "m.pt"])
+    assert args.kid is False
+    assert args.precision_recall is False
+    assert (args.kid_subsets, args.kid_subset_size) == (
+        DEFAULT_KID_SUBSETS,
+        DEFAULT_KID_SUBSET_SIZE,
+    )
+    assert args.neighbours == DEFAULT_NEIGHBOURS
+
+
+def test_fid_parses_the_metric_flags():
+    args = build_parser().parse_args(
+        [
+            "fid",
+            "--checkpoint",
+            "m.pt",
+            "--kid",
+            "--kid-subsets",
+            "20",
+            "--kid-subset-size",
+            "250",
+            "--precision-recall",
+            "--neighbours",
+            "5",
+        ]
+    )
+    assert (args.kid, args.kid_subsets, args.kid_subset_size) == (True, 20, 250)
+    assert (args.precision_recall, args.neighbours) == (True, 5)
+
+
+def test_the_metric_flags_reach_the_scorer(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeResult:
+        def format(self):
+            return "fid 1.0"
+
+    def fake_fid(checkpoint, **kwargs):
+        seen.update(kwargs)
+        return FakeResult()
+
+    monkeypatch.setattr(cli, "fid_for_checkpoint", fake_fid)
+    main(["fid", "--checkpoint", str(tmp_path / "m.pt"), "--kid", "--precision-recall"])
+    assert seen["kid"] is True
+    assert seen["precision_recall"] is True
+    assert seen["neighbours"] == DEFAULT_NEIGHBOURS
+
+
+def test_plot_defaults():
+    args = build_parser().parse_args(["plot", "runs/mnist"])
+    assert args.command == "plot"
+    assert args.runs == [Path("runs/mnist")]
+    assert args.out == Path("contents/metrics.png")
+    assert args.dpi == 120
+
+
+def test_plot_takes_several_runs():
+    args = build_parser().parse_args(["plot", "runs/a", "runs/b", "--out", "fig.svg"])
+    assert args.runs == [Path("runs/a"), Path("runs/b")]
+    assert args.out == Path("fig.svg")
+
+
+def test_plot_requires_a_run():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["plot"])
+
+
+def test_plot_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_plot(runs, out, **kwargs):
+        seen["runs"], seen["out"] = runs, out
+        return out
+
+    monkeypatch.setattr(cli, "plot_runs", fake_plot)
+    out = tmp_path / "fig.png"
+    assert main(["plot", "runs/mnist", "--out", str(out)]) == 0
+    assert str(out) in capsys.readouterr().out
+    assert seen["runs"] == [Path("runs/mnist")]
+
+
+def test_main_reports_a_run_with_no_metrics(capsys, tmp_path):
+    assert main(["plot", str(tmp_path / "nowhere"), "--out", str(tmp_path / "f.png")]) == 1
+    assert "error:" in capsys.readouterr().out

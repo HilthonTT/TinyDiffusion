@@ -1,4 +1,13 @@
-"""Score a checkpoint's samples against real data with FID."""
+"""Score a checkpoint's samples against real data.
+
+FID is the headline number and always computed. KID and precision/recall are
+opt-in, because they are the ones that need the feature vectors kept rather
+than summarised — see :mod:`tinydiffusion.metrics.features` for what that
+costs. They answer questions FID cannot: whether a score taken over a few
+thousand images means anything (:mod:`tinydiffusion.metrics.kid`), and whether
+a bad score is a quality or a coverage failure
+(:mod:`tinydiffusion.metrics.precision_recall`).
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -14,18 +23,41 @@ from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
 from tinydiffusion.metrics.cache import (
+    load_reference_features,
     load_reference_stats,
+    reference_features_path,
     reference_stats_path,
+    save_reference_features,
     save_reference_stats,
 )
+from tinydiffusion.metrics.features import FeatureBank
 from tinydiffusion.metrics.fid import FeatureStats, fid_from_stats
 from tinydiffusion.metrics.inception import FeatureExtractor
+from tinydiffusion.metrics.kid import (
+    DEFAULT_KID_SUBSET_SIZE,
+    DEFAULT_KID_SUBSETS,
+    KidResult,
+    kid_from_features,
+)
+from tinydiffusion.metrics.precision_recall import (
+    DEFAULT_NEIGHBOURS,
+    PrecisionRecall,
+    precision_recall_from_features,
+)
 from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.utils.seed import seed_everything
 
 DEFAULT_FID_IMAGES = 10_000
 """Samples per side. Below a few thousand the score is dominated by its own bias."""
+
+type FeatureSink = FeatureStats | FeatureBank
+"""What a pass over images can fold its features into.
+
+The moments alone, which is all FID needs and all that fits in constant memory,
+or the vectors themselves, which KID and precision/recall need. The two share
+the ``update``-and-``n`` interface :func:`accumulate_features` uses, and nothing
+else."""
 
 
 @dataclass(slots=True)
@@ -50,6 +82,12 @@ class FidResult:
             guidance, and it moves the score like any other sampling setting,
             so it is recorded alongside the scale it corrects.
         used_ema: whether the EMA weights were sampled.
+        kid: the Kernel Inception Distance and its spread, or None if it was
+            not asked for. Unlike `fid` it is unbiased, so it stays comparable
+            between scores taken over different image counts.
+        precision_recall: the manifold precision and recall, or None if they
+            were not asked for. They split a bad score into its two causes,
+            which neither `fid` nor `kid` can do.
     """
 
     checkpoint: Path
@@ -64,6 +102,8 @@ class FidResult:
     used_ema: bool
     sampler: str = DEFAULT_SAMPLER
     spacing: str = DEFAULT_SPACING
+    kid: KidResult | None = None
+    precision_recall: PrecisionRecall | None = None
 
     @property
     def undersampled(self) -> bool:
@@ -86,6 +126,22 @@ class FidResult:
         lines = [
             f"{self.checkpoint} | {self.split} split | {weights} weights",
             f"fid {self.fid:.3f}",
+        ]
+        if self.kid is not None:
+            # The spread is the point of reporting KID at all: it says whether
+            # the gap between two checkpoints is bigger than the noise in
+            # either measurement.
+            lines.append(
+                f"kid {self.kid.mean:.5f} +- {self.kid.std:.5f} "
+                f"({self.kid.subsets} subsets of {self.kid.subset_size})"
+            )
+        if self.precision_recall is not None:
+            lines.append(
+                f"precision {self.precision_recall.precision:.3f} | "
+                f"recall {self.precision_recall.recall:.3f} "
+                f"(k={self.precision_recall.neighbours})"
+            )
+        lines += [
             "",
             f"{self.num_generated} generated vs {self.num_real} real images",
             f"{self.num_steps} {self.sampler} steps ({self.spacing} spacing)"
@@ -97,12 +153,15 @@ class FidResult:
             ),
         ]
         if self.undersampled:
+            biased = "this score is" if self.kid is None else "the fid is"
             lines += [
                 "",
                 f"warning: fewer than {self.feature_dim} images per side, so the "
-                "covariance is singular and this score is biased upwards. Compare "
+                f"covariance is singular and {biased} biased upwards. Compare "
                 "it only with scores taken at the same image count.",
             ]
+            if self.kid is None:
+                lines.append("--kid is unbiased at this count and does not have that problem.")
         return "\n".join(lines)
 
 
@@ -110,30 +169,33 @@ def accumulate_features(
     images: Iterable[torch.Tensor],
     extractor: FeatureExtractor,
     *,
-    stats: FeatureStats | None = None,
+    stats: FeatureSink | None = None,
     limit: int | None = None,
-) -> FeatureStats:
-    """Fold batches of images into feature statistics.
+) -> FeatureSink:
+    """Fold batches of images into a feature accumulator.
 
     Args:
         images: an iterable of ``(B, C, H, W)`` batches in [-1, 1].
         extractor: the feature network to run them through.
-        stats: accumulator to add to, or None to start a fresh one.
+        stats: accumulator to add to, or None to start fresh moments. A
+            :class:`~tinydiffusion.metrics.features.FeatureBank` goes here
+            when the vectors themselves are wanted and not only their moments;
+            the two share the interface this needs.
         limit: stop once this many images have been seen. The batch that
             crosses the limit is truncated, so the count lands exactly.
 
     Returns:
         The accumulator, for chaining.
     """
-    stats = stats if stats is not None else FeatureStats(extractor.dim)
+    sink: FeatureSink = stats if stats is not None else FeatureStats(extractor.dim)
     for batch in images:
         if limit is not None:
-            room = limit - stats.n
+            room = limit - sink.n
             if room <= 0:
                 break
             batch = batch[:room]
-        stats.update(extractor(batch))
-    return stats
+        sink.update(extractor(batch))
+    return sink
 
 
 def generate_images(
@@ -229,6 +291,11 @@ def fid_for_checkpoint(
     extractor: FeatureExtractor | None = None,
     cache: bool = True,
     progress: bool = True,
+    kid: bool = False,
+    kid_subsets: int = DEFAULT_KID_SUBSETS,
+    kid_subset_size: int = DEFAULT_KID_SUBSET_SIZE,
+    precision_recall: bool = False,
+    neighbours: int = DEFAULT_NEIGHBOURS,
 ) -> FidResult:
     """Sample a checkpoint and score the samples against real images.
 
@@ -277,15 +344,30 @@ def fid_for_checkpoint(
             otherwise recomputes the identical statistics once per point. See
             :mod:`tinydiffusion.metrics.cache`; False forces the recomputation.
         progress: draw progress bars.
+        kid: also compute the Kernel Inception Distance. It is unbiased, so it
+            is the number to compare when `num_images` is in the low
+            thousands, where FID is mostly reporting its own sample count.
+        kid_subsets: subsets to average the KID over.
+        kid_subset_size: images per KID subset, per side. Clamped down to the
+            smaller of the two sets.
+        precision_recall: also estimate manifold precision and recall, which
+            split a bad score into "the samples are not realistic" and "the
+            samples do not cover the data" — the two failures every single
+            number conflates. Quadratic in `num_images`.
+        neighbours: k for the precision/recall manifolds.
 
     Returns:
-        The scored result.
+        The scored result. `kid` and `precision_recall` on it are None unless
+        they were asked for.
 
     Raises:
         ValueError: if ``num_images`` is below 2, leaving the covariance
             undefined, ``split`` is not ``"train"`` or ``"test"``, or no
             sampler or spacing goes by the name given.
     """
+    # Both of the opt-in metrics read pairwise structure, so both need the
+    # vectors kept rather than folded into moments as they go by.
+    retain = kid or precision_recall
     if num_images < 2:
         raise ValueError(f"num_images must be at least 2 for a covariance, got {num_images}")
     if split not in ("test", "train"):
@@ -327,7 +409,25 @@ def fid_for_checkpoint(
         image_size=cfg.image_size,
         extractor=extractor,
     )
-    real = load_reference_stats(cache_path, dim=extractor.dim) if cache else None
+    features_path = reference_features_path(
+        root,
+        dataset=cfg.dataset,
+        split=split,
+        num_images=num_images,
+        image_size=cfg.image_size,
+        extractor=extractor,
+    )
+
+    real_bank: FeatureBank | None = None
+    real: FeatureStats | None = None
+    if cache:
+        if retain:
+            # A bank answers everything a stats entry does and more, so it is
+            # the one to look for; the moments entry cannot stand in for it.
+            real_bank = load_reference_features(features_path, dim=extractor.dim)
+            real = real_bank.stats if real_bank is not None else None
+        else:
+            real = load_reference_stats(cache_path, dim=extractor.dim)
     if real is None:
         loader = image_dataloader(
             cfg.dataset_spec(),
@@ -344,7 +444,10 @@ def fid_for_checkpoint(
         )
         real_batches = (x.to(cfg.device, non_blocking=True) for x, _ in loader)
 
-        real = accumulate_features(
+        real_sink: FeatureSink = (
+            FeatureBank(extractor.dim) if retain else FeatureStats(extractor.dim)
+        )
+        accumulate_features(
             tqdm(
                 real_batches,
                 desc=f"fid real ({split})",
@@ -352,13 +455,22 @@ def fid_for_checkpoint(
                 disable=not progress,
             ),
             extractor,
+            stats=real_sink,
             limit=num_images,
         )
+        real_bank = real_sink if isinstance(real_sink, FeatureBank) else None
+        real = real_sink.stats if isinstance(real_sink, FeatureBank) else real_sink
         if cache:
+            # Both entries when the features were computed: the moments are a
+            # free by-product of a pass that has already happened, and writing
+            # them means a later FID-only sweep need not read the larger file.
             save_reference_stats(cache_path, real)
+            if real_bank is not None:
+                save_reference_features(features_path, real_bank)
 
     seed_everything(seed)
-    generated = accumulate_features(
+    generated: FeatureSink = FeatureBank(extractor.dim) if retain else FeatureStats(extractor.dim)
+    accumulate_features(
         tqdm(
             generate_images(
                 diffusion,
@@ -378,7 +490,30 @@ def fid_for_checkpoint(
             disable=not progress,
         ),
         extractor,
+        stats=generated,
     )
+    generated_bank = generated if isinstance(generated, FeatureBank) else None
+    generated_stats = generated.stats if isinstance(generated, FeatureBank) else generated
+
+    kid_score: KidResult | None = None
+    if kid and generated_bank is not None and real_bank is not None:
+        kid_score = kid_from_features(
+            generated_bank,
+            real_bank,
+            subsets=kid_subsets,
+            subset_size=kid_subset_size,
+            # Seeded from the run's own seed rather than left to the global
+            # RNG, which sampling has advanced by an amount that depends on
+            # how many batches it drew.
+            generator=torch.Generator().manual_seed(seed),
+            device=cfg.device,
+        )
+
+    pr_score: PrecisionRecall | None = None
+    if precision_recall and generated_bank is not None and real_bank is not None:
+        pr_score = precision_recall_from_features(
+            generated_bank, real_bank, neighbours=neighbours, device=cfg.device
+        )
 
     if real.n < num_images:
         # The split ran out first; scoring uneven sides is legitimate but the
@@ -388,7 +523,7 @@ def fid_for_checkpoint(
     return FidResult(
         checkpoint=checkpoint,
         split=split,
-        fid=fid_from_stats(generated, real),
+        fid=fid_from_stats(generated_stats, real),
         num_generated=generated.n,
         num_real=real.n,
         feature_dim=extractor.dim,
@@ -398,4 +533,6 @@ def fid_for_checkpoint(
         used_ema=use_ema,
         sampler=draw_with,
         spacing=space_with,
+        kid=kid_score,
+        precision_recall=pr_score,
     )

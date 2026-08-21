@@ -8,6 +8,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- KID (Kernel Inception Distance) on `fid`, behind `--kid`. FID fits a
+  2048-dimensional Gaussian to each feature set, and a covariance estimated
+  from fewer samples than it has dimensions is singular — an upward bias whose
+  size depends on the sample count, so a FID over 1,000 images is not a noisier
+  estimate of the FID over 50,000 but a different number. KID has no Gaussian
+  in it: an unbiased kernel distance whose expected value does not move with
+  the count, which is what makes a score affordable between checkpoints worth
+  reading at all. It reports a spread across subsets alongside the mean, so two
+  checkpoints closer together than the noise can be seen not to have been told
+  apart. `--kid-subsets` and `--kid-subset-size` tune it.
+- Manifold precision and recall on `fid`, behind `--precision-recall`
+  (Kynkaanniemi et al., 2019). A model drawing beautiful images of three digits
+  and one drawing all ten badly can score the same FID, and they call for
+  opposite fixes. Precision is the fraction of generated images inside the real
+  data's manifold, recall the fraction of real images inside the generated
+  one — so a bad score splits into "not realistic" and "does not cover".
+  Guidance moves them in opposite directions, which is the clearest reading
+  either number gives. `--neighbours` sets the k the manifolds are built from.
+- `tinydiffusion.metrics.features.FeatureBank`, the accumulator those two need:
+  the feature vectors kept rather than folded into moments as they go by. Its
+  moments are formed on demand, so a score that only wants a FID never pays for
+  them and neither does a bank restored from cache. Memory is linear in the
+  image count, about 8 KB an image, which is the trade both metrics require and
+  the reason they are opt-in.
+- The reference-feature cache learned a second kind of entry, holding a bank
+  rather than moments, written only when a run asked for the metrics that need
+  it. Same key with a `_features` suffix, so the two sit beside each other; a
+  moments entry cannot stand in for a feature one.
+- `plot`: a run's `metrics.jsonl` as a figure — losses, the four timestep
+  quartiles, learning rate, gradient norm and throughput, each panel dropped if
+  the run logged nothing for it. Several runs on shared axes compares a sweep.
+  Needs the new `plots` extra (matplotlib). The per-epoch numbers have been
+  written since logging landed and nothing read them back; a table per epoch is
+  the wrong shape for a question about a trend.
 - `read_metrics`, which reads `metrics.jsonl` back as one record per step. Every
   record now also carries a `session` number, counting how many times the file
   has been opened for appending, and the reader keeps the newest session for

@@ -128,6 +128,11 @@ jobs:
       - name: Score the checkpoint
         run: uv run tinydiffusion eval --checkpoint runs/smoke/checkpoints/best.pt
 
+      # The only place the figure is drawn from metrics a real run wrote, which
+      # is where the panel names and the metric names have to agree.
+      - name: Plot the run's metrics
+        run: uv run tinydiffusion plot runs/smoke --out runs/smoke/metrics.png
+
       - name: Resume from the checkpoint
         # Nothing to run — the checkpoint already covers the config's one epoch
         # — but it exercises the compatibility check and the config round trip,

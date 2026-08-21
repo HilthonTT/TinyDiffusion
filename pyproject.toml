@@ -34,6 +34,8 @@ dependencies = [
 tracking = ["tensorboard>=2.18"]
 # The HTTP sampling server (`tinydiffusion serve`).
 server = ["fastapi>=0.115", "uvicorn>=0.32"]
+# Figures from a run's metrics.jsonl (`tinydiffusion plot`).
+plots = ["matplotlib>=3.9"]
 
 [project.urls]
 Homepage = "https://github.com/HilthonTT/TinyDiffusion"

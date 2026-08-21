@@ -13,6 +13,9 @@ from tinydiffusion.diffusion.ddim import spacing_names
 from tinydiffusion.diffusion.samplers import sampler_names
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
+from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
+from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
+from tinydiffusion.plotting import plot_runs
 from tinydiffusion.sampling import sample_from_checkpoint
 from tinydiffusion.server.config import (
     DEFAULT_HOST,
@@ -222,6 +225,45 @@ def build_parser() -> argparse.ArgumentParser:
         "ones. They do not depend on the checkpoint, so a sweep normally wants "
         "the cache; this is for forcing a rebuild.",
     )
+    fid.add_argument(
+        "--kid",
+        action="store_true",
+        help="Also report the Kernel Inception Distance. Unlike FID it is unbiased, "
+        "so it stays comparable between scores taken over different image counts, "
+        "which is what makes --num-images in the low thousands worth reading. It "
+        "comes with a spread, so two checkpoints can be told apart from noise.",
+    )
+    fid.add_argument(
+        "--kid-subsets",
+        type=int,
+        default=DEFAULT_KID_SUBSETS,
+        metavar="N",
+        help="Subsets to average the KID over.",
+    )
+    fid.add_argument(
+        "--kid-subset-size",
+        type=int,
+        default=DEFAULT_KID_SUBSET_SIZE,
+        metavar="N",
+        help="Images per KID subset, per side, capped at the smaller set. The "
+        "reported spread is a spread over subsets of this size, so hold it fixed "
+        "across the checkpoints being compared.",
+    )
+    fid.add_argument(
+        "--precision-recall",
+        action="store_true",
+        help="Also estimate manifold precision and recall: what fraction of the "
+        "samples look real, and what fraction of the real data the samples cover. "
+        "They split a bad score into its two causes, which no single number can. "
+        "Cost is quadratic in --num-images.",
+    )
+    fid.add_argument(
+        "--neighbours",
+        type=int,
+        default=DEFAULT_NEIGHBOURS,
+        metavar="K",
+        help="Neighbours defining each precision/recall manifold ball.",
+    )
     fid.add_argument("--seed", type=int, default=0, help="Random seed.")
     fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
 
@@ -313,6 +355,23 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
 
+    plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
+    plot.add_argument(
+        "runs",
+        type=Path,
+        nargs="+",
+        metavar="RUN",
+        help="Run log directories, or metrics.jsonl files. More than one draws "
+        "them on shared axes, which is how a sweep is compared.",
+    )
+    plot.add_argument(
+        "--out",
+        type=Path,
+        default=Path("contents/metrics.png"),
+        help="Image to write. The extension picks the format, so .svg works too.",
+    )
+    plot.add_argument("--dpi", type=int, default=120, help="Resolution for raster formats.")
+
     return parser
 
 
@@ -375,7 +434,7 @@ def _eval(args: argparse.Namespace) -> int:
 
 
 def _fid(args: argparse.Namespace) -> int:
-    """Run the FID subcommand."""
+    """Run the scoring subcommand: FID always, KID and precision/recall on request."""
     result = fid_for_checkpoint(
         args.checkpoint,
         num_images=args.num_images,
@@ -392,8 +451,20 @@ def _fid(args: argparse.Namespace) -> int:
         cache=args.cache,
         seed=args.seed,
         device=args.device,
+        kid=args.kid,
+        kid_subsets=args.kid_subsets,
+        kid_subset_size=args.kid_subset_size,
+        precision_recall=args.precision_recall,
+        neighbours=args.neighbours,
     )
     print(result.format())
+    return 0
+
+
+def _plot(args: argparse.Namespace) -> int:
+    """Run the plot subcommand."""
+    out = plot_runs(args.runs, args.out, dpi=args.dpi)
+    print(f"wrote {out}")
     return 0
 
 
@@ -458,6 +529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "train": _train,
         "eval": _eval,
         "fid": _fid,
+        "plot": _plot,
         "sample": _sample,
         "serve": _serve,
     }

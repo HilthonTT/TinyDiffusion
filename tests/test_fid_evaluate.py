@@ -316,3 +316,96 @@ def test_result_format_stays_quiet_when_well_sampled():
     assert "warning" not in result.format()
     assert "guidance" not in result.format()
     assert "rescale" not in result.format()
+
+
+def test_the_opt_in_metrics_are_absent_unless_asked_for(checkpoint, extractor):
+    result = fid_for_checkpoint(
+        checkpoint, num_images=8, num_steps=2, extractor=extractor, progress=False
+    )
+    assert result.kid is None
+    assert result.precision_recall is None
+    assert "kid" not in result.format()
+
+
+def test_kid_is_reported_with_the_spread_it_was_averaged_over(checkpoint, extractor):
+    result = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=extractor,
+        progress=False,
+        kid=True,
+        kid_subsets=3,
+        kid_subset_size=4,
+    )
+    assert result.kid is not None
+    assert (result.kid.subsets, result.kid.subset_size) == (3, 4)
+    assert "kid" in result.format()
+
+
+def test_precision_and_recall_are_reported_as_fractions(checkpoint, extractor):
+    result = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=extractor,
+        progress=False,
+        precision_recall=True,
+        neighbours=2,
+    )
+    assert result.precision_recall is not None
+    assert 0.0 <= result.precision_recall.precision <= 1.0
+    assert 0.0 <= result.precision_recall.recall <= 1.0
+    assert result.precision_recall.neighbours == 2
+    assert "precision" in result.format()
+
+
+def test_retaining_features_does_not_move_the_fid(checkpoint):
+    # The two paths accumulate the same moments, so asking for KID must not
+    # quietly change the headline number a sweep is comparing.
+    plain = fid_for_checkpoint(
+        checkpoint, num_images=8, num_steps=2, extractor=StubExtractor(), progress=False
+    )
+    retained = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=StubExtractor(),
+        progress=False,
+        cache=False,
+        kid=True,
+        kid_subsets=2,
+        kid_subset_size=4,
+    )
+    assert plain.fid == pytest.approx(retained.fid, rel=1e-9)
+
+
+def test_the_kid_score_does_not_depend_on_how_many_batches_sampling_drew(checkpoint):
+    # Seeded from the run's seed rather than the global RNG, which sampling has
+    # advanced by an amount that depends on the batch size.
+    scores = [
+        fid_for_checkpoint(
+            checkpoint,
+            num_images=8,
+            num_steps=2,
+            batch_size=size,
+            extractor=StubExtractor(),
+            progress=False,
+            cache=False,
+            kid=True,
+            kid_subsets=3,
+            kid_subset_size=4,
+        ).kid.mean
+        for size in (8, 8)
+    ]
+    assert scores[0] == scores[1]
+
+
+def test_an_undersampled_score_points_at_the_metric_that_is_not(checkpoint, extractor):
+    # Fewer images than the extractor has features, so the covariance is
+    # singular and the FID is biased by an amount that depends on the count.
+    result = fid_for_checkpoint(
+        checkpoint, num_images=4, num_steps=2, extractor=extractor, progress=False
+    )
+    assert result.undersampled
+    assert "--kid is unbiased" in result.format()
