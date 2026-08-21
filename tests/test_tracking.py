@@ -116,6 +116,39 @@ def test_jsonl_appends_to_an_existing_file(tmp_path):
     assert len(path.read_text().splitlines()) == 2
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_value_is_recorded_as_null(tmp_path, value):
+    # json would write the bare tokens NaN/Infinity, which are a Python
+    # extension: a strict reader rejects the whole file over one of them, and
+    # a diverged run is exactly the one whose log is worth reading.
+    path = tmp_path / "metrics.jsonl"
+    backend = JsonlBackend(path)
+    backend.write({"train/loss": value, "train/lr": 1e-4}, 2)
+    backend.close()
+
+    record = json.loads(path.read_text(), parse_constant=_reject)
+    assert record["train/loss"] is None
+    assert record["train/lr"] == 1e-4
+    assert record["step"] == 2
+
+
+def test_a_metric_cannot_overwrite_the_step_it_was_logged_at(tmp_path):
+    # step is what every reader joins on, so it outranks a metric of the
+    # same name rather than the other way round.
+    path = tmp_path / "metrics.jsonl"
+    backend = JsonlBackend(path)
+    backend.write({"step": 99.0, "time": 0.0}, 3)
+    backend.close()
+
+    record = json.loads(path.read_text())
+    assert record["step"] == 3
+    assert record["time"] > 0.0
+
+
+def _reject(token):
+    raise AssertionError(f"non-JSON token written: {token}")
+
+
 def test_closing_twice_is_harmless(tmp_path):
     backend = JsonlBackend(tmp_path / "metrics.jsonl")
     backend.close()

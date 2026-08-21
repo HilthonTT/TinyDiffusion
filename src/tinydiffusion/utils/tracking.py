@@ -12,6 +12,7 @@ actually shows a trend.
 """
 
 import json
+import math
 import time
 from collections import defaultdict
 from collections.abc import Generator, Mapping
@@ -51,6 +52,24 @@ def _write_line(text: str) -> None:
         return
     with tqdm.external_write_mode():
         print(text)
+
+
+def _jsonable(value: float) -> float | None:
+    """Coerce a metric to something strict JSON can hold.
+
+    A diverged run is the one whose log matters most, and it is also the one
+    that logs NaN. :mod:`json` would write the bare token ``NaN``, which is a
+    Python extension rather than JSON: ``jq``, ``pandas.read_json`` and most
+    other readers reject the whole file over it. Stored as ``null`` instead, so
+    the step is still there and the gap in it stays visible.
+
+    Args:
+        value: the metric value.
+
+    Returns:
+        `value`, or None if it is NaN or an infinity.
+    """
+    return value if math.isfinite(value) else None
 
 
 @runtime_checkable
@@ -136,6 +155,10 @@ class JsonlBackend:
     JSONL rather than CSV because a run that starts logging a new metric
     mid-flight just writes a wider object, where a CSV would have to rewrite
     every row already on disk.
+
+    Every record carries the reserved keys ``step`` and ``time``, and they win
+    over a metric of the same name: ``step`` is what every reader joins on, so
+    a stray metric called ``step`` must not be able to overwrite it.
     """
 
     def __init__(self, path: Path) -> None:
@@ -145,12 +168,21 @@ class JsonlBackend:
     def write(self, metrics: Mapping[str, float], step: int) -> None:
         """Append one record.
 
+        Non-finite values are stored as ``null``; see :func:`_jsonable`.
+
         Args:
-            metrics: metric name to value.
+            metrics: metric name to value. A ``step`` or ``time`` entry is
+                dropped in favour of this backend's own.
             step: step index, stored alongside a wall-clock timestamp.
         """
-        record: dict[str, Any] = {"step": step, "time": time.time(), **metrics}
-        self._handle.write(json.dumps(record) + "\n")
+        record: dict[str, Any] = {
+            **{key: _jsonable(value) for key, value in metrics.items()},
+            "step": step,
+            "time": time.time(),
+        }
+        # allow_nan=False so anything that slipped past _jsonable raises here
+        # rather than writing a token no strict parser will read back.
+        self._handle.write(json.dumps(record, allow_nan=False) + "\n")
         # Flushed per step so a killed run keeps everything up to the last epoch.
         self._handle.flush()
 
