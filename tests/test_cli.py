@@ -529,3 +529,70 @@ def test_plot_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
 def test_main_reports_a_run_with_no_metrics(capsys, tmp_path):
     assert main(["plot", str(tmp_path / "nowhere"), "--out", str(tmp_path / "f.png")]) == 1
     assert "error:" in capsys.readouterr().out
+
+
+def test_interpolate_defaults():
+    args = build_parser().parse_args(["interpolate", "--checkpoint", "m.pt"])
+    assert args.command == "interpolate"
+    assert args.steps == 8
+    assert (args.seed_start, args.seed_end) == (0, 1)
+    assert args.out == Path("contents/interpolation.png")
+    # Unset, so the checkpoint's own settings decide.
+    assert (args.num_steps, args.sampler, args.spacing, args.labels) == (None,) * 4
+    assert (args.guidance, args.guidance_rescale) == (None, None)
+
+
+def test_interpolate_parses_its_overrides():
+    args = build_parser().parse_args(
+        [
+            "interpolate",
+            "--checkpoint",
+            "m.pt",
+            "--steps",
+            "12",
+            "--denoise-steps",
+            "30",
+            "--labels",
+            "7",
+            "--seed-start",
+            "4",
+            "--seed-end",
+            "9",
+            "--guidance",
+            "3",
+        ]
+    )
+    assert (args.steps, args.num_steps, args.labels) == (12, 30, [7])
+    assert (args.seed_start, args.seed_end, args.guidance) == (4, 9, 3.0)
+
+
+def test_interpolate_requires_a_checkpoint():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["interpolate"])
+
+
+def test_interpolate_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_walk(checkpoint, out, **kwargs):
+        seen["checkpoint"], seen["out"] = checkpoint, out
+        seen.update(kwargs)
+        return out
+
+    monkeypatch.setattr(cli, "interpolate_from_checkpoint", fake_walk)
+    out = tmp_path / "walk.png"
+    assert main(["interpolate", "--checkpoint", "m.pt", "--steps", "6", "--out", str(out)]) == 0
+    assert str(out) in capsys.readouterr().out
+    assert seen["steps"] == 6
+    assert seen["seed_start"] == 0
+
+
+def test_main_reports_a_missing_interpolate_checkpoint(capsys, tmp_path):
+    assert main(["interpolate", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
+    assert "error:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["sample", "fid", "interpolate"])
+def test_karras_spacing_is_offered_everywhere_a_spacing_is(command):
+    args = build_parser().parse_args([command, "--checkpoint", "m.pt", "--spacing", "karras"])
+    assert args.spacing == "karras"

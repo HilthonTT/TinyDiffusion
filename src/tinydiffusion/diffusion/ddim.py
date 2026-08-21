@@ -17,14 +17,20 @@ from tinydiffusion.utils.modules import eval_mode
 
 __all__ = [
     "DEFAULT_SPACING",
+    "KARRAS_RHO",
     "SPACINGS",
     "TimestepSpacing",
     "ddim_sample",
     "get_spacing",
+    "karras_timesteps",
     "quadratic_timesteps",
+    "schedule_sigmas",
     "spacing_names",
     "uniform_timesteps",
 ]
+
+KARRAS_RHO = 7.0
+"""Curvature of the Karras ramp. 7 is the value the EDM paper settled on."""
 
 
 def _check_num_steps(num_timesteps: int, num_steps: int) -> None:
@@ -33,12 +39,18 @@ def _check_num_steps(num_timesteps: int, num_steps: int) -> None:
         raise ValueError(f"num_steps must lie in [1, {num_timesteps}], got {num_steps}")
 
 
-def uniform_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
+def uniform_timesteps(
+    num_timesteps: int, num_steps: int, *, alphabar: torch.Tensor | None = None
+) -> torch.Tensor:
     """Evenly spaced subsequence of [0, num_timesteps-1], descending.
 
     Args:
         num_timesteps: number of steps the model was trained with.
         num_steps: number of sampling steps to actually take.
+        alphabar: unused. This spacing is defined on the index rather than on
+            the noise level, so it is the same subsequence whatever schedule
+            produced it; the argument is part of the shared
+            :class:`TimestepSpacing` signature.
 
     Returns:
         Long tensor of length num_steps, strictly decreasing, starting at
@@ -52,7 +64,9 @@ def uniform_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
     return torch.linspace(num_timesteps - 1, 0, num_steps).round().long()
 
 
-def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
+def quadratic_timesteps(
+    num_timesteps: int, num_steps: int, *, alphabar: torch.Tensor | None = None
+) -> torch.Tensor:
     """Quadratically spaced subsequence, denser near t=0.
 
     The DDIM paper found this better than uniform on CIFAR-10 at low step counts.
@@ -60,6 +74,7 @@ def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
     Args:
         num_timesteps: number of steps the model was trained with.
         num_steps: number of sampling steps to actually take.
+        alphabar: unused; see :func:`uniform_timesteps`.
 
     Returns:
         Long tensor of descending, de-duplicated timesteps.
@@ -71,19 +86,159 @@ def quadratic_timesteps(num_timesteps: int, num_steps: int) -> torch.Tensor:
     return torch.unique(steps).flip(0)
 
 
+def schedule_sigmas(alphabar: torch.Tensor) -> torch.Tensor:
+    """Noise level of each timestep, as a variance-exploding sigma.
+
+    ``x_t = sqrt(abar) * x_0 + sqrt(1 - abar) * eps`` divided through by its own
+    signal coefficient is ``x_0 + sigma * eps`` with
+    ``sigma = sqrt((1 - abar) / abar)``. That is the quantity the Karras
+    schedule is written in, and it is what makes "space the steps evenly in
+    noise" a different instruction from "space them evenly in t".
+
+    Args:
+        alphabar: the schedule's cumulative alpha product, length
+            ``num_timesteps``, ascending in t from nearly 1 to nearly 0.
+
+    Returns:
+        Sigma per timestep, ascending. The last entry is ``inf`` on a schedule
+        whose terminal SNR is exactly zero.
+    """
+    return ((1.0 - alphabar) / alphabar).sqrt()
+
+
+def karras_timesteps(
+    num_timesteps: int,
+    num_steps: int,
+    *,
+    alphabar: torch.Tensor | None = None,
+    rho: float = KARRAS_RHO,
+) -> torch.Tensor:
+    """Subsequence spaced evenly in noise level rather than in t (Karras et al., 2022).
+
+    ``uniform`` and ``quadratic`` both space the steps by index. This one takes
+    the EDM ramp,
+    ``sigma_i = (sigma_max^(1/rho) + i/(n-1) * (sigma_min^(1/rho) - sigma_max^(1/rho)))^rho``,
+    and maps each sigma back to the timestep that carries it, interpolating in
+    log-sigma. The steps then land where the *noise* changes evenly, which is
+    the thing the denoiser actually sees.
+
+    .. warning::
+        **It does not honour `num_steps` on a cosine schedule.** Cosine ends at
+        ``abar ~ 2e-9``, a sigma of about 20,000 against the 80 the EDM ramp
+        was designed around, so a large part of the ramp lands in the handful
+        of timesteps above ``t = 936`` and rounding back to integers collapses
+        them: 20 requested steps come back as 12, and 40 as 22. Ask for roughly
+        double what you want, and read the count off the timesteps rather than
+        assuming it. On ``schedule = "linear"``, whose terminal sigma is about
+        157, 20 requested steps are 20.
+
+    On the shipped MNIST model (cosine, 1,000 images, KID with its spread over
+    50 subsets of 500) it sits between the two index spacings — better than
+    ``uniform`` at the same number of network evaluations, worse than
+    ``quadratic``:
+
+    ==== ================= ================= =================
+    NFEs uniform           quadratic         karras
+    ==== ================= ================= =================
+    12   0.01360 +- 0.0012 0.00452 +- 0.0005 0.00963 +- 0.0008
+    ~20  0.00720 +- 0.0008 0.00273 +- 0.0004 0.00471 +- 0.0006
+    ==== ================= ================= =================
+
+    Every gap there is several times its own error bar, so the ordering is
+    real for this model. It is one model on one dataset: ``quadratic`` winning
+    on MNIST is not a claim about anything else, and the point of ``fid --kid``
+    is that you can check rather than believe.
+
+    Args:
+        num_timesteps: number of steps the model was trained with.
+        num_steps: number of sampling steps to actually take.
+        alphabar: the schedule's cumulative alpha product. Required: unlike the
+            index-based spacings this one is a function of the noise levels, so
+            there is nothing sensible to fall back on.
+        rho: curvature of the ramp. Higher concentrates more of it near
+            ``sigma_min``.
+
+    Returns:
+        Long tensor of descending, de-duplicated timesteps, starting at
+        ``num_timesteps - 1``. Shorter than `num_steps` whenever two of the
+        ramp's sigmas round to the same timestep.
+
+    Raises:
+        ValueError: if `alphabar` is not given, does not match `num_timesteps`,
+            or `num_steps` is out of range.
+    """
+    _check_num_steps(num_timesteps, num_steps)
+    if alphabar is None:
+        raise ValueError(
+            "karras spacing is defined on the schedule's noise levels, so it needs "
+            "alphabar; the index-based spacings are 'uniform' and 'quadratic'"
+        )
+    if alphabar.numel() != num_timesteps:
+        raise ValueError(
+            f"alphabar has {alphabar.numel()} entries, expected num_timesteps={num_timesteps}"
+        )
+
+    # On the host, whatever device the schedule lives on: the other spacings
+    # are pure index arithmetic and hand back a CPU tensor, and a subsequence
+    # of 20 integers is not worth a device round trip to disagree about.
+    sigmas = schedule_sigmas(alphabar.detach().cpu()).double()
+    # A zero terminal SNR puts an infinity at the top of the schedule. The ramp
+    # is anchored to the largest sigma that is a number, and the first timestep
+    # is restored below, so the chain still starts from the pure-noise step.
+    finite = sigmas.isfinite()
+    sigma_min = sigmas[finite].min().clamp_min(torch.finfo(torch.float64).tiny)
+    sigma_max = sigmas[finite].max()
+
+    ramp = torch.linspace(0, 1, num_steps, dtype=torch.float64)
+    low, high = sigma_min ** (1 / rho), sigma_max ** (1 / rho)
+    targets = (high + ramp * (low - high)) ** rho
+
+    # Interpolated in log-sigma, where the schedule is close to linear in t and
+    # so the inverse is well conditioned across four decades of noise.
+    log_sigmas = sigmas[finite].log()
+    index = torch.arange(num_timesteps, dtype=torch.float64)[finite]
+    slot = torch.searchsorted(log_sigmas, targets.log()).clamp(1, log_sigmas.numel() - 1)
+    before, after = slot - 1, slot
+    span = (log_sigmas[after] - log_sigmas[before]).clamp_min(1e-12)
+    weight = ((targets.log() - log_sigmas[before]) / span).clamp(0, 1)
+    steps = (index[before] + weight * (index[after] - index[before])).round().long()
+
+    # The chain starts from pure noise whatever the ramp's top sigma rounded
+    # to, which is the invariant the other two spacings hold by construction.
+    steps[0] = num_timesteps - 1
+    return torch.unique(steps.clamp(0, num_timesteps - 1)).flip(0)
+
+
 class TimestepSpacing(Protocol):
     """How a sampler picks which timesteps of the training schedule to visit."""
 
-    def __call__(self, num_timesteps: int, num_steps: int) -> torch.Tensor:
-        """Return a descending subsequence of ``[0, num_timesteps - 1]``."""
+    def __call__(
+        self, num_timesteps: int, num_steps: int, *, alphabar: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Return a descending subsequence of ``[0, num_timesteps - 1]``.
+
+        Args:
+            num_timesteps: length of the training schedule.
+            num_steps: how many steps to take.
+            alphabar: the schedule's cumulative alpha product, for the spacings
+                defined on noise level rather than on index. Those defined on
+                index accept and ignore it.
+        """
         ...
 
 
 SPACINGS: dict[str, TimestepSpacing] = {
     "uniform": uniform_timesteps,
     "quadratic": quadratic_timesteps,
+    "karras": karras_timesteps,
 }
-"""Name to spacing. ``uniform`` is the safe default; ``quadratic`` is denser near t=0."""
+"""Name to spacing.
+
+``uniform`` is the safe default and ``quadratic`` is denser near t=0; both are
+defined on the index. ``karras`` is defined on the noise level instead, and is
+the one that needs the schedule handed to it — see :func:`karras_timesteps` for
+where it does and does not work.
+"""
 
 DEFAULT_SPACING = "uniform"
 """What a config that says nothing gets, and what every sampler used before there was a choice."""
@@ -171,7 +326,9 @@ def ddim_sample(
     net = model if model is not None else diffusion.net
 
     if timesteps is None:
-        timesteps = get_spacing(spacing)(diffusion.num_timesteps, num_steps)
+        timesteps = get_spacing(spacing)(
+            diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
+        )
     ts = timesteps.to(device)
     # Pair each t with its predecessor; the last step lands on the t=-1 sentinel,
     # for which alphabar is defined as 1 (a noise-free x_0).

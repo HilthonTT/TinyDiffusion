@@ -125,6 +125,22 @@ jobs:
           --out runs/smoke/gen_dpmpp.png --num-images 8
           --sampler dpmpp --steps 15 --spacing quadratic
 
+      # karras is the one spacing that reads the schedule rather than only the
+      # step count, so it is the one that can break on a real model without any
+      # unit test noticing.
+      - name: Sample on the karras grid
+        run: >-
+          uv run tinydiffusion sample
+          --checkpoint runs/smoke/checkpoints/last.pt
+          --out runs/smoke/gen_karras.png --num-images 4
+          --steps 20 --spacing karras
+
+      - name: Walk between two latents
+        run: >-
+          uv run tinydiffusion interpolate
+          --checkpoint runs/smoke/checkpoints/last.pt
+          --out runs/smoke/walk.png --steps 6 --labels 7
+
       - name: Score the checkpoint
         run: uv run tinydiffusion eval --checkpoint runs/smoke/checkpoints/best.pt
 

@@ -2,11 +2,14 @@
 
 from tinydiffusion.diffusion.ddim import (
     DEFAULT_SPACING,
+    KARRAS_RHO,
     SPACINGS,
     TimestepSpacing,
     ddim_sample,
     get_spacing,
+    karras_timesteps,
     quadratic_timesteps,
+    schedule_sigmas,
     spacing_names,
     uniform_timesteps,
 )
@@ -59,6 +62,7 @@ __all__ = [
     "DDPM",
     "DEFAULT_SAMPLER",
     "DEFAULT_SPACING",
+    "KARRAS_RHO",
     "SAMPLERS",
     "SPACINGS",
     "ClassifierFreeGuidance",
@@ -87,6 +91,7 @@ __all__ = [
     "get_sampler",
     "get_spacing",
     "initial_latent",
+    "karras_timesteps",
     "linear_beta_schedule",
     "mean_flat",
     "normal_kl",
@@ -94,6 +99,7 @@ __all__ = [
     "quadratic_timesteps",
     "rescale_guided",
     "sampler_names",
+    "schedule_sigmas",
     "spacing_names",
     "timestep_sampler",
     "uniform_timesteps",

@@ -6,26 +6,35 @@ import torch.nn as nn
 
 from tinydiffusion.diffusion.ddim import (
     DEFAULT_SPACING,
+    KARRAS_RHO,
     SPACINGS,
     ddim_sample,
     get_spacing,
+    karras_timesteps,
     quadratic_timesteps,
+    schedule_sigmas,
     spacing_names,
     uniform_timesteps,
 )
 from tinydiffusion.diffusion.ddpm import DDPM
 from tinydiffusion.diffusion.dpm_solver import dpmpp_sample
 from tinydiffusion.diffusion.samplers import SAMPLERS
-from tinydiffusion.diffusion.schedules import linear_beta_schedule
+from tinydiffusion.diffusion.schedules import (
+    cosine_beta_schedule,
+    ddpm_schedules,
+    enforce_zero_terminal_snr,
+    linear_beta_schedule,
+)
 from tinydiffusion.training.config import TrainConfig
 
 T = 100
 
 
-def test_the_registry_holds_both_published_spacings():
-    assert spacing_names() == ("quadratic", "uniform")
+def test_the_registry_holds_every_published_spacing():
+    assert spacing_names() == ("karras", "quadratic", "uniform")
     assert SPACINGS["uniform"] is uniform_timesteps
     assert SPACINGS["quadratic"] is quadratic_timesteps
+    assert SPACINGS["karras"] is karras_timesteps
 
 
 def test_the_default_is_uniform():
@@ -140,3 +149,99 @@ def test_the_spacing_survives_a_config_round_trip():
     cfg = TrainConfig(sample_spacing="quadratic")
     restored = TrainConfig.from_mapping(dataclasses.asdict(cfg))
     assert restored.sample_spacing == "quadratic"
+
+
+def cosine_alphabar(num_timesteps=T):
+    return ddpm_schedules(cosine_beta_schedule(num_timesteps))["alphabar_t"]
+
+
+def linear_alphabar(num_timesteps=T):
+    return ddpm_schedules(linear_beta_schedule(1e-4, 0.02, num_timesteps))["alphabar_t"]
+
+
+def test_the_index_spacings_ignore_the_schedule_they_are_handed():
+    # They are defined on the index, so the same subsequence whatever the
+    # noise levels turn out to be.
+    for spacing in (uniform_timesteps, quadratic_timesteps):
+        assert torch.equal(spacing(T, 10), spacing(T, 10, alphabar=cosine_alphabar()))
+
+
+def test_karras_starts_at_pure_noise_and_ends_at_zero():
+    steps = karras_timesteps(T, 10, alphabar=linear_alphabar())
+    assert steps[0] == T - 1
+    assert steps[-1] == 0
+
+
+def test_karras_is_strictly_descending():
+    steps = karras_timesteps(T, 20, alphabar=linear_alphabar())
+    assert (steps.diff() < 0).all()
+
+
+def test_a_single_karras_step_is_the_noisiest_one():
+    assert karras_timesteps(T, 1, alphabar=linear_alphabar()).tolist() == [T - 1]
+
+
+def test_karras_spaces_by_noise_rather_than_by_index():
+    # The point of it: the sigmas it visits are near-evenly spaced under the
+    # rho-ramp, which the index-based spacings have no reason to be.
+    alphabar = linear_alphabar(1000)
+    sigmas = schedule_sigmas(alphabar)
+    rho = KARRAS_RHO
+
+    def ramp_error(steps):
+        visited = sigmas[steps].double()
+        # Where each visited sigma falls on the ramp's own straight line.
+        warped = visited ** (1 / rho)
+        return float(warped.diff().std() / warped.diff().abs().mean())
+
+    karras = ramp_error(karras_timesteps(1000, 20, alphabar=alphabar))
+    uniform = ramp_error(uniform_timesteps(1000, 20))
+    assert karras < uniform
+
+
+def test_karras_needs_the_schedule():
+    with pytest.raises(ValueError, match=r"needs.*alphabar"):
+        karras_timesteps(T, 5)
+
+
+def test_a_schedule_of_the_wrong_length_is_refused():
+    with pytest.raises(ValueError, match="expected num_timesteps"):
+        karras_timesteps(T, 5, alphabar=linear_alphabar(T + 1))
+
+
+def test_karras_survives_a_zero_terminal_snr_schedule():
+    # enforce_zero_terminal_snr drives the last abar to ~0, so the last sigma
+    # is an infinity the ramp cannot be anchored to.
+    betas = enforce_zero_terminal_snr(cosine_beta_schedule(T))
+    alphabar = ddpm_schedules(betas)["alphabar_t"]
+    steps = karras_timesteps(T, 10, alphabar=alphabar)
+    assert steps[0] == T - 1
+    assert steps[-1] == 0
+    assert (steps.diff() < 0).all()
+
+
+def test_a_cosine_schedule_cannot_honour_the_step_count():
+    # Documented rather than fixed: cosine's terminal sigma is four orders of
+    # magnitude above the one the ramp was designed around, so part of the
+    # ramp lands in a handful of timesteps and rounding collapses them. The
+    # steps that survive are good ones — karras beats uniform at equal cost on
+    # the shipped model — but a caller asking for 20 gets 12.
+    cosine = karras_timesteps(1000, 20, alphabar=cosine_alphabar(1000))
+    linear = karras_timesteps(1000, 20, alphabar=linear_alphabar(1000))
+    assert len(cosine) < 20
+    assert len(linear) == 20
+
+
+def test_karras_returns_timesteps_on_the_host_like_the_others():
+    # The samplers index device buffers with whatever comes back, and the
+    # index-based spacings have always answered on the CPU.
+    alphabar = linear_alphabar()
+    assert karras_timesteps(T, 5, alphabar=alphabar).device == uniform_timesteps(T, 5).device
+
+
+@pytest.mark.parametrize("steps", [2, 5, 17, T])
+def test_karras_never_leaves_the_schedule(steps):
+    out = karras_timesteps(T, steps, alphabar=linear_alphabar())
+    assert out.min() >= 0
+    assert out.max() <= T - 1
+    assert out.dtype is torch.long

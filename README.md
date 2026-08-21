@@ -97,6 +97,15 @@ learning rate — as a figure, and several runs on shared axes:
 ./run.sh plot runs/mnist --out contents/metrics.png
 ```
 
+`interpolate` walks between two latents and samples every point on the way,
+which says something a grid of samples cannot: whether the space *between* two
+images is populated, or whether the model snaps from one mode to another with
+nothing in between.
+
+```bash
+./run.sh interpolate --checkpoint checkpoints/last.pt --labels 7 --steps 10
+```
+
 `serve` puts a checkpoint behind a JSON API, for anything that is not a shell:
 
 ```bash
@@ -165,8 +174,10 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   deterministic DDIM and ancestral DDPM. `diffusion/dpm_solver.py` is
   DPM-Solver++(2M), which reaches the same place in 15 to 20 steps for the same
   cost per step; `--sampler` and the `sampler` config field pick between them.
-  `--spacing quadratic` puts that budget of steps where a short chain needs it,
-  packed towards `t = 0`, for no extra network evaluations.
+  `--spacing` decides *which* timesteps that budget visits: `quadratic` packs
+  them towards `t = 0` where a short chain needs them, and `karras` spaces them
+  evenly in noise level rather than in index. Neither costs an extra network
+  evaluation, and `fid --kid` will tell you which wins on your model.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
 - **Measurement** — `metrics/fid.py` summarises a feature set as two moments,

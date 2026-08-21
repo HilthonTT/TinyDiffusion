@@ -12,6 +12,7 @@ from tinydiffusion.data.datasets import dataset_names
 from tinydiffusion.diffusion.ddim import spacing_names
 from tinydiffusion.diffusion.samplers import sampler_names
 from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
+from tinydiffusion.interpolation import interpolate_from_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
 from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
 from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
@@ -355,6 +356,61 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
 
+    interpolate = subparsers.add_parser(
+        "interpolate", help="Walk between two latents and sample every point."
+    )
+    interpolate.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
+    interpolate.add_argument(
+        "--steps",
+        type=int,
+        default=8,
+        help="Points along the walk, counting both ends.",
+    )
+    interpolate.add_argument(
+        "--denoise-steps",
+        type=int,
+        dest="num_steps",
+        help="Denoising steps per image. Defaults to the checkpoint's.",
+    )
+    interpolate.add_argument(
+        "--sampler",
+        choices=sampler_names(),
+        help="Sampler to draw with, overriding the checkpoint's.",
+    )
+    interpolate.add_argument(
+        "--spacing",
+        choices=spacing_names(),
+        help="Timestep spacing, overriding the checkpoint's.",
+    )
+    interpolate.add_argument(
+        "--labels",
+        type=class_labels,
+        help="Class to hold fixed across the walk, e.g. '7'. Conditional checkpoints "
+        "only; the default is class 0. More than one is cycled, which moves two "
+        "things at once and is rarely what you want.",
+    )
+    interpolate.add_argument(
+        "--guidance",
+        type=float,
+        help="Classifier-free guidance scale. Defaults to the checkpoint's.",
+    )
+    interpolate.add_argument(
+        "--guidance-rescale",
+        type=float,
+        help="How much of the scale guidance inflates to correct back, in [0, 1]. "
+        "Defaults to the checkpoint's.",
+    )
+    interpolate.add_argument(
+        "--seed-start", type=int, default=0, help="Seed for the latent the walk starts at."
+    )
+    interpolate.add_argument(
+        "--seed-end", type=int, default=1, help="Seed for the latent it ends at."
+    )
+    interpolate.add_argument(
+        "--out", type=Path, default=Path("contents/interpolation.png"), help="Output."
+    )
+    interpolate.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
+
     plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
     plot.add_argument(
         "runs",
@@ -461,6 +517,26 @@ def _fid(args: argparse.Namespace) -> int:
     return 0
 
 
+def _interpolate(args: argparse.Namespace) -> int:
+    """Run the interpolate subcommand."""
+    out = interpolate_from_checkpoint(
+        args.checkpoint,
+        args.out,
+        steps=args.steps,
+        num_steps=args.num_steps,
+        sampler=args.sampler,
+        spacing=args.spacing,
+        labels=args.labels,
+        guidance=args.guidance,
+        guidance_rescale=args.guidance_rescale,
+        seed_start=args.seed_start,
+        seed_end=args.seed_end,
+        device=args.device,
+    )
+    print(f"wrote {out}")
+    return 0
+
+
 def _plot(args: argparse.Namespace) -> int:
     """Run the plot subcommand."""
     out = plot_runs(args.runs, args.out, dpi=args.dpi)
@@ -529,6 +605,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "train": _train,
         "eval": _eval,
         "fid": _fid,
+        "interpolate": _interpolate,
         "plot": _plot,
         "sample": _sample,
         "serve": _serve,

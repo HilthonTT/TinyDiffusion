@@ -83,7 +83,9 @@ def dpmpp_sample(
     net = model if model is not None else diffusion.net
 
     if timesteps is None:
-        timesteps = get_spacing(spacing)(diffusion.num_timesteps, num_steps)
+        timesteps = get_spacing(spacing)(
+            diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
+        )
     ts = timesteps.to(device)
     # As in DDIM, the last step lands on a t=-1 sentinel whose alphabar is 1.
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])

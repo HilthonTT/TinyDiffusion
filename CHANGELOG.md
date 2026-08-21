@@ -8,6 +8,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A third timestep spacing, `karras` (Karras et al., 2022). `uniform` and
+  `quadratic` both space the sampling steps by index; this one rewrites the
+  forward process as `x_0 + sigma * eps` and spaces them evenly along the EDM
+  ramp in `sigma^(1/7)` instead — evenly in what the denoiser sees rather than
+  in a proxy for it. Measured on the shipped MNIST model at 1,000 images and
+  equal network evaluations, it roughly halves KID against `uniform` (0.00963
+  against 0.01360 at 12 NFEs, 0.00471 against 0.00720 at ~20) and loses to
+  `quadratic` (0.00452 and 0.00273), every gap being several times its own
+  spread. It does not honour `--steps` on a cosine schedule: that schedule ends
+  at a sigma around 20,000 against the 80 the ramp was designed for, so part of
+  the ramp falls inside a handful of timesteps and rounding collapses them — 20
+  requested steps come back as 12, and 40 as 22. Ask for double what you want,
+  or use a `linear` schedule, where 20 are 20.
+- `interpolate`: a spherical walk between the latents two seeds draw, sampled
+  at every point and written as a strip. A grid says what a model can draw; a
+  walk says whether the space between two of its samples is populated, or
+  whether it snaps from one mode to another with nothing in between. The path
+  is slerp rather than a straight line because a latent lives on a thin shell
+  at radius `sqrt(d)`, and the midpoint of a chord between two of them sits
+  well inside it, on latents the model never saw. `--labels` holds the class
+  fixed so the strip has exactly one thing moving along it.
+- The `TimestepSpacing` protocol now takes the schedule's `alphabar` as a
+  keyword. The index-based spacings accept and ignore it; a spacing defined on
+  noise level has no way to work without it.
 - KID (Kernel Inception Distance) on `fid`, behind `--kid`. FID fits a
   2048-dimensional Gaussian to each feature set, and a covariance estimated
   from fewer samples than it has dimensions is singular — an upward bias whose
