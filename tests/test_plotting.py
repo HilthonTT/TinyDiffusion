@@ -104,3 +104,38 @@ def test_a_missing_matplotlib_names_the_extra_that_supplies_it(run, tmp_path, mo
     monkeypatch.setattr(builtins, "__import__", refuse_matplotlib)
     with pytest.raises(RuntimeError, match="plots"):
         plot_runs([run], tmp_path / "out.png")
+
+
+def loss_axis(monkeypatch, targets, out):
+    """Draw the runs and hand back the axis the loss panel was drawn on."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_subplots = plt.subplots
+
+    def spy(*args, **kwargs):
+        figure, axes = real_subplots(*args, **kwargs)
+        captured.append(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plt, "subplots", spy)
+    plot_runs(targets, out, panels=(("loss", ("train/loss",), True),))
+    return captured[0][0, 0]
+
+
+def test_an_all_positive_loss_panel_is_logarithmic(tmp_path, monkeypatch):
+    run = write_run(tmp_path / "a", [{"train/loss": 1.0}, {"train/loss": 0.5}])
+    assert loss_axis(monkeypatch, [run], tmp_path / "log.png").get_yscale() == "log"
+
+
+def test_a_second_runs_zero_still_drops_the_log_axis(tmp_path, monkeypatch):
+    """A log axis silently deletes non-positive points, so one zero anywhere
+    has to fall back to linear — not only a zero in the first run."""
+    positive = write_run(tmp_path / "a", [{"train/loss": 1.0}, {"train/loss": 0.5}])
+    touches_zero = write_run(tmp_path / "b", [{"train/loss": 1.0}, {"train/loss": 0.0}])
+
+    axis = loss_axis(monkeypatch, [positive, touches_zero], tmp_path / "linear.png")
+    assert axis.get_yscale() == "linear"

@@ -121,8 +121,9 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
         1-D tensor of rescaled betas, the same length as the input.
 
     Raises:
-        ValueError: if any beta falls outside (0, 1), or `floor` is not in
-            (0, 1).
+        ValueError: if any beta falls outside (0, 1), `floor` is not in
+            (0, 1), or `floor` is not below the schedule's own first
+            sqrt(alphabar), which leaves nothing to rescale.
     """
     if not (betas > 0).all() or not (betas < 1).all():
         raise ValueError("all betas must lie in (0, 1)")
@@ -131,9 +132,20 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
 
     sqrt_ab = torch.cumprod(1.0 - betas, dim=0).sqrt()
     first, last = sqrt_ab[0].clone(), sqrt_ab[-1].clone()
-    # Shift the tail to zero, then stretch so the head lands back where it was.
-    sqrt_ab = (sqrt_ab - last) * (first / (first - last))
-    sqrt_ab = sqrt_ab.clamp(min=floor)
+    if first <= floor:
+        raise ValueError(
+            f"floor={floor} is not below the schedule's own first sqrt(alphabar) of "
+            f"{first.item():g}, so there is nothing left to rescale"
+        )
+    # Shift the tail onto the floor and stretch so the head lands back where it
+    # was. Mapped affinely rather than rescaled to zero and then clamped: a
+    # clamp flattens however many of the last steps fall below the floor onto
+    # one value, and two equal alphabars make alpha exactly 1 — a beta of 0,
+    # which `ddpm_schedules` rejects outright. The linear schedule at 1,000
+    # steps lands two entries under a floor of 1e-4 and so could not be built
+    # at all. An affine map keeps the sequence strictly decreasing, which is
+    # what keeps every beta inside (0, 1).
+    sqrt_ab = floor + (sqrt_ab - last) * ((first - floor) / (first - last))
 
     alphabar = sqrt_ab.square()
     # alpha_t = abar_t / abar_{t-1}, with abar_{-1} = 1.

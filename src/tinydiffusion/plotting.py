@@ -148,9 +148,14 @@ def plot_runs(
                 label = key if len(runs) == 1 else f"{run_name} {key}"
                 axis.plot(steps, values, marker="." if len(steps) < 40 else None, label=label)
         axis.set_title(title, loc="left", fontsize=10)
-        if log and all(value > 0 for key in keys for value in _series(runs[0][1], key)[1]):
-            # Only where every point is positive: a symlog axis for a metric
-            # that touched zero says less than a linear one.
+        positive = all(
+            value > 0 for key in keys for _, records in runs for value in _series(records, key)[1]
+        )
+        if log and positive:
+            # Only where every point of every run is positive: a log axis drops
+            # a non-positive point silently, so asking of the first run alone
+            # would quietly delete the second run's zero rather than fall back
+            # to a linear axis for it.
             axis.set_yscale("log")
         axis.grid(alpha=0.3)
         axis.legend(fontsize=8)
