@@ -11,6 +11,7 @@ from tinydiffusion.utils.tracking import (
     RunLogger,
     null_logger,
     quartile_means,
+    read_metrics,
     timestep_quartile_losses,
     timestep_quartile_totals,
 )
@@ -26,6 +27,15 @@ class RecordingBackend:
 
     def close(self):
         self.closed = True
+
+
+class ExplodingBackend:
+    """A backend that cannot be closed."""
+
+    def write(self, metrics, step): ...
+
+    def close(self):
+        raise OSError("nope")
 
 
 def test_a_plain_object_satisfies_the_backend_protocol():
@@ -77,17 +87,10 @@ def test_the_context_manager_closes_every_backend():
 
 
 def test_close_reports_every_failing_backend():
-    class Exploding:
-        def write(self, metrics, step): ...
-
-        def close(self):
-            raise OSError("nope")
-
-        # A healthy backend after the failing one must still be closed.
-
+    # A healthy backend after the failing one must still be closed.
     healthy = RecordingBackend()
     with pytest.raises(ExceptionGroup):
-        RunLogger([Exploding(), healthy]).close()
+        RunLogger([ExplodingBackend(), healthy]).close()
     assert healthy.closed
 
 
@@ -147,6 +150,74 @@ def test_a_metric_cannot_overwrite_the_step_it_was_logged_at(tmp_path):
 
 def _reject(token):
     raise AssertionError(f"non-JSON token written: {token}")
+
+
+def test_each_reopen_stamps_a_new_session(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    for _ in range(3):
+        backend = JsonlBackend(path)
+        backend.write({"loss": 1.0}, 0)
+        backend.close()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["session"] for r in records] == [0, 1, 2]
+
+
+def test_a_resumed_run_reads_back_as_one_record_per_step(tmp_path):
+    # Resuming from step 1 replays steps the file already holds. The raw file
+    # keeps both copies -- the first run's are still what it measured -- but a
+    # reader wants the run as it now stands, not one that doubles back.
+    path = tmp_path / "metrics.jsonl"
+    first = JsonlBackend(path)
+    for step, loss in enumerate((3.0, 2.0, 1.0)):
+        first.write({"loss": loss}, step)
+    first.close()
+
+    resumed = JsonlBackend(path)
+    for step, loss in ((1, 0.5), (2, 0.25)):
+        resumed.write({"loss": loss}, step)
+    resumed.close()
+
+    assert len(path.read_text().splitlines()) == 5
+    assert [(r["step"], r["loss"]) for r in read_metrics(path)] == [(0, 3.0), (1, 0.5), (2, 0.25)]
+
+
+def test_reading_a_file_written_before_sessions_existed(tmp_path):
+    # No session key at all: file order is then the only ordering there is.
+    path = tmp_path / "metrics.jsonl"
+    path.write_text('{"step": 0, "loss": 1.0}\n{"step": 0, "loss": 2.0}\n')
+    assert read_metrics(path) == [{"step": 0, "loss": 2.0}]
+
+
+def test_a_truncated_final_line_does_not_lose_the_epochs_before_it(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    backend = JsonlBackend(path)
+    backend.write({"loss": 1.0}, 0)
+    backend.close()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"step": 1, "los')
+
+    assert [r["step"] for r in read_metrics(path)] == [0]
+
+
+def test_reading_a_missing_file_is_empty(tmp_path):
+    assert read_metrics(tmp_path / "nothing.jsonl") == []
+
+
+def test_a_failing_close_does_not_shadow_the_error_that_ended_the_run():
+    # The training exception is the one worth reading; a file handle that
+    # would not close is a footnote to it.
+    with (
+        pytest.warns(UserWarning, match="nope"),
+        pytest.raises(RuntimeError, match="diverged"),
+        RunLogger([ExplodingBackend()]),
+    ):
+        raise RuntimeError("diverged")
+
+
+def test_a_failing_close_still_raises_when_the_block_succeeded():
+    with pytest.raises(ExceptionGroup), RunLogger([ExplodingBackend()]):
+        pass
 
 
 def test_closing_twice_is_harmless(tmp_path):

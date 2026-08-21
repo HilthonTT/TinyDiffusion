@@ -14,6 +14,7 @@ actually shows a trend.
 import json
 import math
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ __all__ = [
     "TensorBoardBackend",
     "null_logger",
     "quartile_means",
+    "read_metrics",
     "timestep_quartile_losses",
     "timestep_quartile_totals",
 ]
@@ -70,6 +72,78 @@ def _jsonable(value: float) -> float | None:
         `value`, or None if it is NaN or an infinity.
     """
     return value if math.isfinite(value) else None
+
+
+def _records(path: Path) -> list[dict[str, Any]]:
+    """Parse a metrics file, skipping anything unreadable.
+
+    A run killed mid-write can leave a truncated final line, and that half a
+    record is not a reason to refuse to read the epochs before it.
+
+    Args:
+        path: the JSONL file. A missing file reads as empty.
+
+    Returns:
+        One dict per parsable line, in file order.
+    """
+    if not path.exists():
+        return []
+
+    parsed = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            parsed.append(record)
+    return parsed
+
+
+def _next_session(path: Path) -> int:
+    """The session number a backend about to append to `path` should stamp.
+
+    Args:
+        path: the JSONL file that is about to be opened for appending.
+
+    Returns:
+        One past the highest session already in the file, or 0 for a new one.
+    """
+    sessions = [
+        record["session"] for record in _records(path) if isinstance(record.get("session"), int)
+    ]
+    return max(sessions) + 1 if sessions else 0
+
+
+def read_metrics(path: Path) -> list[dict[str, Any]]:
+    """Read a metrics file back as one record per step, newest session first.
+
+    Resuming appends a second copy of every step it replays, so the raw file
+    holds more lines than the run has epochs. Reading it back is where that is
+    resolved: the last session to write a step is the one that owns it, and
+    the superseded records are dropped.
+
+    Args:
+        path: the JSONL file, usually ``log_dir/metrics.jsonl``. A missing
+            file reads as empty.
+
+    Returns:
+        Records sorted by step, one per step, each the newest written for it.
+        Unparsable lines are skipped.
+    """
+    latest: dict[int, dict[str, Any]] = {}
+    for record in _records(path):
+        step = record.get("step")
+        if not isinstance(step, int):
+            continue
+        previous = latest.get(step)
+        # Ordered by session rather than by position: a file written before
+        # sessions existed has none, and then file order is all there is.
+        if previous is None or record.get("session", 0) >= previous.get("session", 0):
+            latest[step] = record
+    return [latest[step] for step in sorted(latest)]
 
 
 @runtime_checkable
@@ -156,13 +230,21 @@ class JsonlBackend:
     mid-flight just writes a wider object, where a CSV would have to rewrite
     every row already on disk.
 
-    Every record carries the reserved keys ``step`` and ``time``, and they win
-    over a metric of the same name: ``step`` is what every reader joins on, so
-    a stray metric called ``step`` must not be able to overwrite it.
+    Every record carries the reserved keys ``step``, ``time`` and ``session``,
+    and they win over a metric of the same name: ``step`` is what every reader
+    joins on, so a stray metric called ``step`` must not be able to overwrite
+    it.
+
+    ``session`` counts how many times this file has been opened for writing,
+    which is what makes a resumed run readable. Resuming from epoch 5 replays
+    steps 5 onwards into a file that already holds them; without a session the
+    two are indistinguishable, and a plot of the column shows the run doubling
+    back on itself. :func:`read_metrics` keeps the newest session per step.
     """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._session = _next_session(path)
         self._handle = path.open("a", encoding="utf-8")
 
     def write(self, metrics: Mapping[str, float], step: int) -> None:
@@ -171,14 +253,15 @@ class JsonlBackend:
         Non-finite values are stored as ``null``; see :func:`_jsonable`.
 
         Args:
-            metrics: metric name to value. A ``step`` or ``time`` entry is
-                dropped in favour of this backend's own.
+            metrics: metric name to value. A ``step``, ``time`` or ``session``
+                entry is dropped in favour of this backend's own.
             step: step index, stored alongside a wall-clock timestamp.
         """
         record: dict[str, Any] = {
             **{key: _jsonable(value) for key, value in metrics.items()},
             "step": step,
             "time": time.time(),
+            "session": self._session,
         }
         # allow_nan=False so anything that slipped past _jsonable raises here
         # rather than writing a token no strict parser will read back.
@@ -358,12 +441,27 @@ class RunLogger:
     ) -> None:
         """Close the backends on the way out.
 
+        A close that fails while the block is already unwinding is warned
+        about rather than raised. Training is a long block to lose: raising
+        here would replace whatever the loop failed on — the exception worth
+        reading — with a bookkeeping error about a file handle, and demote the
+        real one to a ``__context__`` few people look at. With no exception in
+        flight there is nothing to shadow, so it propagates as usual.
+
         Args:
             exc_type: exception class, if the block raised.
             exc: exception instance, if the block raised.
             traceback: traceback, if the block raised.
         """
-        self.close()
+        try:
+            self.close()
+        except ExceptionGroup as group:
+            if exc_type is None:
+                raise
+            warnings.warn(
+                f"{group.message}: {'; '.join(map(str, group.exceptions))}",
+                stacklevel=2,
+            )
 
 
 def timestep_quartile_totals(

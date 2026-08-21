@@ -393,11 +393,23 @@ threw away for inf/NaN gradients — a number that stays above zero is a reason 
 lower `lr`.
 
 `metrics.jsonl` is one JSON object per epoch, so a finished run is comparable
-against the next one without re-reading a log:
+against the next one without re-reading a log. Every record carries three
+reserved keys alongside the metrics: `step`, the wall-clock `time`, and
+`session`, which counts how many times the file has been appended to. A metric
+of the same name does not overwrite them.
+
+`session` is what makes a resumed run readable. Resuming from epoch 5 appends a
+second copy of every epoch from 5 on, so the raw file holds more lines than the
+run has epochs, and reading it straight through shows the loss doubling back on
+itself. `read_metrics` resolves that, keeping the newest session per step:
 
 ```bash
-python -c "import json;[print(json.loads(l)['train/loss']) for l in open('runs/mnist/metrics.jsonl')]"
+python -c "from pathlib import Path;from tinydiffusion.utils import read_metrics;[print(r['step'], r['train/loss']) for r in read_metrics(Path('runs/mnist/metrics.jsonl'))]"
 ```
+
+A metric that went to NaN or an infinity — a diverged run, most often — is
+stored as `null`. The bare `NaN` token Python's `json` would otherwise write is
+not JSON, and `jq` and `pandas.read_json` reject a file containing one outright.
 
 TensorBoard is optional and off by default. It needs the `tracking` extra
 (`uv sync --all-extras`, or `pip install 'tinydiffusion[tracking]'`) and writes

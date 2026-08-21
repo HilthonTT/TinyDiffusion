@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `read_metrics`, which reads `metrics.jsonl` back as one record per step. Every
+  record now also carries a `session` number, counting how many times the file
+  has been opened for appending, and the reader keeps the newest session for
+  each step. A resumed run appends a second copy of every epoch it replays, so
+  the raw file has more lines than the run has epochs and plotting it straight
+  through shows the loss doubling back on itself; both copies stay on disk,
+  since the first run did measure them, and the reader is where the run as it
+  now stands comes from.
 - Selectable sampling timestep spacing (`sample_spacing`, `--spacing`). The
   quadratic subsequence had been implemented and tested since the DDIM sampler
   landed but no config or flag could reach it, so every sampler ran uniform.
@@ -197,6 +205,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A metric that reached NaN or an infinity no longer makes `metrics.jsonl`
+  unparsable. Python's `json` writes the bare tokens `NaN` and `Infinity`,
+  which are an extension rather than JSON, and `jq` and `pandas.read_json`
+  reject the whole file over one of them — losing the log of a diverged run,
+  which is the run whose log is worth reading. Stored as `null` instead, so the
+  epoch is still there and the gap in it stays visible.
+- A metric named `step` or `time` no longer overwrites the step index or
+  timestamp in its own record. The reserved keys are now written last.
+- A backend that fails to close no longer replaces the exception that ended a
+  training run. `RunLogger.__exit__` raised the close failure out of a block
+  that was already unwinding, demoting whatever training actually failed on to
+  a `__context__` few people look at; with an exception in flight the close
+  failure is now a warning. It still raises when the block exited cleanly, when
+  there is nothing to shadow.
 - `amp_dtype = "bf16"` no longer runs emulated on a card without bfloat16
   units. The startup check asked `torch.cuda.is_bf16_supported()`, which
   counts the emulation path and so answers True on pre-Ampere hardware, and
