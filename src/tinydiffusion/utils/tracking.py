@@ -29,7 +29,9 @@ __all__ = [
     "RunLogger",
     "TensorBoardBackend",
     "null_logger",
+    "quartile_means",
     "timestep_quartile_losses",
+    "timestep_quartile_totals",
 ]
 
 METRICS_FILENAME = "metrics.jsonl"
@@ -332,17 +334,83 @@ class RunLogger:
         self.close()
 
 
-def timestep_quartile_losses(
+def timestep_quartile_totals(
     per_sample_loss: torch.Tensor,
     timesteps: torch.Tensor,
     num_timesteps: int,
-) -> dict[str, float]:
-    """Split a batch's losses into quartiles of the diffusion timestep.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bucket a batch's losses into quartiles of the diffusion timestep.
 
     A single averaged loss hides *where* the model is struggling. High-``t``
     error means the denoiser cannot recover structure from near-pure noise;
     low-``t`` error means it cannot clean up the last little bit. They call for
     different fixes, and the mean of the two moves for neither reason.
+
+    Totals rather than means, and tensors rather than floats, so a caller can
+    add these into a running pair over a whole epoch and read the result back
+    once at the end of it. Nothing here leaves the device, which is the point:
+    testing a bucket for emptiness or averaging it on the spot both mean asking
+    the device for an answer, and a training loop that does either has
+    reintroduced the per-batch synchronisation it went to some trouble to
+    remove.
+
+    Args:
+        per_sample_loss: shape ``(B,)`` loss for each item in the batch.
+        timesteps: shape ``(B,)`` integer timesteps those losses came from.
+        num_timesteps: the schedule length, used to size the buckets.
+
+    Returns:
+        Tuple of ``(sums, counts)``, both shape ``(4,)``, of the input's dtype
+        and on its device.
+
+    Raises:
+        ValueError: if the two tensors disagree on batch size.
+    """
+    if per_sample_loss.shape != timesteps.shape:
+        raise ValueError(
+            f"loss shape {tuple(per_sample_loss.shape)} does not match "
+            f"timestep shape {tuple(timesteps.shape)}"
+        )
+
+    # Integer arithmetic rather than a scale-and-truncate through float: with
+    # t and num_timesteps both integers this is exact for the whole range,
+    # where t * (4 / T) can land a boundary timestep on either side of it.
+    quartile = (timesteps * 4 // num_timesteps).clamp(0, 3)
+    empty = torch.zeros(4, dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    sums = empty.scatter_add(0, quartile, per_sample_loss)
+    counts = empty.scatter_add(0, quartile, torch.ones_like(per_sample_loss))
+    return sums, counts
+
+
+def quartile_means(sums: torch.Tensor, counts: torch.Tensor) -> dict[str, float]:
+    """Turn accumulated quartile totals into labelled means.
+
+    This is where the totals come back to the host, in one transfer — which is
+    what keeping them as tensors until now was for.
+
+    Args:
+        sums: shape ``(4,)`` summed loss per quartile.
+        counts: shape ``(4,)`` number of samples that went into each.
+
+    Returns:
+        Mapping like ``{"loss_q0": ..., "loss_q3": ...}``. Quartiles that saw
+        no samples are omitted rather than reported as a division by zero.
+    """
+    total, seen = torch.stack([sums.double(), counts.double()]).cpu().tolist()
+    return {f"loss_q{index}": total[index] / seen[index] for index in range(4) if seen[index]}
+
+
+def timestep_quartile_losses(
+    per_sample_loss: torch.Tensor,
+    timesteps: torch.Tensor,
+    num_timesteps: int,
+) -> dict[str, float]:
+    """Mean loss per timestep quartile, for one batch.
+
+    :func:`timestep_quartile_totals` followed by :func:`quartile_means`. This
+    is the convenient form for scoring a single batch; a training loop wants
+    the two halves apart, so it can accumulate the totals across an epoch and
+    pay for the read back only once.
 
     Args:
         per_sample_loss: shape ``(B,)`` loss for each item in the batch.
@@ -356,19 +424,7 @@ def timestep_quartile_losses(
     Raises:
         ValueError: if the two tensors disagree on batch size.
     """
-    if per_sample_loss.shape != timesteps.shape:
-        raise ValueError(
-            f"loss shape {tuple(per_sample_loss.shape)} does not match "
-            f"timestep shape {tuple(timesteps.shape)}"
-        )
-
-    quartile = (timesteps.float() * 4 / num_timesteps).long().clamp(0, 3)
-    out: dict[str, float] = {}
-    for index in range(4):
-        mask = quartile == index
-        if mask.any():
-            out[f"loss_q{index}"] = per_sample_loss[mask].mean().item()
-    return out
+    return quartile_means(*timestep_quartile_totals(per_sample_loss, timesteps, num_timesteps))
 
 
 @contextmanager

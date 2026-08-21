@@ -59,7 +59,7 @@ from tinydiffusion.utils.fp16 import (
     zero_grad,
 )
 from tinydiffusion.utils.seed import seed_everything
-from tinydiffusion.utils.tracking import RunLogger, timestep_quartile_losses
+from tinydiffusion.utils.tracking import RunLogger, quartile_means, timestep_quartile_totals
 
 __all__ = [
     "DRAIN_EVERY",
@@ -75,21 +75,26 @@ __all__ = [
 QUARTILE_EVERY = 8
 """Batches between timestep-quartile samples.
 
-Slicing the loss by timestep costs a device sync per quartile, which is real
-money on a GPU when the loop is otherwise asynchronous. The quartiles are only
-ever read as an epoch mean, and every batch draws its timesteps independently,
-so sampling one batch in eight measures the same thing for an eighth of the
-overhead.
+Bucketing the loss by timestep is a handful of extra kernels over a tensor the
+loop already holds — cheap, but not free, and nothing reads the result until the
+epoch ends. Every batch draws its timesteps independently, so one batch in eight
+estimates the same four numbers at an eighth of the cost.
+
+The totals are summed on the device across the whole epoch and read back once,
+by :func:`~tinydiffusion.utils.tracking.quartile_means`, for the reason
+:data:`DRAIN_EVERY` gives. Summing before dividing also makes each quartile's
+figure a mean over the samples that landed in it, rather than an average of
+per-batch means that counts a batch contributing two samples as heavily as one
+contributing fifty.
 """
 
 DRAIN_EVERY = 8
 """Batches between host reads of the per-batch metrics.
 
-Same reasoning as :data:`QUARTILE_EVERY`, applied to the two values every batch
-produces: the loss and the gradient norm. Reading either with ``.item()`` blocks
-the CPU until the GPU has caught up, which stops the loop queueing the next
-batch's work while the current one is still running — so the cost is not the
-copy but the pipeline bubble behind it.
+The loop hands the device work and moves on without waiting. Reading any value
+back with ``.item()`` reverses that: it blocks the CPU until the queue drains,
+so the loop stops queueing the next batch while the current one is still
+running — the cost is not the copy but the pipeline bubble behind it.
 
 Nothing needs those values *at* the batch that produced them. They are logged as
 an epoch mean and displayed as a smoothed average, so they are buffered on the
@@ -714,6 +719,10 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             # Metrics for batches whose values are still on the device. Drained
             # a run at a time; see DRAIN_EVERY.
             pending: list[dict[str, torch.Tensor | float]] = []
+            # Running quartile totals for the epoch, summed on the device and
+            # read back once after the loop; see QUARTILE_EVERY.
+            quartile_sums = torch.zeros(4, device=cfg.device)
+            quartile_counts = torch.zeros(4, device=cfg.device)
 
             with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
                 for batch, (x, y) in enumerate(pbar):
@@ -822,14 +831,18 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                         batch_metrics["train/skipped_step"] = float(not stepped)
                     if grad_norm is not None:
                         batch_metrics["train/grad_norm"] = grad_norm.detach().float()
-                    if batch % QUARTILE_EVERY == 0:
-                        batch_metrics |= {
-                            f"train/{name}": quartile_loss
-                            for name, quartile_loss in timestep_quartile_losses(
-                                terms.per_sample.float(), terms.timesteps, cfg.num_timesteps
-                            ).items()
-                        }
                     pending.append(batch_metrics)
+
+                    if batch % QUARTILE_EVERY == 0:
+                        # Added into the epoch's running totals rather than
+                        # averaged here: reading four bucket means off the
+                        # device per sampled batch is the same synchronisation
+                        # the buffer above exists to avoid.
+                        batch_sums, batch_counts = timestep_quartile_totals(
+                            terms.per_sample.float(), terms.timesteps, cfg.num_timesteps
+                        )
+                        quartile_sums += batch_sums
+                        quartile_counts += batch_counts
 
                     if len(pending) >= DRAIN_EVERY:
                         loss_ema = _drain_metrics(pending, logger, loss_ema)
@@ -867,6 +880,14 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             loss_ema = _drain_metrics(pending, logger, loss_ema)
 
             elapsed = time.perf_counter() - epoch_start
+            # Set rather than accumulated: the mean over the epoch has already
+            # been formed from the totals, and this is the one read back.
+            logger.set(
+                **{
+                    f"train/{name}": value
+                    for name, value in quartile_means(quartile_sums, quartile_counts).items()
+                }
+            )
             logger.set(
                 **{
                     "train/lr": float(optim.param_groups[0]["lr"]),

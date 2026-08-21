@@ -84,8 +84,9 @@ def test_the_logged_metrics_cover_loss_timesteps_and_throughput(tiny_cfg, fake_l
 
 
 def test_the_quartile_losses_average_to_the_epoch_loss(tiny_cfg, fake_loader):
-    # Not exactly equal — the quartile means are per batch — but a quartile
-    # that had drifted off the loss entirely would show up here.
+    # Not exactly equal — the quartiles cover one batch in QUARTILE_EVERY, and
+    # the loss covers all of them — but a quartile that had drifted off the
+    # loss entirely would show up here.
     train_module.train(tiny_cfg)
     record = _records(tiny_cfg)[0]
     quartiles = [v for k, v in record.items() if k.startswith("train/loss_q")]

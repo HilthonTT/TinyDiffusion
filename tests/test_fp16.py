@@ -124,16 +124,46 @@ def test_model_parameters_can_be_copied_back_onto_the_master():
 
 
 def test_gradients_reach_the_master_copy_in_float32():
+    # The gradients are assigned rather than produced by a backward pass. A
+    # float16 convolution backward is a CUDA path: on the CPU it goes through
+    # DNNL, which refuses it outright on processors without the right vector
+    # extensions, so driving this end to end here tests the host's instruction
+    # set rather than anything in this project. Widening half gradients onto
+    # the float32 master copy is what is under test, and it does not care where
+    # they came from. The real backward is covered on CUDA below.
     net = tiny_unet()
     net.convert_to_fp16()
     master = make_master_params(net.parameters())
-    net(torch.randn(2, 1, 16, 16), torch.randint(0, 10, (2,))).sum().backward()
+    for param in net.parameters():
+        # Half for the converted convolutions and float32 for everything else,
+        # which is the mix the real thing hands over. 0.5 is exact in both.
+        param.grad = torch.full_like(param, 0.5)
 
     model_grads_to_master_grads(list(net.parameters()), master)
 
     assert master[0].grad is not None
     assert master[0].grad.dtype is torch.float32
     assert master[0].grad.numel() == master[0].numel()
+    assert torch.equal(master[0].grad, torch.full_like(master[0].grad, 0.5))
+
+
+@pytest.mark.gpu
+def test_gradients_from_a_real_backward_pass_reach_the_master_copy():
+    # The end-to-end half of the test above, where float16 actually runs.
+    net = tiny_unet().cuda()
+    net.convert_to_fp16()
+    master = make_master_params(net.parameters())
+    x = torch.randn(2, 1, 16, 16, device="cuda")
+    t = torch.randint(0, 10, (2,), device="cuda")
+    net(x, t).sum().backward()
+
+    model_grads_to_master_grads(list(net.parameters()), master)
+
+    assert master[0].grad is not None
+    assert master[0].grad.dtype is torch.float32
+    assert master[0].grad.numel() == master[0].numel()
+    assert torch.isfinite(master[0].grad).all()
+    assert master[0].grad.any()
 
 
 def test_a_parameter_with_no_gradient_becomes_zeros_rather_than_a_hole():

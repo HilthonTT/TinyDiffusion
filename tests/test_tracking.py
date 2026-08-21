@@ -10,7 +10,9 @@ from tinydiffusion.utils.tracking import (
     LoggerBackend,
     RunLogger,
     null_logger,
+    quartile_means,
     timestep_quartile_losses,
+    timestep_quartile_totals,
 )
 
 
@@ -163,3 +165,55 @@ def test_the_last_timestep_stays_in_the_final_quartile():
 def test_mismatched_shapes_are_rejected():
     with pytest.raises(ValueError, match="does not match"):
         timestep_quartile_losses(torch.zeros(3), torch.zeros(2, dtype=torch.long), 100)
+
+
+def test_totals_are_sums_and_counts_rather_than_means():
+    losses = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    steps = torch.tensor([0, 30, 55, 60, 90])
+
+    sums, counts = timestep_quartile_totals(losses, steps, num_timesteps=100)
+
+    assert torch.equal(sums, torch.tensor([1.0, 2.0, 7.0, 5.0]))
+    assert torch.equal(counts, torch.tensor([1.0, 1.0, 2.0, 1.0]))
+
+
+def test_totals_leave_everything_on_the_device_they_were_given():
+    # The whole reason they are totals: a training loop adds them into a
+    # running pair and reads the result back once, at the end of the epoch.
+    losses = torch.tensor([1.0, 2.0])
+    sums, counts = timestep_quartile_totals(losses, torch.tensor([0, 90]), num_timesteps=100)
+
+    assert isinstance(sums, torch.Tensor) and isinstance(counts, torch.Tensor)
+    assert sums.device == losses.device and counts.device == losses.device
+    assert sums.dtype is losses.dtype
+
+
+def test_totals_accumulate_across_batches_into_a_pooled_mean():
+    # One batch lands a single sample in q0, the next lands three. Pooling has
+    # to weight them 1:3; averaging the two batch means would call it 1:1 and
+    # report 6.0 instead.
+    sums, counts = torch.zeros(4), torch.zeros(4)
+    for losses, steps in (
+        (torch.tensor([10.0]), torch.tensor([0])),
+        (torch.tensor([2.0, 2.0, 2.0]), torch.tensor([0, 1, 2])),
+    ):
+        batch_sums, batch_counts = timestep_quartile_totals(losses, steps, num_timesteps=100)
+        sums += batch_sums
+        counts += batch_counts
+
+    assert quartile_means(sums, counts) == {"loss_q0": 4.0}
+
+
+def test_means_omit_buckets_that_saw_nothing():
+    sums = torch.tensor([3.0, 0.0, 8.0, 0.0])
+    counts = torch.tensor([1.0, 0.0, 2.0, 0.0])
+
+    assert quartile_means(sums, counts) == {"loss_q0": 3.0, "loss_q2": 4.0}
+
+
+def test_the_convenience_form_is_the_two_halves_composed():
+    losses, steps = torch.rand(64), torch.randint(0, 1000, (64,))
+
+    assert timestep_quartile_losses(losses, steps, 1000) == quartile_means(
+        *timestep_quartile_totals(losses, steps, 1000)
+    )
