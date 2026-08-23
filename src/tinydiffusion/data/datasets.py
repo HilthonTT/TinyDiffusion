@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
 
@@ -29,6 +29,7 @@ __all__ = [
     "image_dataloader",
     "image_dataset",
     "image_transform",
+    "set_loader_epoch",
 ]
 
 
@@ -202,6 +203,9 @@ def image_dataloader(
     drop_last: bool | None = None,
     augment: bool = False,
     generator: torch.Generator | None = None,
+    num_replicas: int | None = None,
+    rank: int | None = None,
+    seed: int = 0,
 ) -> DataLoader[tuple[torch.Tensor, int]]:
     """Build a dataloader over a registered dataset, ready for a training loop.
 
@@ -228,10 +232,27 @@ def image_dataloader(
             every epoch, so re-seeding it between epochs is what lets a caller
             make the order a function of the epoch rather than of how many
             epochs have already run.
+        num_replicas: how many processes are splitting this dataset between
+            them, or None for the ordinary undivided loader. Passing it swaps
+            the shuffling sampler for a
+            :class:`~torch.utils.data.DistributedSampler`, so each process
+            draws a disjoint shard and one pass over the loader is one pass
+            over ``1/num_replicas`` of the data.
+        rank: this process's index in that split. Required alongside
+            `num_replicas` and ignored without it.
+        seed: base seed for the distributed shuffle. Combined with the epoch
+            that :func:`set_loader_epoch` sets, so sharded batch order is a
+            function of ``(seed, epoch)`` exactly as `generator` makes it for
+            the undivided loader.
 
     Returns:
         A configured :class:`~torch.utils.data.DataLoader`.
+
+    Raises:
+        ValueError: if `num_replicas` is given without `rank`.
     """
+    if num_replicas is not None and rank is None:
+        raise ValueError("num_replicas needs a rank to go with it")
     dataset = image_dataset(
         spec,
         root,
@@ -247,16 +268,58 @@ def image_dataloader(
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 2
 
+    wants_shuffle = train if shuffle is None else shuffle
+    wants_drop_last = train if drop_last is None else drop_last
+
+    if num_replicas is not None:
+        # The sampler owns the shuffle now, and DataLoader rejects being given
+        # both — so `shuffle` moves into the sampler rather than staying here.
+        #
+        # drop_last is the sampler's too, and it means something stricter than
+        # the loader's: with it set, every rank is handed the same number of
+        # batches, which is what keeps the gradient all-reduces in lockstep. It
+        # is also why scoring passes it False and pads instead — a rank short
+        # by one batch would leave the others waiting at a collective that
+        # never comes.
+        loader_kwargs["sampler"] = DistributedSampler(
+            dataset,
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=wants_shuffle,
+            seed=seed,
+            drop_last=wants_drop_last,
+        )
+        wants_shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=train if shuffle is None else shuffle,
-        drop_last=train if drop_last is None else drop_last,
+        shuffle=wants_shuffle,
+        drop_last=wants_drop_last,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available() if pin_memory is None else pin_memory,
         generator=generator,
         **loader_kwargs,
     )
+
+
+def set_loader_epoch(loader: DataLoader[tuple[torch.Tensor, int]], epoch: int) -> None:
+    """Tell a sharded loader which epoch is starting.
+
+    A :class:`~torch.utils.data.DistributedSampler` draws its permutation from
+    ``seed + epoch``, and it has no way to know the epoch advanced unless it is
+    told: left alone it reshuffles to the *same* order every epoch, and each
+    rank sees the identical shard of the data from start to finish. That is a
+    quiet failure — the loss still falls, just on a fraction of the dataset.
+
+    Args:
+        loader: a loader from :func:`image_dataloader`. One built without
+            ``num_replicas`` has no sampler to advance, and is left alone.
+        epoch: the epoch about to run.
+    """
+    sampler = getattr(loader, "sampler", None)
+    if isinstance(sampler, DistributedSampler):
+        sampler.set_epoch(epoch)
 
 
 def denormalize(x: torch.Tensor) -> torch.Tensor:

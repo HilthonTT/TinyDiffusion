@@ -8,6 +8,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Multi-GPU training, over `torch.distributed`. One process per GPU, launched
+  by `torchrun --nproc_per_node=N -m tinydiffusion train ...`: every rank holds
+  a complete copy of the network and draws a disjoint shard of each epoch, and
+  `DistributedDataParallel` averages the gradients during the backward pass, so
+  an epoch is still one pass over the dataset rather than N passes over all of
+  it. Nothing in the config turns this on — the launcher sets `RANK`,
+  `WORLD_SIZE` and `LOCAL_RANK`, and their absence is what an ordinary
+  single-process run looks like, so the path every existing test takes is
+  untouched. `--nproc_per_node=1` is deliberately not a group.
+  The new `tinydiffusion.training.distributed` holds the whole of it: the
+  process-group lifecycle, the rank facts, and the four collectives the loop
+  needs. On one process a `Distributed` is rank 0 of 1, every `is_main` guard
+  is true and every collective returns its argument untouched, which is what
+  keeps the training loop from branching on whether it is distributed at all.
+  Rank 0 alone writes `metrics.jsonl`, the sample grids, `last.pt` and
+  `best.pt`, and alone draws the progress bar and prints the startup lines. The
+  metrics it records are the group's rather than its own shard's: the loss is
+  all-reduced before it is buffered, the timestep quartiles are totalled once
+  per epoch, and `time/images_per_second` covers every rank, so it is
+  comparable against a single-GPU run. The startup line reports the effective
+  batch — `batch_size * grad_accum * world_size` — because that is what an
+  optimiser step now averages over, and it is a real change to the run rather
+  than only to its throughput.
+  The checkpoints are ordinary ones. DDP shares its parameters with the eager
+  network exactly as `compile` does, so the EMA, the checkpoint and every
+  sampler go on using the unwrapped module and no key carries a `module.`
+  prefix — a four-GPU run's `best.pt` resumes on one. `compile` composes with
+  it, compiling the wrapper rather than the inner module so Dynamo can still
+  overlap the all-reduces with the backward pass.
+  Ctrl+C still asks. The launcher signals each process separately, so the ranks
+  can see it a batch or two apart; the group agrees on the flag at a fixed
+  batch cadence, rank 0 asks the question, and the answer is broadcast — the
+  alternative being the first rank to leave the loop stranding the others at
+  the next all-reduce for the whole hour-long timeout. An accumulated group
+  reduces once rather than `grad_accum` times, via `no_sync` on every
+  micro-batch but the one that applies.
+  Verified by `tests/test_distributed.py`, which runs a real two-process group
+  on the CPU over gloo: the ranks shard the data disjointly, end on
+  bit-identical weights, and write exactly one set of files. The NCCL path and
+  any scaling figure are unmeasured — the machine behind this has one GPU — and
+  USAGE.md says so where it documents the feature.
+
+- `python -m tinydiffusion`, running the same CLI as the console script. It
+  exists because a launcher that starts the processes itself needs a module to
+  hand them rather than a script on the PATH, which is what the `torchrun`
+  invocation above uses.
+
+- `RESULTS.md`: what the shipped configs actually score, with the exact
+  commands, the checkpoint, the hardware and the run length behind each number.
+
 - `tinydiffusion tui`, a terminal dashboard that trains the model and shows it
   happening: the resolved plan, epoch and batch progress with an ETA,
   throughput, sparklines of train and validation loss, the loss split by

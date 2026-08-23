@@ -13,17 +13,19 @@ import importlib.util
 import shutil
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.optim.lr_scheduler import LRScheduler
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from tinydiffusion.data.datasets import denormalize, image_dataloader
+from tinydiffusion.data.datasets import denormalize, image_dataloader, set_loader_epoch
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import Conditioned, conditioned, drop_labels
 from tinydiffusion.diffusion.samplers import get_sampler
@@ -39,8 +41,21 @@ from tinydiffusion.training.checkpoints import (
     save_checkpoint,
 )
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.training.distributed import (
+    all_reduce_mean,
+    all_reduce_sum,
+    any_rank,
+    barrier,
+    broadcast_object,
+)
+from tinydiffusion.training.distributed import (
+    setup as distributed_setup,
+)
+from tinydiffusion.training.distributed import (
+    shutdown as distributed_shutdown,
+)
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.interrupt import interrupt_guard
+from tinydiffusion.training.interrupt import InterruptChoice, interrupt_guard
 from tinydiffusion.training.lr import lr_factor
 from tinydiffusion.training.model import build_model
 from tinydiffusion.training.observer import BatchProgress, TrainObserver, TrainPlan
@@ -49,7 +64,6 @@ from tinydiffusion.utils.device import (
     bf16_supported,
     describe_device,
     enable_tf32,
-    resolve_device,
 )
 from tinydiffusion.utils.fp16 import (
     make_master_params,
@@ -112,6 +126,19 @@ in the same order, read later.
 The progress bar's loss therefore updates every eighth batch rather than every
 batch, which is the whole of the visible difference.
 """
+
+
+def _silent(message: str) -> None:
+    """Swallow a run's messages.
+
+    What ``say`` becomes on the non-main ranks of a distributed run: the plan
+    line, the resume notice and the new-best line are all worth printing once,
+    and printing them once per GPU is how a four-way run turns its own output
+    into noise.
+
+    Args:
+        message: the line that is not going anywhere.
+    """
 
 
 def _drain_metrics(
@@ -520,10 +547,21 @@ def train(
             model than `cfg` describes.
     """
     cfg = cfg or TrainConfig()
+    # Joins the process group when a launcher started one, and is a no-op that
+    # resolves the device exactly as before when it did not. Everything below
+    # reads `group` rather than asking whether it is distributed: on a single
+    # process it is rank 0 of 1, every `is_main` guard is true, and every
+    # collective returns its argument untouched.
+    group, device = distributed_setup(cfg.device)
     # Every message below goes through this rather than to stdout directly, so
-    # a watcher can take them without the loop caring where they end up.
-    say: Callable[[str], None] = print if observer is None else observer.on_message
-    cfg = replace(cfg, device=resolve_device(cfg.device))
+    # a watcher can take them without the loop caring where they end up — and
+    # so the non-main ranks of a distributed run say nothing at all, rather
+    # than printing the same plan line once per GPU.
+    if observer is not None:
+        say: Callable[[str], None] = observer.on_message
+    else:
+        say = print if group.is_main else _silent
+    cfg = replace(cfg, device=device)
     spec = cfg.dataset_spec()
     seed_everything(cfg.seed, deterministic=cfg.deterministic)
 
@@ -555,6 +593,18 @@ def train(
         enable_tf32()
 
     diffusion = build_model(cfg).to(cfg.device)
+    if group.enabled:
+        # Deliberately *after* the network is built, and only after. Every rank
+        # has to start from identical weights — DDP asserts on it — which is
+        # what the shared cfg.seed above gives, so this cannot move earlier.
+        #
+        # From here on the ranks want to differ: the timesteps and the noise
+        # for each batch come off the global RNG, and four ranks drawing the
+        # same t for their own shard would turn a four-way run into a noisier
+        # estimate of the same gradient rather than a four-times-larger batch.
+        torch.manual_seed(cfg.seed + group.rank)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.seed + group.rank)
     if cfg.channels_last:
         # Before the EMA is taken, so the shadow weights carry the same layout
         # and the copy back at the end of the run does not have to convert.
@@ -567,11 +617,43 @@ def train(
     # and every sampler go on using. A compiled run therefore writes ordinary
     # checkpoints, rather than ones whose keys all carry a `_orig_mod.` prefix.
     train_net: nn.Module = diffusion.net
+    # The same trick, and for the same reason: DDP wraps the network and shares
+    # its parameters, so the checkpoint, the EMA and every sampler go on using
+    # the eager `diffusion.net` and never see a `module.` prefix in a key.
+    #
+    # Kept as its own name as well as in `train_net` because `no_sync` below is
+    # a DDP method, and compiling would put a wrapper in front of it.
+    ddp: DistributedDataParallel | None = None
+    if group.enabled:
+        ddp = DistributedDataParallel(
+            diffusion.net,
+            # None on CPU/gloo, where there is no device index to name.
+            device_ids=[group.local_rank] if device_type == "cuda" else None,
+            output_device=group.local_rank if device_type == "cuda" else None,
+            # Every parameter of the U-Net takes part in every forward pass, so
+            # the graph traversal that finding unused ones costs is pure
+            # overhead — and leaving it off turns a future architecture change
+            # that *does* skip a parameter into a loud error rather than a
+            # silent hang.
+            find_unused_parameters=False,
+            # Point each .grad at its slot in the reduction bucket instead of
+            # keeping a second copy of it. Saves one model's worth of gradient
+            # memory per rank, which is what buys back the headroom DDP's
+            # buckets cost in the first place.
+            gradient_as_bucket_view=True,
+        )
+        train_net = ddp
     if cfg.compile and _can_compile(device_type):
         # torch.compile is annotated as returning a bare callable; what it
         # returns is a Module wrapping — and sharing the parameters of — the
         # one it was given.
-        train_net = cast(nn.Module, torch.compile(diffusion.net))
+        #
+        # Compiles whatever `train_net` already is, so under a group that is
+        # the DDP wrapper rather than the bare network. That order is the
+        # supported one: Dynamo recognises DDP and splits the graph at the
+        # bucket boundaries so the all-reduces still overlap the backward pass,
+        # which compiling the inner module would have hidden from it.
+        train_net = cast(nn.Module, torch.compile(train_net))
     elif cfg.compile:
         say(
             "compile is on but Triton is not installed, so the CUDA backend cannot build "
@@ -622,6 +704,13 @@ def train(
         # flip preserves the label.
         augment=True,
         generator=loader_rng,
+        # None outside a group, which leaves the loader exactly as it was.
+        # Inside one, this is what makes the run data-parallel: each rank draws
+        # a disjoint shard, so an epoch is still one pass over the dataset and
+        # not `world_size` passes over all of it.
+        num_replicas=group.world_size if group.enabled else None,
+        rank=group.rank if group.enabled else None,
+        seed=cfg.seed,
     )
 
     # Optimiser steps, not batches: an accumulated group is one step, and the
@@ -727,12 +816,26 @@ def train(
     if cfg.channels_last:
         precision += " | channels_last"
     steps = f"{steps_per_epoch} steps/epoch"
-    if cfg.grad_accum > 1:
-        steps += f" (x{cfg.grad_accum} accumulated, {cfg.batch_size * cfg.grad_accum} effective)"
+    # What one optimiser step actually averages over, which under a group is
+    # neither the config's batch_size nor anything the loop prints elsewhere:
+    # every rank contributes its own batch to the same all-reduced gradient.
+    effective_batch = cfg.batch_size * cfg.grad_accum * group.world_size
+    if effective_batch != cfg.batch_size:
+        # Named separately because they are different mechanisms reaching the
+        # same number: accumulation trades steps for batch on one device, the
+        # world size adds devices. A run using only the second would otherwise
+        # report "x1 accumulated", which is true and misleading.
+        how = []
+        if cfg.grad_accum > 1:
+            how.append(f"x{cfg.grad_accum} accumulated")
+        if group.world_size > 1:
+            how.append(f"x{group.world_size} ranks")
+        steps += f" ({', '.join(how)}, {effective_batch} effective)"
+    parallelism = f" | {group}" if group.enabled else ""
     say(
         f"{n_params / 1e6:.2f}M parameters | {spec.name} {cfg.image_size}px x{spec.channels} | "
         f"device {describe_device(cfg.device)} | {precision} | {conditioning} | {plan} | "
-        f"{steps} | {scoring}"
+        f"{steps} | {scoring}{parallelism}"
     )
     if observer is not None:
         # The same facts the line above just said, as data. A display should
@@ -781,17 +884,26 @@ def train(
     cancelled = False
 
     extra: list[LoggerBackend] = [] if observer is None else [_ObserverBackend(observer)]
+    # Rank 0 keeps the record for the whole group. The metrics it writes are
+    # already the group's — the losses below are all-reduced before they reach
+    # the logger — so a second rank appending to metrics.jsonl would not add
+    # information, only interleave with the first and corrupt the file.
     logger = RunLogger.for_run(
         cfg.log_dir,
-        console=cfg.log_console,
-        jsonl=cfg.log_jsonl,
-        tensorboard=cfg.tensorboard,
+        console=cfg.log_console and group.is_main,
+        jsonl=cfg.log_jsonl and group.is_main,
+        tensorboard=cfg.tensorboard and group.is_main,
         extra=extra,
     )
 
     with logger, interrupt_guard() as interrupts:
         for epoch in range(start_epoch, cfg.num_epochs):
             loader_rng.manual_seed(epoch_seed(cfg.seed, epoch))
+            # The sharded loader's own version of the line above: its sampler
+            # shuffles from (seed, epoch) and has to be told the epoch changed,
+            # or every rank re-draws the shard it saw last time. A no-op when
+            # the loader is not sharded.
+            set_loader_epoch(loader, epoch)
             diffusion.train()
             loss_ema: float | None = None
             epoch_start = time.perf_counter()
@@ -809,7 +921,10 @@ def train(
             with tqdm(
                 loader,
                 desc=f"epoch {epoch + 1}/{cfg.num_epochs}",
-                disable=observer is not None,
+                # One bar for the group, not one per GPU redrawing over the
+                # others. The ranks run in lockstep anyway, so rank 0's bar is
+                # an accurate picture of all of them.
+                disable=observer is not None or not group.is_main,
             ) as pbar:
                 for batch, (x, y) in enumerate(pbar):
                     x = x.to(cfg.device, non_blocking=True)
@@ -850,11 +965,22 @@ def train(
                         terms = diffusion.loss_terms(x, model=model)
                     loss = terms.loss
 
-                    # torch ships `Tensor.backward` unannotated, so now that the
-                    # loss is a real Tensor rather than the Any that
-                    # `nn.Module.__call__` returns, strict mypy calls this an
-                    # untyped call.
-                    scaler.scale(loss / group_size).backward()  # type: ignore[no-untyped-call]
+                    # DDP all-reduces the gradients *during* the backward pass,
+                    # which is what overlaps the communication with the compute
+                    # — but it means an accumulated group would pay for
+                    # `grad_accum` all-reduces to produce one update. no_sync
+                    # suppresses it on every micro-batch except the one that
+                    # applies, whose backward then reduces the whole
+                    # accumulated gradient in a single pass.
+                    sync: AbstractContextManager[None] = nullcontext()
+                    if ddp is not None and not applies:
+                        sync = ddp.no_sync()
+                    with sync:
+                        # torch ships `Tensor.backward` unannotated, so now that
+                        # the loss is a real Tensor rather than the Any that
+                        # `nn.Module.__call__` returns, strict mypy calls this
+                        # an untyped call.
+                        scaler.scale(loss / group_size).backward()  # type: ignore[no-untyped-call]
 
                     # Left as a device tensor rather than read here: it is
                     # only ever logged, so it rides the same deferred transfer
@@ -907,9 +1033,19 @@ def train(
                     # stacks: under autocast the loss can come back as float16
                     # while the gradient norm, taken on float32 parameters,
                     # does not.
-                    batch_metrics: dict[str, torch.Tensor | float] = {
-                        "train/loss": loss.detach().float()
-                    }
+                    loss_metric = loss.detach().float()
+                    if group.enabled:
+                        # So the logged loss is the whole global batch's rather
+                        # than this rank's shard of it. Cloned first: the
+                        # reduction is in place, and `.float()` on a tensor
+                        # that is already float32 hands back the same storage
+                        # the backward pass just read.
+                        #
+                        # This is a device-side collective, not a host read —
+                        # it queues behind the batch like everything else, so
+                        # it does not undo what DRAIN_EVERY is buying.
+                        loss_metric = all_reduce_mean(loss_metric.clone(), group)
+                    batch_metrics: dict[str, torch.Tensor | float] = {"train/loss": loss_metric}
                     if applies:
                         # Only meaningful where a step was attempted; recording
                         # them per micro-batch would dilute the rate by
@@ -970,28 +1106,54 @@ def train(
                         cancelled = True
                         break
 
-                    if interrupts.requested:
+                    # Under a group the flag is not this rank's to act on. The
+                    # launcher delivers the signal to each process
+                    # independently, so rank 0 can see it a batch or two before
+                    # rank 3 does — and a rank that left the loop early strands
+                    # the others at the next gradient all-reduce until the
+                    # timeout expires. Both collectives below are therefore
+                    # asked at a batch index every rank agrees on rather than
+                    # wherever the signal happened to land.
+                    interrupted = interrupts.requested
+                    if group.enabled:
+                        aligned = batch % DRAIN_EVERY == 0
+                        interrupted = (
+                            any_rank(interrupted, group, device=cfg.device) if aligned else False
+                        )
+
+                    if interrupted:
                         # Batch boundary: model, optimiser and EMA all agree, so
                         # a checkpoint written here resumes cleanly.
-                        with tqdm.external_write_mode():
-                            choice = interrupts.resolve()
+                        #
+                        # Only rank 0 has a terminal to prompt in — the others
+                        # would read EOF and resolve to the unattended default
+                        # on their own — so it decides for the group and says
+                        # what it decided.
+                        choice: InterruptChoice | None = None
+                        if group.is_main:
+                            with tqdm.external_write_mode():
+                                choice = interrupts.resolve()
+                        # broadcast_object is typed Any in and Any out, since
+                        # what crosses it is whatever the caller sent.
+                        choice = cast(InterruptChoice, broadcast_object(choice, group))
                         if not choice.stop:
                             continue
                         if choice.save:
                             # The last *completed* epoch is the one before this
                             # partial one, so resuming replays it in full.
-                            _save_and_report(
-                                cfg,
-                                epoch=epoch - 1,
-                                diffusion=diffusion,
-                                ema=ema,
-                                optim=optim,
-                                scaler=scaler,
-                                best_val=best_val,
-                                sched=sched,
-                                model_state=_model_state(diffusion, master_params),
-                                say=say,
-                            )
+                            if group.is_main:
+                                _save_and_report(
+                                    cfg,
+                                    epoch=epoch - 1,
+                                    diffusion=diffusion,
+                                    ema=ema,
+                                    optim=optim,
+                                    scaler=scaler,
+                                    best_val=best_val,
+                                    sched=sched,
+                                    model_state=_model_state(diffusion, master_params),
+                                    say=say,
+                                )
                         else:
                             say("cancelled without saving")
                         cancelled = True
@@ -1002,6 +1164,19 @@ def train(
             loss_ema = _drain_metrics(pending, logger, loss_ema)
 
             elapsed = time.perf_counter() - epoch_start
+            if group.enabled:
+                # Each rank bucketed only its own shard, so rank 0's totals
+                # describe an eighth of the epoch. Summed rather than averaged
+                # — quartile_means divides by the counts, and both sides of
+                # that division have to cover the same images. One collective
+                # per epoch, against one per batch had the buckets been
+                # reduced where they were filled.
+                #
+                # torch.distributed has no all-reduce that takes two tensors,
+                # and stacking them to save a call would cost the copy it
+                # saved, so this is two.
+                all_reduce_sum(quartile_sums, group)
+                all_reduce_sum(quartile_counts, group)
             # Set rather than accumulated: the mean over the epoch has already
             # been formed from the totals, and this is the one read back.
             logger.set(
@@ -1019,7 +1194,13 @@ def train(
                     # full_fp16, none of which `amp` alone distinguishes.
                     "train/amp_scale": float(scaler.get_scale()) if scaler.is_enabled() else 1.0,
                     "time/epoch_seconds": elapsed,
-                    "time/images_per_second": images / elapsed if elapsed > 0 else 0.0,
+                    # Scaled to the whole group rather than reduced: the ranks
+                    # run the same number of batches at the same batch size,
+                    # and this is the number worth comparing between a one-GPU
+                    # run and a four-GPU one.
+                    "time/images_per_second": (
+                        images * group.world_size / elapsed if elapsed > 0 else 0.0
+                    ),
                 }
             )
             new_best: float | None = None
@@ -1048,43 +1229,49 @@ def train(
             if cancelled:
                 break
 
-            if (
-                cfg.sample_every > 0
-                and (epoch + 1) % cfg.sample_every == 0
-                and reference is not None
-            ):
-                grid = save_samples(
-                    diffusion,
-                    ema,
-                    reference,
-                    cfg,
-                    epoch,
-                    labels=reference_labels,
-                    noise=sample_noise,
+            # Everything from here to the end of the epoch is rank 0's alone:
+            # the weights are identical on every rank, so the other three would
+            # spend the time redrawing the same grid and racing each other to
+            # write the same two files. No collective is skipped by the guard,
+            # so the ranks that go straight on to the next epoch stay in step.
+            if group.is_main:
+                if (
+                    cfg.sample_every > 0
+                    and (epoch + 1) % cfg.sample_every == 0
+                    and reference is not None
+                ):
+                    grid = save_samples(
+                        diffusion,
+                        ema,
+                        reference,
+                        cfg,
+                        epoch,
+                        labels=reference_labels,
+                        noise=sample_noise,
+                    )
+                    if observer is not None:
+                        observer.on_sample(grid)
+
+                last = cfg.ckpt_dir / LAST_CHECKPOINT
+                save_checkpoint(
+                    last,
+                    epoch=epoch,
+                    diffusion=diffusion,
+                    ema=ema,
+                    optim=optim,
+                    scaler=scaler,
+                    sched=sched,
+                    cfg=cfg,
+                    best_val=best_val,
+                    model_state=_model_state(diffusion, master_params),
                 )
-                if observer is not None:
-                    observer.on_sample(grid)
+                _snapshot_epoch(cfg.ckpt_dir, last, epoch=epoch, keep=cfg.keep_last)
 
-            last = cfg.ckpt_dir / LAST_CHECKPOINT
-            save_checkpoint(
-                last,
-                epoch=epoch,
-                diffusion=diffusion,
-                ema=ema,
-                optim=optim,
-                scaler=scaler,
-                sched=sched,
-                cfg=cfg,
-                best_val=best_val,
-                model_state=_model_state(diffusion, master_params),
-            )
-            _snapshot_epoch(cfg.ckpt_dir, last, epoch=epoch, keep=cfg.keep_last)
-
-            if new_best is not None and cfg.keep_best:
-                best = cfg.ckpt_dir / BEST_CHECKPOINT
-                # Copied rather than re-serialised: identical bytes, half the I/O.
-                shutil.copy2(last, best)
-                say(f"val/loss {new_best:.5f} is a new best; wrote {best}")
+                if new_best is not None and cfg.keep_best:
+                    best = cfg.ckpt_dir / BEST_CHECKPOINT
+                    # Copied rather than re-serialised: identical bytes, half the I/O.
+                    shutil.copy2(last, best)
+                    say(f"val/loss {new_best:.5f} is a new best; wrote {best}")
 
     if master_params is not None:
         # Back to an ordinary float32 network before it leaves this function.
@@ -1094,6 +1281,13 @@ def train(
 
     # Ship the EMA weights: they are what the sample grids were drawn from.
     diffusion.net.load_state_dict(ema.module.state_dict())
+    # The barrier is what makes the teardown orderly: rank 0 is still writing
+    # the final checkpoint and sample grid while the others are already here,
+    # and tearing a NCCL communicator down underneath a rank that has not
+    # reached it is how a clean run ends in a warning about an aborted
+    # communicator.
+    barrier(group)
+    distributed_shutdown()
     return diffusion
 
 

@@ -152,6 +152,7 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
 | [docs/INSTALL.md](docs/INSTALL.md) | Install, GPU setup, verification, troubleshooting                                        |
 | [USAGE.md](USAGE.md)               | Downloads and disk use, training, sampling, evaluation, every CLI flag, config reference |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow                                                                     |
+| [RESULTS.md](RESULTS.md)           | Measured scores, with the commands and hardware that produced them                       |
 | [CHANGELOG.md](CHANGELOG.md)       | Release history                                                                          |
 
 ## How it works
@@ -193,6 +194,12 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   comparison.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
+- **Scaling out** — `training/distributed.py` makes the run data-parallel when
+  a launcher says so, and does nothing at all when one does not:
+  `torchrun --nproc_per_node=4 -m tinydiffusion train ...` gives each GPU a
+  complete copy of the network and a disjoint shard of each epoch, averaging
+  the gradients during the backward pass. Rank 0 alone writes, and the
+  checkpoints it writes are ordinary ones — a four-GPU run resumes on one.
 - **Measurement** — `metrics/fid.py` summarises a feature set as two moments,
   which is all FID needs and all that fits in constant memory.
   `metrics/features.py` keeps the vectors instead, for the two metrics that

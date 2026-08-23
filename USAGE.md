@@ -1306,6 +1306,91 @@ model and this resolution — a much smaller network, or a much larger
 against the table above, and if a run sits near the loader's figure rather than
 the model's, the data has become the limit.
 
+### Training on several GPUs
+
+One process per GPU, launched by `torchrun`. Nothing in the config turns this
+on: the launcher sets `RANK`, `WORLD_SIZE` and `LOCAL_RANK` in each worker's
+environment, and the run reads them. Their absence is what an ordinary
+single-process run looks like, so the path everything else in this document
+describes is untouched.
+
+```bash
+torchrun --nproc_per_node=4 -m tinydiffusion train --config configs/cifar10.toml
+```
+
+`--nproc_per_node` is how many GPUs on this machine to use; `-m tinydiffusion`
+is the same CLI the `tinydiffusion` command runs, addressed as a module because
+that is what a launcher can hand to the processes it starts. Every flag and
+`--set` override works exactly as it does on one GPU.
+
+The parallelism is over the batch, not the model. Every rank holds a complete
+copy of the network and draws a disjoint shard of each epoch, and the gradients
+are averaged across ranks during the backward pass, so all copies step
+identically. An epoch is still one pass over the dataset — four ranks each see
+a quarter of it — rather than four passes.
+
+**The batch that matters is the effective one.** Each rank contributes its own
+`batch_size` to the same averaged gradient, so an optimiser step under
+`--nproc_per_node=4` averages over `batch_size * grad_accum * 4` images. The
+startup line reports it:
+
+```
+2.31M parameters | cifar10 32px x3 | device cuda:0 (...) | amp fp16 | ... | 512 effective | rank 0/4
+```
+
+That is a real change to the run, not just to its throughput: an effective
+batch four times larger is four times fewer optimiser steps per epoch, and the
+usual response is to raise `lr` — the square-root and linear scaling rules are
+both defensible, and neither is applied for you. `lr_warmup` and `lr_schedule`
+count optimiser steps, so they cover proportionally more data per step too.
+Leaving `lr` alone is a valid choice; it is just a different run from the
+single-GPU one, and worth knowing you have made.
+
+Everything a run writes is rank 0's: `metrics.jsonl`, the sample grids,
+`last.pt` and `best.pt`, the progress bar and every startup line. The weights
+are identical on every rank, so there is nothing for the others to add, and
+four processes appending to one metrics file would interleave into a file
+nothing can parse. The logged loss is all-reduced first, so it is the loss of
+the whole global batch rather than of rank 0's shard, and
+`time/images_per_second` covers the group — which is the number to compare
+against a single-GPU run.
+
+The checkpoints are ordinary ones. The wrapper shares its parameters with the
+eager network, exactly as `compile` does, so a four-GPU run's `best.pt` has no
+`module.` prefix in its keys and `sample`, `eval`, `fid` and `serve` read it
+without knowing how it was trained. A resume works in either direction: train
+on four GPUs, resume on one.
+
+Ctrl+C still works, and still asks. The launcher delivers the signal to each
+process separately, so the ranks can see it a batch or two apart; the run
+agrees on it at a fixed batch cadence, rank 0 asks the question, and the answer
+is broadcast to the group. Without that the first rank to leave the loop would
+strand the others at the next gradient all-reduce for the full hour-long
+timeout.
+
+A few things that are worth knowing before you reach for this:
+
+- **`--nproc_per_node=1` is not a group.** It resolves to the ordinary
+  single-process path, which is what you want — there is nothing for a group of
+  one to synchronise.
+- **The dashboard (`tui`) is single-process.** It owns a terminal, and there is
+  only one to own.
+- **This is single-node as written.** Multi-node needs the rendezvous flags
+  `torchrun` documents (`--nnodes`, `--node_rank`, `--rdzv_endpoint`); the code
+  reads `RANK` and `LOCAL_RANK` separately and so is ready for it, but it is
+  untested here.
+- **MNIST at these sizes will not scale.** The model is 271.8 ms per batch on
+  one card and the datasets are small; multi-GPU is for `configs/cifar10.toml`
+  at a real width, not for making the smoke config finish sooner.
+
+> **Measured on CPU over gloo, not on multiple GPUs.** The developer machine
+> behind these docs has one GPU. What is verified is correctness — that the
+> ranks shard the data disjointly, end on bit-identical weights, and write
+> exactly one set of files — by `tests/test_distributed.py`, which runs a real
+> two-process group on the CPU. The NCCL path and any speedup figure are
+> unmeasured. Treat the scaling as untested and check `time/images_per_second`
+> on your own hardware.
+
 ### Choosing a dataset
 
 `dataset` names an entry in the registry in `tinydiffusion/data/datasets.py`:
