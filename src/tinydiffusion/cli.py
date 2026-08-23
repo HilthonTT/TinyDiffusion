@@ -438,6 +438,45 @@ def build_parser() -> argparse.ArgumentParser:
     interpolate.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(interpolate)
 
+    tui = subparsers.add_parser(
+        "tui",
+        help="Train in a terminal dashboard: live loss, progress and samples.",
+    )
+    tui.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a training config file. Omit to use the defaults, or the "
+        "settings stored in --resume's checkpoint.",
+    )
+    tui.add_argument(
+        "--resume",
+        type=Path,
+        help="Checkpoint to continue training from. Its own config is used unless "
+        "--config says otherwise.",
+    )
+    tui.add_argument(
+        "--dataset",
+        choices=dataset_names(),
+        help="Dataset to train on, overriding the config.",
+    )
+    tui.add_argument(
+        "--set",
+        type=config_override,
+        action="append",
+        dest="overrides",
+        metavar="FIELD=VALUE",
+        help="Override any config field, repeatable. Read exactly as `train --set` is.",
+    )
+    tui.add_argument("--seed", type=int, help="Random seed, overriding the config.")
+    tui.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
+    tui.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
+    tui.add_argument("--log-dir", type=Path, help="Directory for metrics.jsonl and TB events.")
+    tui.add_argument(
+        "--start",
+        action="store_true",
+        help="Begin training as soon as the dashboard opens, rather than waiting for 's'.",
+    )
+
     plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
     plot.add_argument(
         "runs",
@@ -458,8 +497,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _train(args: argparse.Namespace) -> int:
-    """Run the training subcommand."""
+def config_from_args(args: argparse.Namespace) -> TrainConfig:
+    """Assemble the config a run should use, from a file and the flags over it.
+
+    Shared by ``train`` and ``tui``, which take the same settings and have to
+    resolve them the same way: a config file, or the checkpoint being resumed,
+    or the defaults — then the named flags the user actually passed, then
+    ``--set``.
+
+    Args:
+        args: the parsed arguments. Flags a subcommand does not define are
+            simply absent, and count as unset.
+
+    Returns:
+        The resolved configuration.
+
+    Raises:
+        ValueError: if a config file, a checkpoint or an override is unusable.
+    """
     if args.config is not None:
         cfg = load_config(args.config)
     elif args.resume is not None:
@@ -470,9 +525,10 @@ def _train(args: argparse.Namespace) -> int:
         cfg = config_from_checkpoint(args.resume)
     else:
         cfg = TrainConfig()
-    # Only flags the user actually passed override the file.
+    # Only flags the user actually passed override the file, and only the ones
+    # this subcommand defines at all.
     overrides: dict[str, Any] = {
-        name: getattr(args, name)
+        name: value
         for name in (
             "dataset",
             "seed",
@@ -483,18 +539,22 @@ def _train(args: argparse.Namespace) -> int:
             "log_console",
             "deterministic",
         )
-        if getattr(args, name) is not None
+        if (value := getattr(args, name, None)) is not None
     }
     # Applied last, so `--set` wins wherever it and a named flag spell the same
     # field. It is the escape hatch: whatever the file and the flags worked out
     # between them, this is the value.
-    overrides.update(dict(args.overrides or ()))
+    overrides.update(dict(getattr(args, "overrides", None) or ()))
     # Rebuilt through from_mapping rather than dataclasses.replace: it is what
     # knows a --set of a path or a tuple field arrives as a string or a list,
     # and it is what reports an unknown field name as such rather than as a
     # TypeError about an unexpected keyword argument.
-    cfg = TrainConfig.from_mapping({**dataclasses.asdict(cfg), **overrides})
+    return TrainConfig.from_mapping({**dataclasses.asdict(cfg), **overrides})
 
+
+def _train(args: argparse.Namespace) -> int:
+    """Run the training subcommand."""
+    cfg = config_from_args(args)
     train_run(cfg, resume=args.resume)
     print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}, metrics in {cfg.log_dir}")
     return 0
@@ -563,6 +623,20 @@ def _interpolate(args: argparse.Namespace) -> int:
         precision=args.precision,
     )
     print(f"wrote {out}")
+    return 0
+
+
+def _tui(args: argparse.Namespace) -> int:
+    """Run the dashboard subcommand."""
+    # Imported here so `tui` is the only command that needs the extra.
+    from tinydiffusion.tui import run_tui
+
+    cfg = config_from_args(args)
+    # The console backend prints a table per epoch, and stdout belongs to the
+    # display: left on, every flush would be drawn straight through the widgets.
+    # metrics.jsonl is untouched, so the run still records everything it would.
+    cfg = dataclasses.replace(cfg, log_console=False)
+    run_tui(cfg, resume=args.resume, autostart=args.start)
     return 0
 
 
@@ -640,6 +714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plot": _plot,
         "sample": _sample,
         "serve": _serve,
+        "tui": _tui,
     }
     handler = handlers[args.command]
     try:

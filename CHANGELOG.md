@@ -8,6 +8,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `tinydiffusion tui`, a terminal dashboard that trains the model and shows it
+  happening: the resolved plan, epoch and batch progress with an ETA,
+  throughput, sparklines of train and validation loss, the loss split by
+  timestep quartile as four bars on one scale, and each epoch's sample grid
+  drawn in the terminal — two pixels to a character cell as an upper half
+  block, which is enough resolution at 32px to watch a 7 become a 7. Keys are
+  `s` start, `x` stop, `l` log, `d` theme, `q` quit. Built on Textual, behind a
+  new `tui` extra; without it the command reports the extra in one line the way
+  `plot` and `serve` do.
+  Stopping with `x` is the Ctrl+C path without the prompt — which has nobody to
+  answer it while a display owns the terminal — so it stops at a batch
+  boundary, where the model, optimiser and EMA agree, and writes
+  `interrupted.pt` for `--resume`. Training runs on a worker thread and the
+  display on the event loop; batch updates are throttled, so a slow terminal
+  cannot stall the run.
+- `tinydiffusion.training.observer`, the seam the dashboard hangs on:
+  `TrainObserver`, `TrainPlan` and `BatchProgress`. Passing an observer to
+  `train` redirects the lines it would have printed, replaces the tqdm bar, and
+  lets the watcher stop the run; passing nothing leaves all three exactly as
+  they were. Epoch metrics deliberately do not come through it — they already
+  have a fan-out in `LoggerBackend`, and `RunLogger.for_run` now takes `extra`
+  backends so a watcher registers as one rather than being given a second route
+  to the same numbers. `save_samples` returns the path it wrote, so a watcher
+  need not reconstruct the filename.
+
 - `--precision` on every command that samples — `sample`, `interpolate`, `fid`
   and `serve` — taking `fp32`, `tf32`, `fp16` or `bf16`. Sampling is where a
   diffusion model's arithmetic is (a `fid` over 10,000 images at 50 steps with
@@ -287,6 +312,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The test suite no longer fails on an install without the `server` extra.
+  `tests/test_server.py` imported FastAPI at module scope and broke collection
+  outright, and one CLI test patched a module that does the same — so the
+  `base-install` job added alongside the `plots` guard would have failed on
+  them. Both are behind `importorskip` now, and the job's absent-extras check
+  covers `textual` too.
 - `plot` without the `plots` extra now reports the extra that supplies it
   instead of a traceback. `plot_runs` caught the `ImportError` matplotlib
   raises and re-raised it as a `RuntimeError`, which walked straight past the

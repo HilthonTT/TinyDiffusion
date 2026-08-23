@@ -36,6 +36,8 @@ tracking = ["tensorboard>=2.18"]
 server = ["fastapi>=0.115", "uvicorn>=0.32"]
 # Figures from a run's metrics.jsonl (`tinydiffusion plot`).
 plots = ["matplotlib>=3.9"]
+# The training dashboard (`tinydiffusion tui`).
+tui = ["textual>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/HilthonTT/TinyDiffusion"

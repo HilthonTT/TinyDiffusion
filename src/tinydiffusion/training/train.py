@@ -12,6 +12,7 @@ The pieces a run needs but a loop is not the natural home for live next door:
 import importlib.util
 import shutil
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -42,6 +43,7 @@ from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import interrupt_guard
 from tinydiffusion.training.lr import lr_factor
 from tinydiffusion.training.model import build_model
+from tinydiffusion.training.observer import BatchProgress, TrainObserver, TrainPlan
 from tinydiffusion.training.validation import validation_loss
 from tinydiffusion.utils.device import (
     bf16_supported,
@@ -59,7 +61,12 @@ from tinydiffusion.utils.fp16 import (
     zero_grad,
 )
 from tinydiffusion.utils.seed import seed_everything
-from tinydiffusion.utils.tracking import RunLogger, quartile_means, timestep_quartile_totals
+from tinydiffusion.utils.tracking import (
+    LoggerBackend,
+    RunLogger,
+    quartile_means,
+    timestep_quartile_totals,
+)
 
 __all__ = [
     "DRAIN_EVERY",
@@ -151,6 +158,33 @@ def _drain_metrics(
 
     pending.clear()
     return loss_ema
+
+
+class _ObserverBackend:
+    """Feeds an observer the epoch metrics through the ordinary backend fan-out.
+
+    A :class:`~tinydiffusion.utils.tracking.LoggerBackend` already exists for
+    exactly this shape of thing, so an observer is registered as one rather
+    than given a second route to the same numbers.
+
+    Args:
+        observer: the watcher to forward to.
+    """
+
+    def __init__(self, observer: TrainObserver) -> None:
+        self._observer = observer
+
+    def write(self, metrics: Mapping[str, float], step: int) -> None:
+        """Forward one epoch's metrics.
+
+        Args:
+            metrics: metric name to value.
+            step: the epoch index.
+        """
+        self._observer.on_epoch(step, metrics)
+
+    def close(self) -> None:
+        """Nothing to release: the observer outlives the run."""
 
 
 def _can_compile(device_type: str) -> bool:
@@ -317,7 +351,7 @@ def save_samples(
     epoch: int,
     labels: torch.Tensor | None = None,
     noise: torch.Tensor | None = None,
-) -> None:
+) -> Path:
     """Render a grid of EMA samples above a strip of real images.
 
     Putting real data in the same grid makes contrast and stroke weight
@@ -339,6 +373,10 @@ def save_samples(
         noise: the starting x_T to redraw from, or None for a fresh draw. Held
             fixed across a run, it makes the grids a flipbook of one set of
             images sharpening rather than an unrelated sample each epoch.
+
+    Returns:
+        The path written, so a caller watching the run can pick the grid up
+        without reconstructing the filename.
     """
     shape = (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size)
     if labels is not None:
@@ -367,7 +405,9 @@ def save_samples(
     reference = real[: cfg.num_samples].to(cfg.device)
     grid = torch.cat([denormalize(fake), denormalize(reference)], dim=0)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    save_image(grid, cfg.out_dir / f"sample_{epoch + 1:04d}.png", nrow=min(8, cfg.num_samples))
+    path = cfg.out_dir / f"sample_{epoch + 1:04d}.png"
+    save_image(grid, path, nrow=min(8, cfg.num_samples))
+    return path
 
 
 def _model_state(
@@ -401,6 +441,7 @@ def _save_and_report(
     sched: LRScheduler | None = None,
     best_val: float | None = None,
     model_state: dict[str, torch.Tensor] | None = None,
+    say: Callable[[str], None] = print,
 ) -> None:
     """Checkpoint a cancelled run and tell the user how to pick it up again.
 
@@ -419,6 +460,7 @@ def _save_and_report(
             keeps comparing against it.
         model_state: float32 weights to write in place of the network's own;
             see :func:`~tinydiffusion.training.checkpoints.save_checkpoint`.
+        say: where the two lines go. Defaults to printing them.
     """
     path = cfg.ckpt_dir / INTERRUPTED_CHECKPOINT
     save_checkpoint(
@@ -434,11 +476,15 @@ def _save_and_report(
         model_state=model_state,
     )
     done = max(epoch + 1, 0)
-    print(f"saved {path} ({_epochs(done)} complete, plus a partial epoch)")
-    print(f"resume with: tinydiffusion train --resume {path}")
+    say(f"saved {path} ({_epochs(done)} complete, plus a partial epoch)")
+    say(f"resume with: tinydiffusion train --resume {path}")
 
 
-def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusion:
+def train(
+    cfg: TrainConfig | None = None,
+    resume: Path | None = None,
+    observer: TrainObserver | None = None,
+) -> Diffusion:
     """Train a diffusion model on the dataset the config names.
 
     Which process is trained follows from the config too; see
@@ -457,6 +503,13 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
     Args:
         cfg: run configuration. Defaults are used when omitted.
         resume: checkpoint to continue from, or None to start fresh.
+        observer: something watching the run from outside the loop; see
+            :mod:`tinydiffusion.training.observer`. Passing one redirects every
+            line this would have printed, replaces the tqdm bar with
+            :meth:`~tinydiffusion.training.observer.TrainObserver.on_batch`,
+            and lets the watcher stop the run without the Ctrl+C prompt — which
+            has nobody to answer it when the terminal belongs to a display.
+            None leaves all three exactly as they were.
 
     Returns:
         The trained model, with EMA weights already swapped in. A run cancelled
@@ -467,6 +520,9 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             model than `cfg` describes.
     """
     cfg = cfg or TrainConfig()
+    # Every message below goes through this rather than to stdout directly, so
+    # a watcher can take them without the loop caring where they end up.
+    say: Callable[[str], None] = print if observer is None else observer.on_message
     cfg = replace(cfg, device=resolve_device(cfg.device))
     spec = cfg.dataset_spec()
     seed_everything(cfg.seed, deterministic=cfg.deterministic)
@@ -479,7 +535,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
     # slower than float32 rather than faster.
     use_full_fp16 = cfg.full_fp16 and device_type == "cuda"
     if cfg.full_fp16 and not use_full_fp16:
-        print("full_fp16 needs a CUDA device; training in float32 instead")
+        say("full_fp16 needs a CUDA device; training in float32 instead")
     use_amp = cfg.amp and device_type == "cuda" and not use_full_fp16
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
     if use_amp and amp_dtype is torch.bfloat16 and not bf16_supported():
@@ -487,7 +543,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         # hardware only emulates — and emulated is exactly what torch reports
         # as supported, which is why this asks `bf16_supported` rather than
         # torch directly.
-        print("this GPU emulates bfloat16 rather than running it, falling back to fp16")
+        say("this GPU emulates bfloat16 rather than running it, falling back to fp16")
         amp_dtype = torch.float16
     if device_type == "cuda":
         # Input shapes are fixed for the whole run, so autotuning pays off once
@@ -517,7 +573,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         # one it was given.
         train_net = cast(nn.Module, torch.compile(diffusion.net))
     elif cfg.compile:
-        print(
+        say(
             "compile is on but Triton is not installed, so the CUDA backend cannot build "
             "kernels; training eagerly instead (pip install triton-windows on Windows)"
         )
@@ -612,7 +668,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             sched=sched,
         )
         if not moments_fit:
-            print(
+            say(
                 f"this checkpoint was trained with full_fp16={was_full_fp16}, which lays the "
                 f"optimiser state out differently; resuming with fresh AdamW moments"
             )
@@ -621,9 +677,9 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
         # cfg.seed set up: the point is for a resumed epoch to draw the noise
         # that epoch would have drawn, not the noise epoch 0 draws.
         replayed = restore_rng_state(ckpt)
-        print(f"resumed from {resume}, {_epochs(start_epoch)} already done")
+        say(f"resumed from {resume}, {_epochs(start_epoch)} already done")
         if not replayed:
-            print("this checkpoint stores no RNG state, so the random stream restarts at the seed")
+            say("this checkpoint stores no RNG state, so the random stream restarts at the seed")
 
     if master_params is not None:
         # Both halves matter, and in this order. The master copy picks up
@@ -673,13 +729,35 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
     steps = f"{steps_per_epoch} steps/epoch"
     if cfg.grad_accum > 1:
         steps += f" (x{cfg.grad_accum} accumulated, {cfg.batch_size * cfg.grad_accum} effective)"
-    print(
+    say(
         f"{n_params / 1e6:.2f}M parameters | {spec.name} {cfg.image_size}px x{spec.channels} | "
         f"device {describe_device(cfg.device)} | {precision} | {conditioning} | {plan} | "
         f"{steps} | {scoring}"
     )
+    if observer is not None:
+        # The same facts the line above just said, as data. A display should
+        # not have to parse the sentence back apart to fill in a header.
+        observer.on_plan(
+            TrainPlan(
+                dataset=spec.name,
+                image_size=cfg.image_size,
+                channels=spec.channels,
+                device=cfg.device,
+                device_description=describe_device(cfg.device),
+                parameters=n_params,
+                precision=precision,
+                num_classes=cfg.num_classes,
+                start_epoch=start_epoch,
+                num_epochs=cfg.num_epochs,
+                steps_per_epoch=steps_per_epoch,
+                batch_size=cfg.batch_size,
+                grad_accum=cfg.grad_accum,
+                validation_images=sum(x.shape[0] for x, _ in held_out),
+                log_dir=cfg.log_dir,
+            )
+        )
     if remaining <= 0:
-        print(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
+        say(f"nothing to do: the checkpoint already covers all {_epochs(cfg.num_epochs)}")
 
     # Fixed real images, read from the front of the split rather than lifted off
     # the loop: the batch order depends on the epoch, so a resumed run would
@@ -702,11 +780,13 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
 
     cancelled = False
 
+    extra: list[LoggerBackend] = [] if observer is None else [_ObserverBackend(observer)]
     logger = RunLogger.for_run(
         cfg.log_dir,
         console=cfg.log_console,
         jsonl=cfg.log_jsonl,
         tensorboard=cfg.tensorboard,
+        extra=extra,
     )
 
     with logger, interrupt_guard() as interrupts:
@@ -724,7 +804,13 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
             quartile_sums = torch.zeros(4, device=cfg.device)
             quartile_counts = torch.zeros(4, device=cfg.device)
 
-            with tqdm(loader, desc=f"epoch {epoch + 1}/{cfg.num_epochs}") as pbar:
+            # A watcher owns the terminal, so the bar would be drawn into the
+            # middle of it. on_batch below carries the same information.
+            with tqdm(
+                loader,
+                desc=f"epoch {epoch + 1}/{cfg.num_epochs}",
+                disable=observer is not None,
+            ) as pbar:
                 for batch, (x, y) in enumerate(pbar):
                     x = x.to(cfg.device, non_blocking=True)
                     if cfg.channels_last:
@@ -848,6 +934,41 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                         loss_ema = _drain_metrics(pending, logger, loss_ema)
                         if loss_ema is not None:
                             pbar.set_postfix(loss=f"{loss_ema:.4f}")
+                        if observer is not None:
+                            # Here rather than per batch, and deliberately: the
+                            # numbers only exist on the host once the drain has
+                            # read them back.
+                            observer.on_batch(
+                                BatchProgress(
+                                    epoch=epoch,
+                                    num_epochs=cfg.num_epochs,
+                                    batch=batch,
+                                    num_batches=len(loader),
+                                    loss=loss_ema,
+                                    images=images,
+                                    seconds=time.perf_counter() - epoch_start,
+                                )
+                            )
+
+                    # A watcher that has asked to stop has already decided, so
+                    # it is not asked again: the prompt below has nobody to
+                    # answer it when a display owns the terminal. Stopping and
+                    # saving is what an unattended Ctrl+C already resolves to.
+                    if observer is not None and observer.stop_requested():
+                        _save_and_report(
+                            cfg,
+                            epoch=epoch - 1,
+                            diffusion=diffusion,
+                            ema=ema,
+                            optim=optim,
+                            scaler=scaler,
+                            best_val=best_val,
+                            sched=sched,
+                            model_state=_model_state(diffusion, master_params),
+                            say=say,
+                        )
+                        cancelled = True
+                        break
 
                     if interrupts.requested:
                         # Batch boundary: model, optimiser and EMA all agree, so
@@ -869,9 +990,10 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                                 best_val=best_val,
                                 sched=sched,
                                 model_state=_model_state(diffusion, master_params),
+                                say=say,
                             )
                         else:
-                            print("cancelled without saving")
+                            say("cancelled without saving")
                         cancelled = True
                         break
 
@@ -931,7 +1053,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                 and (epoch + 1) % cfg.sample_every == 0
                 and reference is not None
             ):
-                save_samples(
+                grid = save_samples(
                     diffusion,
                     ema,
                     reference,
@@ -940,6 +1062,8 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                     labels=reference_labels,
                     noise=sample_noise,
                 )
+                if observer is not None:
+                    observer.on_sample(grid)
 
             last = cfg.ckpt_dir / LAST_CHECKPOINT
             save_checkpoint(
@@ -960,7 +1084,7 @@ def train(cfg: TrainConfig | None = None, resume: Path | None = None) -> Diffusi
                 best = cfg.ckpt_dir / BEST_CHECKPOINT
                 # Copied rather than re-serialised: identical bytes, half the I/O.
                 shutil.copy2(last, best)
-                print(f"val/loss {new_best:.5f} is a new best; wrote {best}")
+                say(f"val/loss {new_best:.5f} is a new best; wrote {best}")
 
     if master_params is not None:
         # Back to an ordinary float32 network before it leaves this function.

@@ -103,7 +103,7 @@ jobs:
         run: |
           uv run python - <<'PY'
           import importlib.util, sys
-          present = [m for m in ("matplotlib", "fastapi", "tensorboard")
+          present = [m for m in ("matplotlib", "fastapi", "tensorboard", "textual")
                      if importlib.util.find_spec(m) is not None]
           if present:
               sys.exit(f"expected a base install, but these are installed: {present}")

@@ -4,6 +4,12 @@ import time
 
 import pytest
 import torch
+
+# The whole module drives the app, which is FastAPI's; without the extra there
+# is nothing here to test. The message a missing FastAPI produces is covered in
+# test_cli.py, where it has to keep working on an install that lacks it.
+pytest.importorskip("fastapi", reason="needs the 'server' extra")
+
 from fastapi.testclient import TestClient
 
 from tinydiffusion.server import ServerConfig

@@ -223,6 +223,58 @@ settings stored in the checkpoint when [resuming](#resuming).
 ./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
 ```
 
+### The dashboard
+
+`tui` trains inside a terminal dashboard rather than behind a progress bar:
+
+```bash
+./run.sh tui --config configs/mnist.toml          # then press s
+./run.sh tui --config configs/mnist.toml --start  # or start straight away
+```
+
+It needs the `tui` extra (`pip install 'tinydiffusion[tui]'`), which pulls in
+[Textual](https://textual.textualize.io/). Without it the command says so in
+one line, the way `plot` and `serve` do for theirs.
+
+It takes the same settings `train` does — `--config`, `--resume`, `--dataset`,
+`--set`, `--seed`, `--device`, `--epochs`, `--log-dir` — and resolves them the
+same way, so a run started here is the run `train` would have started.
+
+| Key | What it does |
+| --- | --- |
+| `s` | Start training |
+| `x` | Stop at the next batch boundary, writing `interrupted.pt` first |
+| `l` | Show or hide the log pane |
+| `d` | Switch between the light and dark themes |
+| `q` | Quit |
+
+What it shows, live:
+
+- the resolved plan — parameter count, device and GPU model, precision,
+  conditioning, steps per epoch — as data rather than as the one-line sentence
+  the plain trainer prints;
+- epoch and batch progress, with throughput, epoch time and an ETA for the
+  whole run;
+- `train/loss` and `val/loss` per epoch as sparklines, and the current
+  smoothed loss, learning rate, gradient norm and best held-out score;
+- the loss split by timestep quartile, as four bars on one scale — which
+  quarter of the schedule the error is sitting in is the thing a single loss
+  number cannot tell you;
+- the latest sample grid, drawn in the terminal. A cell is about twice as tall
+  as it is wide, so each one carries two pixels as an upper half block, and a
+  32px MNIST grid is more than legible enough to watch a 7 become a 7.
+
+Stopping with `x` is the Ctrl+C path without the prompt: it stops at a batch
+boundary, where the model, optimiser and EMA all agree, and writes
+`interrupted.pt` so `train --resume` or `tui --resume` picks the run up. The
+run's `metrics.jsonl` is written exactly as it always is, so `plot` works on a
+run trained here; only the per-epoch console table is turned off, since stdout
+belongs to the display.
+
+Training runs on a worker thread and the display on the event loop, which is
+why a slow terminal cannot stall the run: batch updates are throttled, and the
+loop never waits longer than a frame on the screen.
+
 ### Overriding any config field
 
 `--set field=value` reaches every field in

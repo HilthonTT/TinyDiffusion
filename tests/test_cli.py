@@ -1,6 +1,7 @@
 import argparse
 import builtins
 import dataclasses
+import sys
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,10 @@ def test_serve_requires_a_checkpoint():
 
 
 def test_serve_builds_a_config_and_runs(capsys, monkeypatch, tmp_path):
+    # Patching the module means importing it, and it imports FastAPI at module
+    # scope. The missing-extra path is the test below this one, which needs no
+    # patching and so still runs on a base install.
+    pytest.importorskip("fastapi", reason="needs the 'server' extra")
     checkpoint = tmp_path / "m.pt"
     checkpoint.write_bytes(b"")
     seen = {}
@@ -616,6 +621,64 @@ def test_precision_reaches_fid_under_its_own_name(monkeypatch):
     # read as its switch, so the scoring function spells it out.
     assert seen["sample_precision"] == "fp16"
     assert seen["precision_recall"] is False
+
+
+def test_tui_defaults():
+    args = build_parser().parse_args(["tui", "--config", "configs/mnist.toml"])
+    assert args.command == "tui"
+    assert args.start is False
+    assert (args.resume, args.device, args.num_epochs) == (None,) * 3
+
+
+def test_tui_takes_the_same_overrides_train_does():
+    args = build_parser().parse_args(
+        ["tui", "--set", "lr=1e-4", "--set", "batch_size=64", "--epochs", "3", "--start"]
+    )
+    assert args.overrides == [("lr", 1e-4), ("batch_size", 64)]
+    assert args.num_epochs == 3
+    assert args.start is True
+
+
+def test_main_reports_a_missing_tui_extra(capsys, monkeypatch):
+    """Without the extra, `tui` is a one-line message rather than a traceback.
+
+    The same contract `plot` and `serve` have: an optional dependency that is
+    not installed is a user error the CLI reports, and ImportError is what it
+    catches to do it.
+    """
+    real_import = builtins.__import__
+
+    def refuse_textual(name, *args, **kwargs):
+        if name.startswith("textual"):
+            raise ImportError("no textual")
+        return real_import(name, *args, **kwargs)
+
+    # Dropped from the cache first: tui.app imports Textual at module scope, so
+    # a module another test already imported would be handed back from
+    # sys.modules without its body — and the refusal below never reached.
+    monkeypatch.delitem(sys.modules, "tinydiffusion.tui.app", raising=False)
+    monkeypatch.setattr(builtins, "__import__", refuse_textual)
+    assert main(["tui"]) == 1
+    assert "tui" in capsys.readouterr().out
+
+
+def test_the_dashboard_silences_the_console_backend(monkeypatch):
+    """stdout belongs to the display, so the per-epoch table has to be off.
+
+    Left on, every flush would be printed straight through the widgets. The
+    JSONL backend is untouched, so the run still records what it always did.
+    """
+    seen = {}
+
+    def fake_run_tui(cfg, resume=None, *, autostart=False):
+        seen["cfg"] = cfg
+        seen["autostart"] = autostart
+
+    monkeypatch.setattr("tinydiffusion.tui.run_tui", fake_run_tui)
+    assert main(["tui", "--set", "log_jsonl=true", "--start"]) == 0
+    assert seen["cfg"].log_console is False
+    assert seen["cfg"].log_jsonl is True
+    assert seen["autostart"] is True
 
 
 def test_interpolate_defaults():

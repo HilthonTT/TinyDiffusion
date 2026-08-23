@@ -16,7 +16,7 @@ import math
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -329,6 +329,7 @@ class RunLogger:
         console: bool = True,
         jsonl: bool = True,
         tensorboard: bool = False,
+        extra: Sequence[LoggerBackend] = (),
     ) -> Self:
         """Build a logger with the usual set of backends.
 
@@ -338,6 +339,10 @@ class RunLogger:
             jsonl: append to ``metrics.jsonl``.
             tensorboard: also write TensorBoard events. Requires the
                 ``tracking`` extra.
+            extra: further backends to fan out to, appended after the built-in
+                ones. This is how something outside the loop — a display, a
+                test — receives the epoch metrics without the loop growing a
+                second path to the same numbers.
 
         Returns:
             A logger ready for use as a context manager.
@@ -358,6 +363,7 @@ class RunLogger:
                     "tensorboard logging needs the 'tracking' extra: "
                     "pip install 'tinydiffusion[tracking]'"
                 ) from exc
+        backends.extend(extra)
         return cls(backends)
 
     def accumulate(self, **metrics: float) -> None:
