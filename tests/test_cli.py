@@ -13,6 +13,7 @@ from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES
 from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
 from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, PRECISIONS
 
 
 def test_version_is_exposed():
@@ -552,6 +553,69 @@ def test_main_reports_a_missing_plots_extra(capsys, tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", refuse_matplotlib)
     assert main(["plot", str(tmp_path), "--out", str(tmp_path / "f.png")]) == 1
     assert "plots" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["sample", "fid", "interpolate", "serve"])
+def test_every_sampling_command_defaults_to_float32(command):
+    args = build_parser().parse_args([command, "--checkpoint", "model.pt"])
+    # The default has to stay fp32 on all four: it is the only precision whose
+    # result does not depend on the card it ran on, and the one that keeps a
+    # score comparable with one taken before the flag existed.
+    assert args.precision == DEFAULT_PRECISION
+
+
+@pytest.mark.parametrize("command", ["sample", "fid", "interpolate", "serve"])
+@pytest.mark.parametrize("name", PRECISIONS)
+def test_every_sampling_command_accepts_every_precision(command, name):
+    args = build_parser().parse_args([command, "--checkpoint", "m.pt", "--precision", name])
+    assert args.precision == name
+
+
+def test_an_unknown_precision_is_refused_by_the_parser(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--precision", "float8"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_precision_reaches_the_sampler(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_sample(checkpoint, out, **kwargs):
+        seen.update(kwargs)
+        return out
+
+    monkeypatch.setattr(cli, "sample_from_checkpoint", fake_sample)
+    assert (
+        main(
+            [
+                "sample",
+                "--checkpoint",
+                "m.pt",
+                "--out",
+                str(tmp_path / "s.png"),
+                "--precision",
+                "bf16",
+            ]
+        )
+        == 0
+    )
+    assert seen["precision"] == "bf16"
+
+
+def test_precision_reaches_fid_under_its_own_name(monkeypatch):
+    seen = {}
+
+    def fake_fid(checkpoint, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "fid_for_checkpoint", fake_fid)
+    with pytest.raises(SystemExit):
+        main(["fid", "--checkpoint", "m.pt", "--precision", "fp16"])
+    # `precision` would sit next to `precision_recall` in that signature and
+    # read as its switch, so the scoring function spells it out.
+    assert seen["sample_precision"] == "fp16"
+    assert seen["precision_recall"] is False
 
 
 def test_interpolate_defaults():

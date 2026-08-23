@@ -15,6 +15,7 @@ from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.model import build_model
 from tinydiffusion.utils.device import resolve_device
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, apply_precision, resolve_precision
 from tinydiffusion.utils.seed import seed_everything
 
 
@@ -111,6 +112,7 @@ def sample_from_checkpoint(
     guidance_rescale: float | None = None,
     seed: int | None = None,
     device: str | None = None,
+    precision: str = DEFAULT_PRECISION,
 ) -> Path:
     """Draw images from a checkpoint's EMA weights and write them as a grid.
 
@@ -140,14 +142,18 @@ def sample_from_checkpoint(
             `guidance` is above about 3.
         seed: seed applied before sampling, or None to leave the RNG alone.
         device: device to sample on. Defaults to CUDA when available.
+        precision: what to run the network in; see
+            :mod:`tinydiffusion.utils.precision`. The default is float32, which
+            is both the slowest and the only one that does not depend on the
+            hardware it ran on.
 
     Returns:
         The path that was written.
 
     Raises:
-        ValueError: if ``num_images`` is not positive, no sampler or spacing
-            goes by that name, or the conditioning arguments do not match the
-            checkpoint.
+        ValueError: if ``num_images`` is not positive, no sampler, spacing or
+            precision goes by that name, or the conditioning arguments do not
+            match the checkpoint.
     """
     if num_images < 1:
         raise ValueError(f"num_images must be positive, got {num_images}")
@@ -163,6 +169,9 @@ def sample_from_checkpoint(
     )
     scale = cfg.guidance if guidance is None else guidance
     rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
+    # Under the conditioning wrapper, not over it: guidance extrapolates and
+    # rescales in float32 whatever the network itself runs in.
+    net = apply_precision(ema.module, resolve_precision(precision, cfg.device), cfg.device)
 
     images = get_sampler(cfg.sampler if sampler is None else sampler)(
         diffusion,
@@ -171,7 +180,7 @@ def sample_from_checkpoint(
         cfg.device,
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=eta,
-        model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
+        model=conditioned(net, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
         spacing=cfg.sample_spacing if spacing is None else spacing,
     )
 

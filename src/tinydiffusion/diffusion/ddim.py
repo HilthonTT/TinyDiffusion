@@ -273,7 +273,7 @@ def get_spacing(name: str) -> TimestepSpacing:
         ) from None
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddim_sample(
     diffusion: Diffusion,
     num_samples: int,

@@ -29,6 +29,7 @@ from tinydiffusion.server.config import (
 from tinydiffusion.training.checkpoints import config_from_checkpoint
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train import train as train_run
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, PRECISIONS
 
 
 def class_labels(value: str) -> list[int]:
@@ -84,6 +85,28 @@ def config_override(value: str) -> tuple[str, Any]:
     except tomllib.TOMLDecodeError:
         return name, raw
     return name, parsed
+
+
+def add_precision_argument(parser: argparse.ArgumentParser) -> None:
+    """Give a sampling subcommand its ``--precision`` flag.
+
+    Four subcommands draw samples and all four take the same setting, so the
+    help text lives here rather than four times over.
+
+    Args:
+        parser: the subcommand parser to add the flag to.
+    """
+    parser.add_argument(
+        "--precision",
+        choices=PRECISIONS,
+        default=DEFAULT_PRECISION,
+        help="What to run the network in. 'fp32' is the default and the only one "
+        "whose result does not depend on the GPU it ran on. 'tf32' keeps float32 "
+        "storage and uses reduced-mantissa matmuls on Ampere and later; 'fp16' and "
+        "'bf16' roughly halve the time a step takes on any card with tensor cores. "
+        "They move a score slightly, so hold this fixed across the checkpoints "
+        "being compared. Anything but 'fp32' falls back to it off CUDA.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -267,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fid.add_argument("--seed", type=int, default=0, help="Random seed.")
     fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
+    add_precision_argument(fid)
 
     serve = subparsers.add_parser("serve", help="Serve a checkpoint over HTTP.")
     serve.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
@@ -314,6 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Serve the raw weights, not the EMA.",
     )
     serve.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
+    add_precision_argument(serve)
 
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
@@ -355,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--out", type=Path, default=Path("contents/samples.png"), help="Output.")
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
+    add_precision_argument(sample)
 
     interpolate = subparsers.add_parser(
         "interpolate", help="Walk between two latents and sample every point."
@@ -410,6 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", type=Path, default=Path("contents/interpolation.png"), help="Output."
     )
     interpolate.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
+    add_precision_argument(interpolate)
 
     plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
     plot.add_argument(
@@ -512,6 +539,7 @@ def _fid(args: argparse.Namespace) -> int:
         kid_subset_size=args.kid_subset_size,
         precision_recall=args.precision_recall,
         neighbours=args.neighbours,
+        sample_precision=args.precision,
     )
     print(result.format())
     return 0
@@ -532,6 +560,7 @@ def _interpolate(args: argparse.Namespace) -> int:
         seed_start=args.seed_start,
         seed_end=args.seed_end,
         device=args.device,
+        precision=args.precision,
     )
     print(f"wrote {out}")
     return 0
@@ -557,6 +586,7 @@ def _serve(args: argparse.Namespace) -> int:
         cors_origins=tuple(args.cors_origins or ()),
         image_ttl=args.image_ttl,
         keep_images=args.keep_images,
+        precision=args.precision,
     )
     if not config.checkpoint.is_file():
         # uvicorn would otherwise bind the port and only fail during startup,
@@ -586,6 +616,7 @@ def _sample(args: argparse.Namespace) -> int:
         guidance_rescale=args.guidance_rescale,
         seed=args.seed,
         device=args.device,
+        precision=args.precision,
     )
     print(f"wrote {args.num_images} images to {out}")
     return 0

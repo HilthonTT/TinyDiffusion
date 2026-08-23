@@ -8,6 +8,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `--precision` on every command that samples — `sample`, `interpolate`, `fid`
+  and `serve` — taking `fp32`, `tf32`, `fp16` or `bf16`. Sampling is where a
+  diffusion model's arithmetic is (a `fid` over 10,000 images at 50 steps with
+  guidance is a million network evaluations) and all of it ran in float32
+  before this. Measured on a Turing card at the `configs/mnist.toml` geometry,
+  `fp16` draws 16.4 img/s against float32's 10.9, a 1.51x speedup, and moves a
+  pixel by 0.09 of a 255-level on average. The default stays `fp32` on all
+  four: it is bit-for-bit what those commands did before, and precision moves a
+  score the way `--sampler` and `--steps` do, so `fid` records it and names it
+  in the report whenever it is not float32. Everything falls back with a
+  printed line rather than silently — to `fp32` off CUDA, and `bf16` to `fp16`
+  on a card that only emulates bfloat16, which is the fallback a training run
+  already made.
+  Half precision carries the memory format with it: the network runs in NHWC,
+  because tensor cores read that layout and cuDNN handed NCHW transposes per
+  convolution instead. On that card the forward pass alone is 1.12x faster in
+  NCHW `fp16` against 2.36x in NHWC, and NHWC float32 is *slower* than NCHW
+  float32 — so it is coupled to the dtype rather than offered as its own
+  switch. Guidance keeps extrapolating and rescaling in float32, since the
+  wrapper sits under the conditioning rather than over it, and `fid`'s feature
+  extractor stays in float32 whatever this is set to: it is the instrument the
+  score is measured with, and the cached reference features were computed with
+  it.
+
 - A third timestep spacing, `karras` (Karras et al., 2022). `uniform` and
   `quadratic` both space the sampling steps by index; this one rewrites the
   forward process as `x_0 + sigma * eps` and spaces them evenly along the EDM
@@ -363,6 +387,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Values shift slightly against runs scored before this change.
 
 ### Changed
+
+- The samplers run under `torch.inference_mode` rather than `torch.no_grad`.
+  Neither builds a graph; the stronger one also skips the version-counter and
+  view-tracking bookkeeping that autograd keeps on every tensor it might later
+  be asked about, which a sampler is never going to be. No behavioural
+  difference, and no cost: samples leave the chain as ordinary tensors.
 
 - The training loop no longer reads the loss and gradient norm back from the
   device on every batch. Both were fetched with `.item()` purely to log them,

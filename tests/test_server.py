@@ -84,7 +84,25 @@ def test_a_bad_image_ceiling_is_rejected():
         ServerConfig(checkpoint="m.pt", max_images=0)
 
 
+def test_the_default_precision_is_float32():
+    assert ServerConfig(checkpoint="m.pt").precision == "fp32"
+
+
+def test_a_bad_precision_is_rejected_at_construction():
+    # Caught here rather than at the first request: the checkpoint load is the
+    # expensive part of startup, and a typo should not survive it.
+    with pytest.raises(ValueError, match="unknown precision"):
+        ServerConfig(checkpoint="m.pt", precision="float8")
+
+
 # --- status ---------------------------------------------------------------
+
+
+def test_status_reports_the_resolved_precision(make_config):
+    # Asked for half precision on a CPU, which cannot run it. The endpoint has
+    # to report what the samples are actually drawn at, not what was requested.
+    with TestClient(create_app(make_config(precision="fp16"))) as c:
+        assert c.get("/api/status").json()["precision"] == "fp32"
 
 
 def test_status_describes_the_checkpoint(client):

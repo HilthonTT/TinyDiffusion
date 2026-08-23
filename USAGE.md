@@ -475,6 +475,7 @@ be turned on for one run without editing the TOML.
 | `--out` | `contents/samples.png` | Where to write the grid |
 | `--seed` | 0 | Seed applied before sampling |
 | `--device` | auto | `cuda`, `cpu`, `cuda:1`, … |
+| `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](#half-precision) |
 
 Checkpoints embed the config they were trained with, so this reconstructs the
 architecture from the `.pt` alone — the TOML that produced it is not needed.
@@ -578,6 +579,73 @@ Note that `sample_spacing` is unrelated to `timestep_sampler`, which decides
 which timesteps a *training* batch is drawn at; see
 [Weighting the timesteps](#weighting-the-timesteps).
 
+### Half precision
+
+`--precision` decides what the network runs in while it draws. It is accepted
+by every command that samples — `sample`, `interpolate`, `fid` and `serve` —
+and the default is `fp32` on all four, which is bit-for-bit what they did
+before the flag existed.
+
+| `--precision` | What it does | Needs |
+| --- | --- | --- |
+| `fp32` | float32 throughout. The default | — |
+| `tf32` | float32 storage, reduced-mantissa matmul and convolution kernels | Ampere or newer |
+| `fp16` | Half precision through autocast, in NHWC | tensor cores |
+| `bf16` | As `fp16`, with float32's exponent range | Ampere or newer |
+
+Anything but `fp32` falls back to it off CUDA, and `bf16` falls back to `fp16`
+on a card that only emulates bfloat16 — the same fallback, and the same printed
+line, that a training run makes. Nothing is silent: the message names what it
+is running instead.
+
+Sampling is where a diffusion model's arithmetic actually is. A `fid` over
+10,000 images at 50 steps with guidance is a million network evaluations, and
+until this flag existed every one of them ran in float32.
+
+Measured on a Turing card (RTX 2070) at the `configs/mnist.toml` geometry —
+6.95M parameters, 32px, attention at 16, batch 128, 50 DDIM steps, guidance 2:
+
+| `--precision` | Throughput | vs `fp32` |
+| --- | --- | --- |
+| `fp32` | 10.9 img/s | — |
+| `tf32` | 11.7 img/s | 1.08x |
+| `fp16` | 16.4 img/s | **1.51x** |
+
+`bf16` is not listed because that card has no bfloat16 hardware and falls back
+to `fp16`; `tf32` gains what it does there for the same reason, since TF32 units
+arrived with Ampere. Both are worth re-measuring on your own card.
+
+Half precision brings the memory format with it — the wrapper runs the network
+in NHWC, because tensor cores read that layout and cuDNN handed an NCHW
+half-precision tensor transposes it per convolution instead. That is most of
+the difference: on the same card, the forward pass alone goes 1.12x faster in
+NCHW `fp16` and 2.36x faster in NHWC `fp16`. It is not a separate switch,
+because on its own it is a pessimisation — NHWC float32 is markedly *slower*
+than NCHW float32 — so it travels with the dtype and only with the dtype.
+
+What it costs is small but not nothing. Drawing 64 images from the same seed
+at 50 steps, `fp16` moves a pixel by 0.09 of a 255-level on average and 18
+levels at the worst single pixel — invisible in a grid, and not zero. So it is
+a measurement setting as much as a speed one: **hold it fixed across the
+checkpoints you are comparing**, exactly as you would `--sampler` or `--steps`.
+`fid` records it and prints it in the report whenever it is not `fp32`, so a
+score cannot quietly claim to be comparable with one drawn at another
+precision.
+
+Two things deliberately stay in float32 however this is set. Classifier-free
+guidance extrapolates and rescales in float32 — the rescale takes a standard
+deviation over a whole image, which is not a thing to ask of ten mantissa bits
+— because the wrapper goes under the conditioning rather than over it. And
+`fid`'s feature extractor is untouched: it is the instrument the score is
+measured with, the cached reference features on the real half were computed
+with it, and it is one network evaluation per image against sampling's
+hundred.
+
+`serve` resolves the setting once at startup rather than per request, and
+reports it on `/api/status`. A caller cannot choose it: the speed-for-accuracy
+trade is the operator's, and two identical requests should not come back
+different.
+
 ### Walking between two latents
 
 `sample` draws unrelated images. `interpolate` draws a path between two of
@@ -623,6 +691,7 @@ shell, and every point on it is as plausible a latent as the two ends.
 | `--seed-end` | 1 | Seed for the latent it ends at |
 | `--out` | `contents/interpolation.png` | Output |
 | `--device` | auto | `cuda`, `cpu`, … |
+| `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](#half-precision) |
 
 Sampling is deterministic here — `eta` is pinned at 0 — because a walk whose
 points each drew their own noise would be varying for two reasons at once and
@@ -905,6 +974,7 @@ scored over the same set.
 | `--neighbours` | 3 | k for the precision/recall manifolds |
 | `--seed` | 0 | Fixes the samples; change it to redraw |
 | `--device` | auto | `cuda`, `cpu`, … |
+| `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](#half-precision) |
 
 Read the number as a comparison, never as an absolute:
 
@@ -1005,6 +1075,7 @@ images than the ceiling); a malformed one is a 422 from the schema.
 | `--cors-origin` | none | Origin allowed to call the API from a browser. Repeatable |
 | `--no-ema` | off | Serve the raw weights instead of the EMA |
 | `--device` | auto | `cuda`, `cpu`, … |
+| `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](#half-precision) |
 
 Two things to know before exposing it:
 

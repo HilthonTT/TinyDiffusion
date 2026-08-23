@@ -178,6 +178,10 @@ and **[USAGE.md](USAGE.md)** for configuration and every CLI flag.
   them towards `t = 0` where a short chain needs them, and `karras` spaces them
   evenly in noise level rather than in index. Neither costs an extra network
   evaluation, and `fid --kid` will tell you which wins on your model.
+  `--precision fp16` runs the network in half precision and NHWC, which is
+  about 1.5x the throughput on a card with tensor cores; float32 stays the
+  default, because precision moves a score and a score is only ever a
+  comparison.
 - **Weight averaging** — `training/ema.py`. DDPM's published sample quality
   depends on it, so training and sampling both draw from the EMA weights.
 - **Measurement** — `metrics/fid.py` summarises a feature set as two moments,

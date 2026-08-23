@@ -24,7 +24,7 @@ from tinydiffusion.utils.modules import eval_mode
 __all__ = ["dpmpp_sample"]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def dpmpp_sample(
     diffusion: Diffusion,
     num_samples: int,

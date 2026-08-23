@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, PRECISIONS
+
 DEFAULT_HOST = "127.0.0.1"
 """Loopback by default. Serving a checkpoint is not an authenticated operation."""
 
@@ -32,6 +34,11 @@ class ServerConfig:
         port: port to bind.
         device: device to sample on, or None for CUDA when available.
         use_ema: serve the EMA weights, which are what ``sample`` uses.
+        precision: what to run the network in; see
+            :mod:`tinydiffusion.utils.precision`. Resolved once at startup
+            rather than per request, so a caller cannot ask for one — the
+            speed/accuracy trade is the operator's to make, and a per-request
+            choice would make two identical requests return different images.
         max_images: largest ``num_images`` a single request may ask for.
         image_dir: where rendered PNGs are written, or None for a directory
             under the system temp folder.
@@ -51,6 +58,7 @@ class ServerConfig:
     port: int = DEFAULT_PORT
     device: str | None = None
     use_ema: bool = True
+    precision: str = DEFAULT_PRECISION
     max_images: int = DEFAULT_MAX_IMAGES
     image_dir: Path | None = None
     cors_origins: tuple[str, ...] = field(default_factory=tuple)
@@ -61,9 +69,13 @@ class ServerConfig:
         """Reject settings that would only fail once a request arrives.
 
         Raises:
-            ValueError: if the port, the image ceiling, or either retention
-                setting is out of range.
+            ValueError: if the port, the image ceiling, either retention
+                setting, or the precision is out of range.
         """
+        if self.precision not in PRECISIONS:
+            raise ValueError(
+                f"unknown precision {self.precision!r}, expected one of {', '.join(PRECISIONS)}"
+            )
         if not 1 <= self.port <= 65535:
             raise ValueError(f"port must lie in [1, 65535], got {self.port}")
         if self.max_images < 1:

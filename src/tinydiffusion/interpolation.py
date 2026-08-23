@@ -27,6 +27,7 @@ from tinydiffusion.data.datasets import denormalize
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.diffusion.samplers import get_sampler
 from tinydiffusion.sampling import load_for_sampling
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, apply_precision, resolve_precision
 from tinydiffusion.utils.seed import seed_everything
 
 __all__ = ["interpolate_from_checkpoint", "latent_walk", "slerp"]
@@ -132,6 +133,7 @@ def interpolate_from_checkpoint(
     seed_start: int = 0,
     seed_end: int = 1,
     device: str | None = None,
+    precision: str = DEFAULT_PRECISION,
 ) -> Path:
     """Sample a walk between two latents and write it as a strip.
 
@@ -156,14 +158,16 @@ def interpolate_from_checkpoint(
         seed_start: seed for the latent the walk starts at.
         seed_end: seed for the latent it ends at.
         device: device to sample on. Defaults to CUDA when available.
+        precision: what to run the network in; see
+            :mod:`tinydiffusion.utils.precision`. Defaults to float32.
 
     Returns:
         The path that was written.
 
     Raises:
         ValueError: if `steps` is below 2, guidance is asked of an
-            unconditional checkpoint, or no sampler or spacing goes by the
-            name given.
+            unconditional checkpoint, or no sampler, spacing or precision goes
+            by the name given.
     """
     if steps < 2:
         raise ValueError(f"a walk needs at least its two ends, got steps={steps}")
@@ -192,6 +196,7 @@ def interpolate_from_checkpoint(
 
     scale = cfg.guidance if guidance is None else guidance
     rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
+    net = apply_precision(ema.module, resolve_precision(precision, cfg.device), cfg.device)
 
     # The global RNG still decides anything the sampler draws for itself; at
     # eta=0 nothing does, but a sampler asked for eta > 0 elsewhere would.
@@ -203,7 +208,7 @@ def interpolate_from_checkpoint(
         cfg.device,
         num_steps=num_steps if num_steps is not None else cfg.sample_steps,
         eta=0.0,
-        model=conditioned(ema.module, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
+        model=conditioned(net, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
         noise=noise,
         spacing=cfg.sample_spacing if spacing is None else spacing,
     )

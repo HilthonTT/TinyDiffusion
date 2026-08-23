@@ -46,6 +46,7 @@ from tinydiffusion.metrics.precision_recall import (
 )
 from tinydiffusion.sampling import load_for_sampling
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.utils.precision import DEFAULT_PRECISION, apply_precision, resolve_precision
 from tinydiffusion.utils.seed import seed_everything
 
 DEFAULT_FID_IMAGES = 10_000
@@ -82,6 +83,12 @@ class FidResult:
             guidance, and it moves the score like any other sampling setting,
             so it is recorded alongside the scale it corrects.
         used_ema: whether the EMA weights were sampled.
+        sample_precision: what the network ran in while drawing the samples.
+            Recorded for the same reason the sampler and the spacing are: it
+            moves the score without changing the model, so two checkpoints
+            compared at different precisions are not comparable. Named apart
+            from `precision_recall` deliberately — in a metrics module a bare
+            "precision" is the other thing entirely.
         kid: the Kernel Inception Distance and its spread, or None if it was
             not asked for. Unlike `fid` it is unbiased, so it stays comparable
             between scores taken over different image counts.
@@ -102,6 +109,7 @@ class FidResult:
     used_ema: bool
     sampler: str = DEFAULT_SAMPLER
     spacing: str = DEFAULT_SPACING
+    sample_precision: str = DEFAULT_PRECISION
     kid: KidResult | None = None
     precision_recall: PrecisionRecall | None = None
 
@@ -150,7 +158,12 @@ class FidResult:
                 f" | rescale {self.guidance_rescale:g}"
                 if self.guidance is not None and self.guidance_rescale > 0
                 else ""
-            ),
+            )
+            # Only when it is not float32: a line that appeared on every report
+            # would say nothing on almost all of them, and the point of
+            # printing it is that this score is not comparable with one drawn
+            # at a different precision.
+            + (f" | {self.sample_precision}" if self.sample_precision != DEFAULT_PRECISION else ""),
         ]
         if self.undersampled:
             biased = "this score is" if self.kid is None else "the fid is"
@@ -219,7 +232,9 @@ def generate_images(
 
     Args:
         diffusion: the loaded process.
-        net: the network to sample from, typically the EMA weights.
+        net: the network to sample from, typically the EMA weights. Already
+            wrapped for precision by the caller where it asked for one; see
+            :mod:`tinydiffusion.utils.precision`.
         cfg: the checkpoint's config, for the schedule and image geometry.
         num_images: total images to draw.
         batch_size: images per batch.
@@ -296,6 +311,7 @@ def fid_for_checkpoint(
     kid_subset_size: int = DEFAULT_KID_SUBSET_SIZE,
     precision_recall: bool = False,
     neighbours: int = DEFAULT_NEIGHBOURS,
+    sample_precision: str = DEFAULT_PRECISION,
 ) -> FidResult:
     """Sample a checkpoint and score the samples against real images.
 
@@ -355,6 +371,15 @@ def fid_for_checkpoint(
             samples do not cover the data" — the two failures every single
             number conflates. Quadratic in `num_images`.
         neighbours: k for the precision/recall manifolds.
+        sample_precision: what to run the network in while drawing the samples;
+            see :mod:`tinydiffusion.utils.precision`. Defaults to float32, so a
+            score taken now is comparable with one taken before this setting
+            existed. It applies to the sampler alone: the feature extractor
+            stays in float32 whatever this says, because it is the instrument
+            the score is measured with and because the cached reference
+            features on the real side were computed with it. Sampling is where
+            the time goes anyway — a 50-step chain with guidance is a hundred
+            network evaluations per image against Inception's one.
 
     Returns:
         The scored result. `kid` and `precision_recall` on it are None unless
@@ -375,6 +400,8 @@ def fid_for_checkpoint(
 
     diffusion, ema, cfg = load_for_sampling(checkpoint, device)
     net = ema.module if use_ema else diffusion.net
+    drawn_at = resolve_precision(sample_precision, cfg.device)
+    net = apply_precision(net, drawn_at, cfg.device)
     steps = num_steps if num_steps is not None else cfg.sample_steps
     draw_with = cfg.sampler if sampler is None else sampler
     space_with = cfg.sample_spacing if spacing is None else spacing
@@ -533,6 +560,10 @@ def fid_for_checkpoint(
         used_ema=use_ema,
         sampler=draw_with,
         spacing=space_with,
+        # The resolved precision, not the requested one: a CPU run and a
+        # pre-Ampere card each fall back, and the report is where that would
+        # otherwise go unmentioned.
+        sample_precision=drawn_at,
         kid=kid_score,
         precision_recall=pr_score,
     )

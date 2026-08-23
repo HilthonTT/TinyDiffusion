@@ -16,6 +16,7 @@ from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.diffusion.samplers import get_sampler
 from tinydiffusion.sampling import grid_width, load_for_sampling, resolve_labels
 from tinydiffusion.server.config import ServerConfig
+from tinydiffusion.utils.precision import apply_precision, resolve_precision
 
 _FILENAME = re.compile(r"\A[0-9a-f]{32}\.png\Z")
 """What :meth:`SamplerService.image_path` will accept. See its docstring."""
@@ -31,6 +32,8 @@ class SamplerService:
 
     Attributes:
         config: the server settings this was built from.
+        precision: what the network actually runs in, after the requested
+            setting was reduced to something this device supports.
         image_dir: directory rendered PNGs are written to.
     """
 
@@ -43,7 +46,12 @@ class SamplerService:
         self.config = config
         self._diffusion, ema, self._cfg = load_for_sampling(config.checkpoint, config.device)
         self._spec = self._cfg.dataset_spec()
-        self._net = ema.module if config.use_ema else self._diffusion.net
+        raw_net = ema.module if config.use_ema else self._diffusion.net
+        # Resolved once, here, rather than per request: the fallback messages
+        # belong in the startup log next to the device, and every request
+        # should get the same arithmetic as every other.
+        self.precision = resolve_precision(config.precision, self._cfg.device)
+        self._net = apply_precision(raw_net, self.precision, self._cfg.device)
         self._lock = threading.Lock()
 
         self.image_dir = (
@@ -265,6 +273,9 @@ class SamplerService:
             "default_steps": self.default_steps,
             "sampler": self._cfg.sampler,
             "sample_spacing": self._cfg.sample_spacing,
+            # The resolved precision rather than the requested one, so the
+            # endpoint reports what the samples were actually drawn at.
+            "precision": self.precision,
             "default_guidance": self.default_guidance,
             "default_guidance_rescale": self.default_guidance_rescale,
             "max_images": self.config.max_images,

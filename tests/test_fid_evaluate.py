@@ -316,6 +316,46 @@ def test_result_format_stays_quiet_when_well_sampled():
     assert "warning" not in result.format()
     assert "guidance" not in result.format()
     assert "rescale" not in result.format()
+    # fp32 is the default, so it earns no line: a report that named it on every
+    # score would be saying nothing on almost all of them.
+    assert "fp32" not in result.format()
+
+
+def test_result_format_names_a_non_default_precision():
+    result = FidResult(
+        checkpoint="last.pt",
+        split="train",
+        fid=3.0,
+        num_generated=10_000,
+        num_real=10_000,
+        feature_dim=2048,
+        num_steps=50,
+        guidance=None,
+        guidance_rescale=0.0,
+        used_ema=False,
+        sample_precision="fp16",
+    )
+    # It moves the score like the sampler and the spacing do, so a report that
+    # left it out would invite a comparison that is not one.
+    assert "fp16" in result.format()
+
+
+def test_the_precision_the_samples_were_drawn_at_is_recorded(checkpoint, extractor):
+    # Asked for half precision on a CPU, which cannot run it. The result has to
+    # record what was used and not what was requested, or a sweep comparing
+    # scores by their recorded settings would be comparing the wrong ones.
+    # device is pinned rather than left to resolve: this asserts the fallback,
+    # and on a machine with a GPU the default would not take it.
+    result = fid_for_checkpoint(
+        checkpoint,
+        num_images=4,
+        num_steps=2,
+        extractor=extractor,
+        progress=False,
+        device="cpu",
+        sample_precision="fp16",
+    )
+    assert result.sample_precision == "fp32"
 
 
 def test_the_opt_in_metrics_are_absent_unless_asked_for(checkpoint, extractor):
