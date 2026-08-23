@@ -12,15 +12,15 @@
     Set $env:PYTHON to force a particular interpreter.
 
 .EXAMPLE
-    .\run.ps1 train  --config configs\smoke.toml
+    .\scripts\run.ps1 train  --config configs\smoke.toml
 
 .EXAMPLE
-    .\run.ps1 sample --checkpoint runs\smoke\checkpoints\last.pt --out runs\smoke\gen.png
+    .\scripts\run.ps1 sample --checkpoint runs\smoke\checkpoints\last.pt --out runs\smoke\gen.png
 #>
 
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 if ($env:PYTHON) {
     $candidates = @($env:PYTHON)

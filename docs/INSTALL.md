@@ -57,11 +57,11 @@ the wrappers, which find the environment the package is installed in and hand
 off to it:
 
 ```bash
-./run.sh train --config configs/smoke.toml     # Linux, macOS
+./scripts/run.sh train --config configs/smoke.toml     # Linux, macOS
 ```
 
 ```powershell
-.\run.ps1 train --config configs/smoke.toml    # Windows
+.\scripts\run.ps1 train --config configs/smoke.toml    # Windows
 ```
 
 `configs/smoke.toml` is a deliberately tiny run — about 28 s per epoch on an
@@ -155,7 +155,7 @@ uv sync --all-extras --dev
 
 ### `ModuleNotFoundError: No module named 'tinydiffusion'`
 
-You ran `python src/tinydiffusion/cli.py`. Use `./run.sh` or `.\run.ps1`, or
+You ran `python src/tinydiffusion/cli.py`. Use `./scripts/run.sh` or `.\scripts\run.ps1`, or
 `uv run --no-sync tinydiffusion ...`.
 
 ### `run.ps1: tinydiffusion is not installed in ...`

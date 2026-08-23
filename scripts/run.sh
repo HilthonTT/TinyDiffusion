@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Run the TinyDiffusion CLI with the project's interpreter.
 #
-#   ./run.sh train  --config configs/smoke.toml
-#   ./run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
+#   ./scripts/run.sh train  --config configs/smoke.toml
+#   ./scripts/run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
 #
 # This is a src-layout project, so `tinydiffusion` is importable only from an
 # environment it has been installed into -- running the .py files by path fails
 # with ModuleNotFoundError. This script finds such an environment and hands off.
-# Override the choice with PYTHON=/path/to/python ./run.sh ...
+# Override the choice with PYTHON=/path/to/python ./scripts/run.sh ...
 #
-# On Windows use PowerShell (.\run.ps1) or Git Bash. WSL cannot use a Windows
+# On Windows use PowerShell (.\scripts\run.ps1) or Git Bash. WSL cannot use a Windows
 # .venv: its python.exe is a Windows binary, and WSL only runs those when
 # interop is enabled.
 
 set -euo pipefail
 
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python_bin=""
 # Set when an interpreter runs but lacks the package, so the error message can

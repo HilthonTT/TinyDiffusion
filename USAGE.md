@@ -63,7 +63,7 @@ uv pip install --reinstall --torch-backend=auto torch torchvision
 
 > **This install sits outside the lockfile.** `uv sync` — and `uv run`, which
 > syncs first — restores the locked CPU build and silently undoes it. Use
-> `.\run.ps1`, `./run.sh`, or `uv run --no-sync` day to day, and re-run the
+> `.\scripts\run.ps1`, `./scripts/run.sh`, or `uv run --no-sync` day to day, and re-run the
 > command above after any deliberate `uv sync`.
 >
 > Pinning CUDA in `pyproject.toml` instead would drag multi-gigabyte wheels
@@ -141,25 +141,25 @@ also be set per-command, or passed as `--cache-dir`.
 ## Running the CLI
 
 The wrappers locate an interpreter that actually has the package installed and
-forward everything else to the CLI. Use `run.ps1` from PowerShell, `run.sh`
-from Git Bash, WSL, Linux, or macOS:
+forward everything else to the CLI. Use `scripts/run.ps1` from PowerShell,
+`scripts/run.sh` from Git Bash, WSL, Linux, or macOS:
 
 ```powershell
-.\run.ps1 train  --config configs\mnist.toml
-.\run.ps1 sample --checkpoint checkpoints\last.pt --num-images 8
+.\scripts\run.ps1 train  --config configs\mnist.toml
+.\scripts\run.ps1 sample --checkpoint checkpoints\last.pt --num-images 8
 ```
 
 ```bash
-./run.sh train  --config configs/mnist.toml
-./run.sh sample --checkpoint checkpoints/last.pt --num-images 8
+./scripts/run.sh train  --config configs/mnist.toml
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --num-images 8
 ```
 
-Set `PYTHON` to force a specific interpreter: `PYTHON=/usr/bin/python3 ./run.sh …`.
+Set `PYTHON` to force a specific interpreter: `PYTHON=/usr/bin/python3 ./scripts/run.sh …`.
 With no arguments a wrapper prints the CLI help. `--version` (or `-V`) prints
 the installed version and exits:
 
 ```bash
-./run.sh --version      # tinydiffusion 0.1.0
+./scripts/run.sh --version      # tinydiffusion 0.1.0
 ```
 
 The number comes from `src/tinydiffusion/version.py`, which is also what
@@ -180,8 +180,9 @@ Two invocations that do **not** work:
   importable only from an environment it is installed into, and running a file
   by path puts *that file's* directory on `sys.path` rather than `src/`.
   Result: `ModuleNotFoundError: No module named 'tinydiffusion'`.
-- `bash .\run.sh` — bash reads the backslash as an escape and looks for a file
-  named `.run.sh`. Use `./run.sh` or `bash run.sh`.
+- `bash .\scripts\run.sh` — bash reads the backslashes as escapes and
+  looks for a file named `.scriptsrun.sh`. Use `./scripts/run.sh` or
+  `bash scripts/run.sh`.
 
 ## Training
 
@@ -190,13 +191,13 @@ in well under a minute on a GPU — the point is to prove the wiring works, not
 to get good digits:
 
 ```bash
-./run.sh train --config configs/smoke.toml
+./scripts/run.sh train --config configs/smoke.toml
 ```
 
 Then the real run:
 
 ```bash
-./run.sh train --config configs/mnist.toml
+./scripts/run.sh train --config configs/mnist.toml
 ```
 
 Each epoch writes a `sample_XXXX.png` grid to `out_dir` — generated digits
@@ -211,7 +212,7 @@ model, EMA shadow weights, optimiser moments, AMP scaler state, and the config,
 so a resumed run continues rather than restarts:
 
 ```bash
-./run.sh train --config configs/mnist.toml --resume checkpoints/last.pt
+./scripts/run.sh train --config configs/mnist.toml --resume checkpoints/last.pt
 ```
 
 Flags override the config file when passed: `--seed`, `--device`, `--epochs`,
@@ -220,7 +221,7 @@ and the logging flags in [Metrics and logging](#metrics-and-logging).
 settings stored in the checkpoint when [resuming](#resuming).
 
 ```bash
-./run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
+./scripts/run.sh train --config configs/mnist.toml --device cpu --epochs 1 --seed 7
 ```
 
 ### The dashboard
@@ -228,8 +229,8 @@ settings stored in the checkpoint when [resuming](#resuming).
 `tui` trains inside a terminal dashboard rather than behind a progress bar:
 
 ```bash
-./run.sh tui --config configs/mnist.toml          # then press s
-./run.sh tui --config configs/mnist.toml --start  # or start straight away
+./scripts/run.sh tui --config configs/mnist.toml          # then press s
+./scripts/run.sh tui --config configs/mnist.toml --start  # or start straight away
 ```
 
 It needs the `tui` extra (`pip install 'tinydiffusion[tui]'`), which pulls in
@@ -283,12 +284,12 @@ makes a sweep a shell loop rather than a directory of near-identical TOMLs.
 It is repeatable:
 
 ```bash
-./run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
+./scripts/run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
 ```
 
 ```bash
 for lr in 1e-4 2e-4 4e-4; do
-  ./run.sh train --config configs/mnist.toml     --set lr=$lr --set log_dir=runs/lr-$lr --set ckpt_dir=checkpoints/lr-$lr
+  ./scripts/run.sh train --config configs/mnist.toml     --set lr=$lr --set log_dir=runs/lr-$lr --set ckpt_dir=checkpoints/lr-$lr
 done
 ```
 
@@ -304,7 +305,7 @@ refused before the dataset is touched. `--set` is applied last, so it also wins
 over `--epochs` and the other named flags:
 
 ```console
-$ ./run.sh train --set batch_sizes=64
+$ ./scripts/run.sh train --set batch_sizes=64
 error: unknown config field(s): batch_sizes
 ```
 
@@ -368,14 +369,14 @@ it was trained with travel inside it, so the TOML file it started from is not
 needed a second time.
 
 ```bash
-./run.sh train --resume checkpoints/last.pt
+./scripts/run.sh train --resume checkpoints/last.pt
 ```
 
 Pass `--config` as well to resume into different settings, and the usual flags
 still override whichever of the two was used:
 
 ```bash
-./run.sh train --resume checkpoints/last.pt --epochs 60
+./scripts/run.sh train --resume checkpoints/last.pt --epochs 60
 ```
 
 `--resume` loads weights into the model the config describes, so the two have
@@ -472,7 +473,7 @@ needs the `plots` extra (`uv sync --all-extras`, or
 `pip install 'tinydiffusion[plots]'`):
 
 ```bash
-./run.sh plot runs/mnist --out contents/metrics.png
+./scripts/run.sh plot runs/mnist --out contents/metrics.png
 ```
 
 Panels are chosen from what the run logged, so an unconditional run with no
@@ -480,7 +481,7 @@ validation split gets no empty `val/loss` axis. Pass more than one run and they
 share every axis, one line per run, which is how a sweep is read:
 
 ```bash
-./run.sh plot runs/baseline runs/min_snr --out contents/compare.png
+./scripts/run.sh plot runs/baseline runs/min_snr --out contents/compare.png
 ```
 
 | Flag | Default | Meaning |
@@ -494,7 +495,7 @@ TensorBoard is optional and off by default. It needs the `tracking` extra
 to `log_dir/tb`:
 
 ```bash
-./run.sh train --config configs/mnist.toml --tensorboard
+./scripts/run.sh train --config configs/mnist.toml --tensorboard
 tensorboard --logdir runs/mnist/tb
 ```
 
@@ -510,7 +511,7 @@ be turned on for one run without editing the TOML.
 ## Sampling
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --num-images 16 --out contents/grid.png
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --num-images 16 --out contents/grid.png
 ```
 
 | Flag | Default | Meaning |
@@ -551,7 +552,7 @@ what a DDIM step costs, and ten to twenty of them land about where fifty DDIM
 steps do:
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --sampler dpmpp --steps 20
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --sampler dpmpp --steps 20
 ```
 
 It is deterministic, so `--eta` above 0 is refused rather than ignored — the
@@ -580,7 +581,7 @@ has the least room to correct itself, and spending more of the budget there is
 what the DDIM paper found better on CIFAR-10 at low step counts.
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --steps 15 --spacing quadratic
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --steps 15 --spacing quadratic
 ```
 
 At 50 steps or more they are hard to tell apart, so the default stays
@@ -709,7 +710,7 @@ partway across, which is the model telling you it has two modes and nothing in
 between.
 
 ```bash
-./run.sh interpolate --checkpoint checkpoints/last.pt --labels 7 --steps 10
+./scripts/run.sh interpolate --checkpoint checkpoints/last.pt --labels 7 --steps 10
 ```
 
 That holds the class fixed and moves only the latent, so the strip shows what
@@ -717,7 +718,7 @@ varies *within* a 7 — stroke weight, slant, whether the bar is crossed. The tw
 ends are named by seed, so a walk you liked is one you can get back:
 
 ```bash
-./run.sh interpolate --checkpoint checkpoints/last.pt --labels 3 \
+./scripts/run.sh interpolate --checkpoint checkpoints/last.pt --labels 3 \
   --seed-start 4 --seed-end 9 --out contents/threes.png
 ```
 
@@ -755,8 +756,8 @@ showing neither.
 digit is which:
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
-./run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
 ```
 
 `--labels` takes a comma-separated list, repeated in order until the grid is
@@ -778,7 +779,7 @@ conditional one's standard deviation, then blend, since going all the way is
 itself too strong:
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --guidance 5 --guidance-rescale 0.7
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --guidance 5 --guidance-rescale 0.7
 ```
 
 0.7 is the published blend and a good starting point. 0 is plain guidance and
@@ -795,7 +796,7 @@ Sampling shows you what the model draws; `eval` puts a number on it, by scoring
 noise-prediction loss over the 10k held-out MNIST test split:
 
 ```bash
-./run.sh eval --checkpoint checkpoints/last.pt
+./scripts/run.sh eval --checkpoint checkpoints/last.pt
 ```
 
 ```
@@ -841,8 +842,8 @@ Scoring both splits is how you see overfitting — a test loss that stalls or
 rises while the train loss keeps falling:
 
 ```bash
-./run.sh eval --checkpoint checkpoints/last.pt --split test
-./run.sh eval --checkpoint checkpoints/last.pt --split train
+./scripts/run.sh eval --checkpoint checkpoints/last.pt --split test
+./scripts/run.sh eval --checkpoint checkpoints/last.pt --split train
 ```
 
 One caveat: this is a proxy. Lower held-out loss means the network predicts
@@ -862,7 +863,7 @@ small sample counts a single GPU can afford, and `--precision-recall` splits a
 bad score into the two different problems it might be.
 
 ```bash
-./run.sh fid --checkpoint checkpoints/last.pt
+./scripts/run.sh fid --checkpoint checkpoints/last.pt
 ```
 
 ```
@@ -890,7 +891,7 @@ score over 1,000 images means the same thing as one over 50,000. It also comes
 with a spread, which FID cannot offer at all:
 
 ```bash
-./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid
 ```
 
 ```
@@ -935,7 +936,7 @@ much of each lands inside the other:
   much of the real data the model reaches.
 
 ```bash
-./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --precision-recall
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --precision-recall
 ```
 
 ```
@@ -977,7 +978,7 @@ one number five times:
 
 ```bash
 for g in 1 2 3 4 5; do
-  ./run.sh fid --checkpoint checkpoints/last.pt --guidance $g
+  ./scripts/run.sh fid --checkpoint checkpoints/last.pt --guidance $g
 done
 ```
 
@@ -1057,7 +1058,7 @@ sits somewhere above 1:
 
 ```bash
 for g in 1 1.5 2 3 5; do
-  ./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --guidance $g
+  ./scripts/run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --guidance $g
 done
 ```
 
@@ -1068,7 +1069,7 @@ shell can ask it for digits. It needs the `server` extra:
 
 ```bash
 uv sync --extra server            # or: pip install 'tinydiffusion[server]'
-./run.sh serve --checkpoint checkpoints/last.pt
+./scripts/run.sh serve --checkpoint checkpoints/last.pt
 ```
 
 ```
@@ -1407,8 +1408,8 @@ from the spec the config names. Switching datasets is therefore the one key,
 plus whatever `num_classes` and `image_size` the new one implies:
 
 ```bash
-./run.sh train --config configs/cifar10.toml
-./run.sh train --config configs/mnist.toml --dataset fashion_mnist
+./scripts/run.sh train --config configs/cifar10.toml
+./scripts/run.sh train --config configs/mnist.toml --dataset fashion_mnist
 ```
 
 `num_classes` has to match the dataset's label space exactly, and a mismatch is
@@ -1638,7 +1639,7 @@ virtualenv in the repo is the usual culprit — `uv` manages `.venv` and nothing
 else, so an environment under any other name will not have the package however
 recently you activated it. Check with `echo $env:VIRTUAL_ENV` (PowerShell) or
 `echo $VIRTUAL_ENV` (bash): if it names anything but `.venv`, deactivate and
-reopen the terminal. Use `./run.sh` / `.\run.ps1`, which only ever pick
+reopen the terminal. Use `./scripts/run.sh` / `.\scripts\run.ps1`, which only ever pick
 `.venv`, or install into the interpreter you want with
 `python -m pip install -e .`.
 

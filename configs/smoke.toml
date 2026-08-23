@@ -3,8 +3,8 @@
 # quarter-width net, two resolution levels, no attention outside the
 # bottleneck, and a 200-step schedule.
 #
-#   ./run.sh train  --config configs/smoke.toml
-#   ./run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
+#   ./scripts/run.sh train  --config configs/smoke.toml
+#   ./scripts/run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
 
 [data]
 data_root = "data"

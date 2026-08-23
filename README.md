@@ -30,11 +30,11 @@ including how to check the GPU was picked up, are in
 
 ```bash
 uv sync --all-extras --dev              # creates .venv/ (~3.5 GB with CUDA)
-./run.sh train  --config configs/smoke.toml
-./run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
+./scripts/run.sh train  --config configs/smoke.toml
+./scripts/run.sh sample --checkpoint runs/smoke/checkpoints/last.pt --out runs/smoke/gen.png
 ```
 
-On Windows use `.\run.ps1` in place of `./run.sh`. The wrappers find an
+On Windows use `.\scripts\run.ps1` in place of `./scripts/run.sh`. The wrappers find an
 interpreter that has the package installed and forward the rest to the CLI —
 `python src/tinydiffusion/cli.py` does not work in a `src/` layout.
 
@@ -43,14 +43,14 @@ end to end (~28 s per epoch on an RTX 5060, ~3.5 min on a CPU). The real run is
 `configs/mnist.toml`:
 
 ```bash
-./run.sh train --config configs/mnist.toml
+./scripts/run.sh train --config configs/mnist.toml
 ```
 
 Any config field can be overridden from the command line with `--set`, which is
 what turns a sweep into a shell loop:
 
 ```bash
-./run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
+./scripts/run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
 ```
 
 MNIST (63 MB) downloads itself on first use. Each epoch writes a sample grid —
@@ -59,15 +59,15 @@ generated digits above real ones — and a resumable checkpoint. Afterwards,
 held-out test split:
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --num-images 16
-./run.sh eval   --checkpoint checkpoints/last.pt
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --num-images 16
+./scripts/run.sh eval   --checkpoint checkpoints/last.pt
 ```
 
 `fid` goes further and measures sample _quality_, by comparing generated images
 with real ones in Inception-v3 feature space:
 
 ```bash
-./run.sh fid --checkpoint checkpoints/last.pt --num-images 10000
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --num-images 10000
 ```
 
 The real images' half of that score does not depend on the checkpoint, so it is
@@ -80,7 +80,7 @@ depends on the sample count. Two more metrics are available for when that is
 the wrong shape of answer:
 
 ```bash
-./run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid --precision-recall
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --num-images 2000 --kid --precision-recall
 ```
 
 `--kid` is unbiased, so a score over 2,000 images means the same thing as one
@@ -96,14 +96,14 @@ terminal as you go. `s` starts, `x` stops at a batch boundary and checkpoints,
 `q` quits.
 
 ```bash
-./run.sh tui --config configs/mnist.toml --start   # needs the 'tui' extra
+./scripts/run.sh tui --config configs/mnist.toml --start   # needs the 'tui' extra
 ```
 
 `plot` draws a run's `metrics.jsonl` — losses, the timestep quartiles, the
 learning rate — as a figure, and several runs on shared axes:
 
 ```bash
-./run.sh plot runs/mnist --out contents/metrics.png
+./scripts/run.sh plot runs/mnist --out contents/metrics.png
 ```
 
 `interpolate` walks between two latents and samples every point on the way,
@@ -112,13 +112,13 @@ images is populated, or whether the model snaps from one mode to another with
 nothing in between.
 
 ```bash
-./run.sh interpolate --checkpoint checkpoints/last.pt --labels 7 --steps 10
+./scripts/run.sh interpolate --checkpoint checkpoints/last.pt --labels 7 --steps 10
 ```
 
 `serve` puts a checkpoint behind a JSON API, for anything that is not a shell:
 
 ```bash
-./run.sh serve --checkpoint checkpoints/last.pt   # needs the 'server' extra
+./scripts/run.sh serve --checkpoint checkpoints/last.pt   # needs the 'server' extra
 curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
   -d '{"num_images": 8, "labels": [7]}'
 ```
@@ -127,9 +127,9 @@ curl -X POST localhost:8000/api/sample -H 'content-type: application/json' \
 asked for a particular one — and for how hard to insist on it:
 
 ```bash
-./run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
-./run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
-./run.sh sample --checkpoint checkpoints/last.pt --guidance 6 --guidance-rescale 0.7
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --labels 7 --num-images 8
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --labels 0,1,2 --guidance 4
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --guidance 6 --guidance-rescale 0.7
 ```
 
 With no `--labels` the grid holds one image per digit. `--guidance` is the
