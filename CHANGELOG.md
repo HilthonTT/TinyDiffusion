@@ -419,6 +419,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- USAGE.md records what the dataloader actually costs, because the shape of the
+  code invites the opposite conclusion: every epoch decodes the split from PIL
+  and resizes it again, and caching the decoded tensors is the obvious
+  optimisation. Measured on an RTX 2070 over MNIST at `batch_size = 128`, the
+  PIL pipeline delivers 18,026 img/s with the default four workers and 4,652
+  with none, against the 471 img/s `configs/mnist.toml` can consume and the
+  2,629 the deliberately tiny `configs/smoke.toml` can — seven- to
+  thirty-eight-fold headroom, prefetched so it overlaps the compute rather than
+  adding to it. An epoch of `configs/mnist.toml` is 271.8 ms per batch, about
+  128 s of pure compute, which is essentially the whole of it. Caching would
+  have bought no wall-clock for 59 MB, a startup decode and a question about
+  where the augmentation's flip is drawn, so the pipeline is unchanged and the
+  measurement is written down instead.
+
 - The samplers run under `torch.inference_mode` rather than `torch.no_grad`.
   Neither builds a graph; the stronger one also skips the version-counter and
   view-tracking bookkeeping that autograd keeps on every tensor it might later

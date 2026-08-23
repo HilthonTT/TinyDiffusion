@@ -1269,6 +1269,43 @@ The optimiser is AdamW. At the default `weight_decay = 0.0` that is Adam
 exactly — decoupled decay is the only thing the two differ in — so turning it
 on is an opt-in, and `betas` is there for the runs that need it.
 
+#### The dataloader is not the bottleneck
+
+Worth recording, because it looks like it should be: every epoch decodes the
+split from PIL and resizes it again, and caching the decoded tensors is the
+obvious optimisation. Measured on an RTX 2070 over the 60,000-image MNIST
+training split at `batch_size = 128`, it is not worth doing.
+
+| | Throughput |
+| --- | --- |
+| PIL pipeline, `num_workers = 0` | 4,652 img/s |
+| PIL pipeline, `num_workers = 4` (the default) | **18,026 img/s** |
+| decoded once into uint8 tensors, for comparison | 30,066 img/s |
+| — what `configs/mnist.toml` can consume | **471 img/s** |
+| — what `configs/smoke.toml` can consume | **2,629 img/s** |
+
+The model is the slow half by a factor of 7 to 38. `configs/mnist.toml` is
+271.8 ms per batch, or about 128 s of pure compute per epoch — which is
+essentially the whole of the 1.8 minutes an epoch takes, leaving nothing for
+the loader to be blamed for. The workers prefetch, so what little the data
+costs overlaps the compute rather than adding to it, and even the deliberately
+tiny `configs/smoke.toml` model has sevenfold headroom.
+
+Caching the split would therefore buy no wall-clock while costing 59 MB for
+MNIST — 153 MB for CIFAR-10 — a one-off decode at startup, and a question
+about where the augmentation's random flip is drawn from. So the pipeline
+stays as it is.
+
+Two things follow for when you change the shape of a run. Dropping to
+`num_workers = 0` gives up the overlap, which is the one setting that can make
+the data visible: at 4,652 img/s it still outruns `configs/mnist.toml`
+tenfold, but it is no longer free. And the headroom is a property of *this*
+model and this resolution — a much smaller network, or a much larger
+`batch_size`, moves the model's appetite up towards the loader's ceiling.
+`time/images_per_second` in `metrics.jsonl` is the number to watch: compare it
+against the table above, and if a run sits near the loader's figure rather than
+the model's, the data has become the limit.
+
 ### Choosing a dataset
 
 `dataset` names an entry in the registry in `tinydiffusion/data/datasets.py`:
@@ -1453,7 +1490,7 @@ starting it over, not `--resume`.
 | `data_root` | `data` | The dataset is downloaded here on first use |
 | `image_size` | 32 | 32 keeps 28x28 digits intact and halves exactly |
 | `batch_size` | 128 | 8 GB of VRAM has room for 256 |
-| `num_workers` | 4 | 0 when debugging |
+| `num_workers` | 4 | 0 when debugging; see [The dataloader is not the bottleneck](#the-dataloader-is-not-the-bottleneck) |
 | `base_channels` | 64 | Width; DDPM uses 128 for CIFAR-10 |
 | `channel_mult` | `[1, 2, 2]` | One entry per resolution level |
 | `num_res_blocks` | 2 | Residual blocks per level |
