@@ -13,16 +13,41 @@ from tinydiffusion.tui.preview import HALF_BLOCK, half_block_rows
 pytest.importorskip("textual", reason="needs the 'tui' extra")
 
 from tinydiffusion.tui.app import (
+    LossChart,
     QuartileBars,
     SamplePreview,
     Series,
+    StatTile,
+    StatusBar,
     TinyDiffusionApp,
+    TrainingEnded,
     TuiObserver,
     duration,
     epoch_summary,
     run_eta,
     two_columns,
 )
+from tinydiffusion.tui.screens import HelpScreen, ThemeScreen
+from tinydiffusion.tui.themes import (
+    CUSTOM_THEMES,
+    DEFAULT_THEME,
+    load_preferred_theme,
+    save_preferred_theme,
+)
+from tinydiffusion.tui.widgets import resolve_colour
+
+
+@pytest.fixture(autouse=True)
+def config_dir(tmp_path, monkeypatch):
+    """Keep the remembered theme inside the test's own directory.
+
+    The dashboard writes the chosen theme to the user's config directory, and a
+    suite that reached into a real home would both leak into it and be steered
+    by whatever was already there.
+    """
+    monkeypatch.setenv("TINYDIFFUSION_CONFIG_DIR", str(tmp_path / "config"))
+    return tmp_path / "config"
+
 
 # --- the image preview -----------------------------------------------------
 
@@ -102,18 +127,6 @@ def test_a_series_is_bounded():
     assert len(series.values) == MAX_POINTS
     # The newest are the ones kept.
     assert series.values[-1] == float(MAX_POINTS + 49)
-
-
-def test_a_single_point_is_doubled_for_the_sparkline():
-    # One point has no range to scale against and draws as a blank; two draw
-    # the flat line that is the honest picture of one measurement.
-    series = Series()
-    series.add(1.5)
-    assert series.for_sparkline() == [1.5, 1.5]
-
-
-def test_an_empty_series_still_gives_the_sparkline_something():
-    assert Series().for_sparkline() == [0.0]
 
 
 def test_the_eta_extrapolates_from_the_epoch_so_far():
@@ -279,10 +292,12 @@ def plan_for(cfg) -> TrainPlan:
 def test_the_app_mounts_with_every_panel(cfg):
     async def steps(pilot):
         app = pilot.app
-        for selector in ("#plan", "#stats", "#train-spark", "#val-spark", "#log", "#epoch-bar"):
+        for selector in ("#plan", "#stats", "#log", "#epoch-bar", "#status-bar"):
             assert app.query_one(selector)
         assert app.query_one(QuartileBars)
         assert app.query_one(SamplePreview)
+        assert app.query_one(LossChart)
+        assert len(app.query(StatTile)) == 5
         # Nothing is running until it is asked to be.
         assert not app.running
 
@@ -365,10 +380,15 @@ def test_epoch_metrics_reach_the_charts_and_the_quartiles(cfg):
 
         assert app.train_loss.values == [0.9, 0.7]
         assert app.val_loss.values == [0.8, 0.6]
-        assert app.query_one("#train-spark").data == [0.9, 0.7]
+        # Both series reach one chart on one axis: a validation curve that has
+        # stopped following the training curve down is the whole point, and it
+        # is invisible on two charts each normalised to its own range.
+        chart = text_of(app.query_one(LossChart))
+        assert "train 0.7" in chart
+        assert "val 0.6" in chart
 
         bars = text_of(app.query_one(QuartileBars))
-        assert "q0" in bars and "q3" in bars
+        assert "t 0-25%" in bars and "t 75-100%" in bars
         # One scale across all four, so the bars compare with each other: the
         # largest fills the width and the smallest does not.
         lines = bars.splitlines()
@@ -450,14 +470,166 @@ def test_the_log_pane_toggles(cfg):
     drive(TinyDiffusionApp(cfg), steps)
 
 
-def test_the_theme_toggles(cfg):
+def test_the_theme_cycles_both_ways_and_is_remembered(cfg):
     async def steps(pilot):
         app = pilot.app
         first = app.theme
         await pilot.press("d")
         assert app.theme != first
+        # Remembered as soon as it is chosen, so the next run opens in it.
+        assert load_preferred_theme() == app.theme
+        await pilot.press("D")
+        assert app.theme == first
 
     drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_dashboard_opens_in_the_theme_last_chosen(cfg):
+    save_preferred_theme("gruvbox")
+
+    async def steps(pilot):
+        assert pilot.app.theme == "gruvbox"
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_remembered_theme_that_no_longer_exists_falls_back(cfg):
+    save_preferred_theme("a-theme-that-was-removed")
+
+    async def steps(pilot):
+        assert pilot.app.theme == DEFAULT_THEME
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_every_custom_theme_is_registered(cfg):
+    async def steps(pilot):
+        for theme in CUSTOM_THEMES:
+            assert theme.name in pilot.app.available_themes
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_theme_picker_previews_and_can_be_cancelled(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        before = app.theme
+        await pilot.press("t")
+        await pilot.pause()
+        assert isinstance(app.screen, ThemeScreen)
+        await pilot.press("down")
+        await pilot.pause()
+        # The whole reason the picker exists next to the cycle key: the theme is
+        # applied as the highlight moves, so the choice is made by eye.
+        assert app.theme != before
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.theme == before
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_theme_picker_keeps_what_was_selected(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        await pilot.press("t")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, ThemeScreen)
+        assert load_preferred_theme() == app.theme
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_help_lists_the_keys(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_focus_mode_clears_the_screen_of_all_but_the_charts(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        assert app.query_one("#sidebar").display
+        await pilot.press("f")
+        await pilot.pause()
+        assert not app.query_one("#sidebar").display
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.query_one("#sidebar").display
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_log_can_be_emptied(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        assert app.query_one("#log").lines
+        await pilot.press("c")
+        await pilot.pause()
+        assert not app.query_one("#log").lines
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_status_bar_follows_the_run(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        status = app.query_one(StatusBar)
+        assert status.state == "idle"
+        app.running = True
+        app.observer = TuiObserver(app)
+        await pilot.press("x")
+        assert status.state == "stopping"
+        app.post_message(TrainingEnded(None))
+        await pilot.pause()
+        assert status.state == "done"
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_failed_run_says_so_in_the_status_bar(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        app.running = True
+        app.post_message(TrainingEnded(RuntimeError("boom")))
+        await pilot.pause()
+        assert app.query_one(StatusBar).state == "failed"
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_narrow_terminal_drops_the_tiles_rather_than_squashing_them(cfg):
+    async def go():
+        app = TinyDiffusionApp(cfg)
+        async with app.run_test(size=(80, 30)) as pilot:
+            await pilot.pause()
+            # Five readable numbers do not fit across 80 columns, and the
+            # sidebar's stats panel is already carrying every one of them.
+            assert not app.query_one("#tiles").display
+            assert app.query_one("#sidebar").display
+
+    asyncio.run(go())
+
+
+def test_a_very_narrow_terminal_gives_the_room_to_the_charts(cfg):
+    async def go():
+        app = TinyDiffusionApp(cfg)
+        async with app.run_test(size=(60, 24)) as pilot:
+            await pilot.pause()
+            assert not app.query_one("#sidebar").display
+            assert app.query_one(LossChart).display
+
+    asyncio.run(go())
 
 
 def test_a_failing_run_is_reported_rather_than_swallowed(cfg):
@@ -474,5 +646,152 @@ def test_a_failing_run_is_reported_rather_than_swallowed(cfg):
         # RichLog keeps rendered strips rather than the strings it was handed.
         written = "\n".join(strip.text for strip in app.query_one("#log").lines)
         assert "CUDA out of memory" in written
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+@pytest.fixture
+def no_training(monkeypatch):
+    """Let the start/stop keys be exercised without actually training.
+
+    Everything below is about what the dashboard does around a run, and a real
+    worker would download MNIST to find out.
+    """
+    monkeypatch.setattr(TinyDiffusionApp, "train_worker", lambda self: None)
+
+
+def test_restarting_an_idle_dashboard_simply_starts(cfg, no_training):
+    async def steps(pilot):
+        await pilot.press("r")
+        assert pilot.app.running
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_restarting_a_running_dashboard_waits_for_the_worker_to_leave(cfg, no_training):
+    async def steps(pilot):
+        app = pilot.app
+        await pilot.press("s")
+        assert app.running
+        observer = app.observer
+        await pilot.press("r")
+        assert observer.stop_requested()
+        assert not app.running or app.query_one(StatusBar).state == "stopping"
+        app.post_message(TrainingEnded(None))
+        await pilot.pause()
+        # Doing this by hand means watching for the stop to land before pressing
+        # start; the point of the key is that the dashboard watches instead.
+        assert app.running
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_failed_run_is_not_restarted(cfg, no_training):
+    async def steps(pilot):
+        app = pilot.app
+        await pilot.press("s")
+        await pilot.press("r")
+        app.post_message(TrainingEnded(RuntimeError("CUDA out of memory")))
+        await pilot.pause()
+        # Restarting into the same out-of-memory is not a service to anyone.
+        assert not app.running
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_screenshot_lands_beside_the_run(cfg):
+    async def steps(pilot):
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert list(cfg.log_dir.glob("*.svg"))
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+# --- colours ---------------------------------------------------------------
+
+
+def test_a_plain_colour_comes_back_as_itself():
+    assert resolve_colour("#88C0D0", {}).lower() == "#88c0d0"
+
+
+def test_a_faded_colour_is_blended_towards_what_is_behind_it():
+    # Textual resolves `auto 60%` at render time against whatever it lands on;
+    # Rich has never heard of it, so the blend has to happen up front.
+    faded = resolve_colour("auto 50%", {"foreground": "#FFFFFF", "surface": "#000000"})
+    assert faded.lower() in {"#7f7f7f", "#808080"}
+
+
+def test_a_faded_colour_with_nothing_behind_it_keeps_its_strength():
+    assert resolve_colour("auto 50%", {"foreground": "#FFFFFF"}).lower() == "#ffffff"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ansi_blue", "blue"),
+        ("ansi_bright_red", "bright_red"),
+        ("ansi_default", "default"),
+        ("ansi_default 50%", "default"),
+        ("transparent", "default"),
+    ],
+)
+def test_the_terminals_own_colours_are_spelt_the_way_rich_spells_them(value, expected):
+    # The ANSI themes name colours `ansi_blue` so the terminal's palette shows
+    # through. Rich drops the prefix, and there is nothing to fade a
+    # terminal-defined colour against, so a percentage on one is left alone.
+    assert resolve_colour(value, {}) == expected
+
+
+def test_a_colour_that_cannot_be_read_falls_back_rather_than_raising():
+    assert resolve_colour("not-a-colour", {}) == "#808080"
+    assert resolve_colour("", {}) == "#808080"
+
+
+def test_every_theme_renders_every_widget(cfg, grid):
+    """Each theme, applied and drawn, with numbers in every panel.
+
+    The ANSI themes broke the dashboard once: their colours are named
+    `ansi_blue` and `ansi_default`, which Rich cannot parse, and the exception
+    landed while someone was scrolling the picker. Walking the whole list is
+    cheap and this is exactly the kind of bug it catches.
+    """
+
+    async def steps(pilot):
+        app = pilot.app
+        app.apply_epoch(
+            0,
+            {
+                "train/loss": 0.9,
+                "val/loss": 0.8,
+                "train/loss_q0": 1.0,
+                "train/loss_q1": 0.5,
+                "train/loss_q2": 0.25,
+                "train/loss_q3": 0.125,
+            },
+        )
+        app.apply_sample(grid)
+        app.query_one(StatusBar).detail = "mnist · cuda"
+        app.query_one(StatusBar).note = "epoch 1/3"
+        for name in app.available_themes:
+            app.theme = name
+            await pilot.pause()
+            assert text_of(app.query_one(LossChart))
+            assert text_of(app.query_one(QuartileBars))
+            assert text_of(app.query_one("#status-bar"))
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_the_theme_picker_survives_being_scrolled_through(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        await pilot.press("t")
+        await pilot.pause()
+        for _ in range(len(app.available_themes) + 2):
+            await pilot.press("down")
+            await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
 
     drive(TinyDiffusionApp(cfg), steps)

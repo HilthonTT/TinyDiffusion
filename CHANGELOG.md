@@ -360,6 +360,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PyTorch Windows wheels do not ship Triton.
 - `docs/INSTALL.md`: install, GPU verification and troubleshooting.
 
+### Changed
+
+- The training dashboard (`tui`) has been rebuilt. The two sparklines are now
+  one chart: `train/loss` and `val/loss` drawn as braille lines on a single
+  labelled axis. Braille puts a 2x4 grid of dots in every character cell, so an
+  eight-row chart is thirty-two pixels tall — enough to see a validation curve
+  stop following the training curve down, which two sparklines each normalised
+  to their own range structurally cannot show. The arithmetic lives in the new
+  `tinydiffusion.tui.chart`, which imports neither Textual nor Rich for the
+  same reason `tui.preview` does not: it returns characters and series indices
+  rather than markup, so it is testable on an install with neither.
+- The screen itself is new: a status line that says at a glance whether the run
+  is ready, training, stopping, finished or failed; five headline tiles
+  (smoothed loss, validation loss, throughput, ETA, elapsed); panels whose
+  headings are drawn into their borders rather than costing a row apiece; and a
+  layout that follows the terminal, dropping the tiles below about 100 columns
+  and the sidebar below about 72 rather than clipping either. The widgets moved
+  out of `tui.app` into `tinydiffusion.tui.widgets`, which renders and decides
+  nothing, leaving the app to own what the numbers mean.
+- Thirty-odd themes where there were two. Ten are written for this dashboard —
+  `tinydiffusion` and `tinydiffusion-light`, `latent`, `ember`, `mint`,
+  `oceanic`, `synthwave`, `noir`, `paper`, `arctic` — and every theme Textual
+  ships sits in the same cycle beside them. `t` opens a picker that applies
+  each theme as the highlight moves, since a name alone says nothing about how
+  a chart will look in it; `d` and `D` walk the list a keypress at a time. The
+  colours reach the charts, the bars and the tiles rather than only the
+  borders. The choice is remembered in `~/.config/tinydiffusion/tui.json` —
+  moved by `TINYDIFFUSION_CONFIG_DIR` or `XDG_CONFIG_HOME` — and an unreadable
+  one means the default rather than an error in front of a training run.
+- New keys, and a `?` screen listing all of them: `r` restarts (stop, then
+  start again once the worker has left), `f` is a focus mode that gives the
+  charts the whole screen, `c` clears the log, and `ctrl+s` writes an SVG of
+  the dashboard into the run's log directory. Every action is also in the
+  command palette under `ctrl+p`, so none of them depends on knowing its key.
+- The quartile bars name what they cover — `t 0-25%` through `t 75-100%`
+  rather than `q0` through `q3` — and take a colour each from the theme.
+
 ### Fixed
 
 - The test suite no longer fails on an install without the `server` extra.

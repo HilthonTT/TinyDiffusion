@@ -245,25 +245,60 @@ same way, so a run started here is the run `train` would have started.
 | --- | --- |
 | `s` | Start training |
 | `x` | Stop at the next batch boundary, writing `interrupted.pt` first |
+| `r` | Restart: stop, then start again once the worker has left |
 | `l` | Show or hide the log pane |
-| `d` | Switch between the light and dark themes |
+| `c` | Clear the log |
+| `f` | Focus mode — hide the sidebar, the tiles and the log, and give the room to the charts |
+| `t` | Theme picker, applying each theme as the highlight moves |
+| `d` / `D` | Cycle to the next or previous theme |
+| `ctrl+s` | Save an SVG screenshot into the run's log directory |
+| `ctrl+p` | Command palette — every action above, by name |
+| `?` | List every key |
 | `q` | Quit |
 
 What it shows, live:
 
+- a status line: whether the run is ready, training, stopping, finished or
+  failed, what it is training, and how far through the current epoch it is;
+- five headline tiles — smoothed training loss, validation loss, throughput,
+  ETA and elapsed — big enough to read from across the room;
 - the resolved plan — parameter count, device and GPU model, precision,
   conditioning, steps per epoch — as data rather than as the one-line sentence
   the plain trainer prints;
 - epoch and batch progress, with throughput, epoch time and an ETA for the
   whole run;
-- `train/loss` and `val/loss` per epoch as sparklines, and the current
-  smoothed loss, learning rate, gradient norm and best held-out score;
+- `train/loss` and `val/loss` per epoch, drawn as braille lines on one shared
+  axis with the values labelled. Braille puts a 2x4 grid of dots in every
+  character cell, so an eight-row chart is thirty-two pixels tall — enough to
+  see a validation curve stop following the training curve down, which is the
+  single most useful thing a training dashboard can show and the thing two
+  separately-normalised sparklines cannot;
 - the loss split by timestep quartile, as four bars on one scale — which
   quarter of the schedule the error is sitting in is the thing a single loss
   number cannot tell you;
 - the latest sample grid, drawn in the terminal. A cell is about twice as tall
   as it is wide, so each one carries two pixels as an upper half block, and a
   32px MNIST grid is more than legible enough to watch a 7 become a 7.
+
+The layout follows the terminal. Below about 100 columns the tiles drop away —
+the sidebar's stats panel is already carrying every number on them — and below
+about 72 the sidebar goes too, leaving the charts and the samples the width.
+
+#### Themes
+
+Thirty-odd of them: ten written for this dashboard (`tinydiffusion` and
+`tinydiffusion-light`, `latent`, `ember`, `mint`, `oceanic`, `synthwave`,
+`noir`, `paper`, `arctic`) alongside every theme Textual ships — Nord, Gruvbox,
+Dracula, Tokyo Night, Catppuccin, Monokai, Flexoki, Solarized, Rosé Pine and
+the rest. `t` opens the picker, which applies each one as the highlight moves
+so the choice is made by eye; `d` and `D` walk the same list a keypress at a
+time. The colours reach the charts, the bars and the tiles, not only the
+borders.
+
+Whatever is chosen is remembered in `~/.config/tinydiffusion/tui.json` and used
+the next time the dashboard opens. `TINYDIFFUSION_CONFIG_DIR` moves that file,
+`XDG_CONFIG_HOME` moves the directory it sits under, and a missing or
+unreadable one simply means the default.
 
 Stopping with `x` is the Ctrl+C path without the prompt: it stops at a batch
 boundary, where the model, optimiser and EMA all agree, and writes

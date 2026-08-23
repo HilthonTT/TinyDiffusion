@@ -90,10 +90,12 @@ causes: how much of what the model draws is realistic, and how much of the real
 data it reaches. Guidance trades one for the other, and no single number can
 show that.
 
-`tui` trains inside a terminal dashboard instead: live loss, progress and ETA,
-the loss split by timestep quartile, and each epoch's sample grid drawn in the
-terminal as you go. `s` starts, `x` stops at a batch boundary and checkpoints,
-`q` quits.
+`tui` trains inside a terminal dashboard instead: train and validation loss
+on one braille-drawn axis, progress and ETA, the loss split by timestep
+quartile, and each epoch's sample grid drawn in the terminal as you go. `s`
+starts, `x` stops at a batch boundary and checkpoints, `f` gives the charts the
+whole screen, `t` opens a theme picker that previews as you move, `?` lists
+every key and `q` quits.
 
 ```bash
 ./scripts/run.sh tui --config configs/mnist.toml --start   # needs the 'tui' extra

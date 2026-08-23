@@ -12,34 +12,66 @@ exactly two points, and everything else here follows from them:
   thread reads rather than writes, so it needs no marshalling at all — and it
   is why a run can be ended from a keypress without the Ctrl+C prompt, which
   has nobody to answer it while a display owns the terminal.
+
+The screen itself is assembled from :mod:`tinydiffusion.tui.widgets`, which
+knows how to draw and nothing else. What is worth showing, and when, is decided
+here.
 """
+
+from __future__ import annotations
 
 import contextlib
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
 from textual import on, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Label, ProgressBar, RichLog, Sparkline, Static
+from textual.widgets import Footer, Header, Label, ProgressBar, RichLog, Static
 
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.observer import BatchProgress, TrainPlan
 from tinydiffusion.training.train import train
-from tinydiffusion.tui.preview import HALF_BLOCK, half_block_rows
+from tinydiffusion.tui.screens import HelpScreen, ThemeScreen
+from tinydiffusion.tui.themes import (
+    CUSTOM_THEMES,
+    DEFAULT_THEME,
+    cycle_order,
+    load_preferred_theme,
+    save_preferred_theme,
+)
+from tinydiffusion.tui.widgets import (
+    LossChart,
+    QuartileBars,
+    SamplePreview,
+    StatTile,
+    StatusBar,
+)
 
 if TYPE_CHECKING:
     from textual.binding import BindingType
+    from textual.screen import Screen
 
-__all__ = ["QuartileBars", "SamplePreview", "TinyDiffusionApp", "TrainingEnded", "TuiObserver"]
+__all__ = [
+    "LossChart",
+    "Panel",
+    "QuartileBars",
+    "SamplePreview",
+    "Series",
+    "StatTile",
+    "StatusBar",
+    "TinyDiffusionApp",
+    "TrainingEnded",
+    "TuiObserver",
+]
 
 UI_INTERVAL = 0.05
 """Seconds between UI updates driven from the training thread.
@@ -52,7 +84,13 @@ in time, for the small model whose batches go by faster than a screen refresh.
 """
 
 MAX_POINTS = 240
-"""Epochs kept per chart series. A sparkline cannot show more than its width."""
+"""Epochs kept per chart series. A chart cannot show more than its width."""
+
+NARROW = 100
+"""Columns below which the tiles are dropped and the sidebar tightened."""
+
+VERY_NARROW = 72
+"""Columns below which the sidebar goes entirely and the charts take the room."""
 
 
 class TrainingEnded(Message):
@@ -87,18 +125,6 @@ class Series:
         self.values.append(value)
         if len(self.values) > MAX_POINTS:
             del self.values[0]
-
-    def for_sparkline(self) -> list[float]:
-        """The points, in the shape a sparkline can actually draw.
-
-        Returns:
-            The values, with a single point doubled: one point has no range to
-            scale against and renders blank, where two draw the flat line that
-            is the honest picture of a run that has produced one number.
-        """
-        if not self.values:
-            return [0.0]
-        return self.values if len(self.values) > 1 else self.values * 2
 
 
 class TuiObserver:
@@ -188,105 +214,29 @@ class TuiObserver:
         self._deliver("apply_sample", path)
 
 
-class SamplePreview(Static):
-    """The latest sample grid, drawn two pixels to a character cell."""
+class Panel(Vertical):
+    """A bordered box with its heading drawn into the border itself.
 
-    DEFAULT_CSS = """
-    SamplePreview {
-        height: 1fr;
-        min-height: 4;
-    }
+    A heading widget inside a box costs a row and repeats what the border is
+    already framing; a border title costs nothing and cannot drift away from
+    the thing it names.
+
+    Args:
+        *children: what goes inside.
+        title: the border title.
+        id: the widget id.
+        classes: any CSS classes.
     """
 
-    def __init__(self) -> None:
-        super().__init__("no samples yet", id="preview")
-        self._path: Path | None = None
-
-    def show(self, path: Path) -> None:
-        """Draw the grid at `path`, and redraw it on every later resize.
-
-        Args:
-            path: the PNG to render.
-        """
-        self._path = path
-        self.redraw()
-
-    def on_resize(self) -> None:
-        """Re-render: the cell grid is fitted to the widget, so a resize refits it."""
-        self.redraw()
-
-    def redraw(self) -> None:
-        """Render the held path into this widget's current size."""
-        if self._path is None:
-            return
-        width, height = self.size.width, self.size.height
-        if width < 2 or height < 2:
-            return
-        try:
-            rows = half_block_rows(self._path, max_width=width, max_height=height)
-        except OSError as exc:
-            # A grid that was half-written when we looked is not worth a crash:
-            # the next epoch writes another one.
-            self.update(f"could not read {self._path.name}: {exc}")
-            return
-
-        text = Text()
-        for index, row in enumerate(rows):
-            if index:
-                text.append("\n")
-            for top, bottom in row:
-                fore = f"rgb({top[0]},{top[1]},{top[2]})"
-                back = f"rgb({bottom[0]},{bottom[1]},{bottom[2]})"
-                text.append(HALF_BLOCK, style=f"{fore} on {back}")
-        self.update(text)
-
-
-class QuartileBars(Static):
-    """The per-quartile training loss, as four bars sharing one scale.
-
-    Which quarter of the diffusion schedule the error is sitting in is the
-    thing a single loss number cannot tell you, and four bars say it at a
-    glance.
-    """
-
-    BLOCKS = "▏▎▍▌▋▊▉█"
-    """Eighth-width blocks, so a bar has eight times a cell's resolution."""
-
-    def __init__(self) -> None:
-        super().__init__("waiting for the first epoch", id="quartiles")
-
-    def show(self, values: list[float | None]) -> None:
-        """Draw one bar per quartile.
-
-        Args:
-            values: the four means, lowest timestep bucket first. None where an
-                epoch logged nothing for that bucket.
-        """
-        present = [value for value in values if value is not None]
-        if not present:
-            return
-        # One scale across all four, so the bars compare with each other rather
-        # than each being normalised into saying nothing.
-        top = max(present)
-        width = max(self.size.width - 14, 4)
-
-        text = Text()
-        for index, value in enumerate(values):
-            if index:
-                text.append("\n")
-            text.append(f"q{index} ", style="bold")
-            if value is None:
-                text.append(f"{'-':<{width}}", style="dim")
-                continue
-            filled = (value / top) * width if top > 0 else 0.0
-            whole = int(filled)
-            remainder = filled - whole
-            bar = "█" * whole
-            if whole < width and remainder > 0:
-                bar += self.BLOCKS[min(int(remainder * 8), 7)]
-            text.append(f"{bar:<{width}}", style="cyan")
-            text.append(f" {value:.4f}")
-        self.update(text)
+    def __init__(
+        self,
+        *children: object,
+        title: str,
+        id: str | None = None,  # noqa: A002 - Textual's own parameter name
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(*children, id=id, classes=classes)  # type: ignore[arg-type]
+        self.border_title = title
 
 
 class TinyDiffusionApp(App[None]):
@@ -302,28 +252,73 @@ class TinyDiffusionApp(App[None]):
     TITLE = "TinyDiffusion"
 
     CSS = """
+    Screen { background: $background; }
+
     #columns { height: 1fr; }
+
     /* Scrollable rather than fixed: the panels are sized by their content, and
        a narrow terminal or a long device name pushes the last of them past the
        bottom. Clipping it silently is the one outcome worth ruling out. */
-    #sidebar { width: 40; height: 1fr; }
-    #sidebar > Vertical, #main > Vertical {
-        border: round $foreground 30%;
+    #sidebar { width: 38; height: 1fr; padding: 0 0 0 1; scrollbar-size: 1 1; }
+    #main { width: 1fr; height: 1fr; padding: 0 1 0 0; }
+
+    Panel {
+        border: round $primary 45%;
+        border-title-color: $text-accent;
+        border-title-style: bold;
         padding: 0 1;
         height: auto;
+        background: $surface;
     }
-    #main { width: 1fr; height: 1fr; }
-    #preview-panel { height: 1fr; min-height: 6; }
-    #log-panel { height: 10; border: round $foreground 30%; padding: 0 1; }
-    .heading { text-style: bold; color: $accent; }
-    Sparkline { height: 2; }
+    Panel:focus-within { border: round $primary; }
+
+    #tiles { height: 3; margin-top: 1; }
+    StatTile { margin-right: 1; background: $surface; }
+    StatTile:last-of-type { margin-right: 0; }
+
+    /* Both 1fr, so whatever the terminal has left is split between the curve
+       and the pictures rather than one of them being clipped by a fixed size. */
+    #chart-panel { height: 1fr; min-height: 5; margin-top: 1; }
+    #lower { height: 1fr; min-height: 5; margin-top: 1; }
+    #quartile-panel { width: 1fr; height: 1fr; align-vertical: middle; }
+    #preview-panel { width: 45%; min-width: 20; height: 1fr; margin-left: 1; }
+
+    #sidebar > Panel { margin-top: 1; width: 1fr; }
+    #epoch-bar, #batch-bar { width: 1fr; margin-bottom: 1; }
+    #epoch-label, #batch-label { color: $text-muted; }
+
+    #log-panel { height: 10; }
+    #log { background: $surface; scrollbar-size: 1 1; }
+
+    .heading { text-style: bold; color: $text-accent; }
+
+    /* Below ~100 columns the tiles cannot hold five readable numbers side by
+       side, and the sidebar's stats panel already carries every one of them. */
+    Screen.-narrow #tiles { display: none; }
+    Screen.-narrow #sidebar { width: 30; }
+    Screen.-narrow #preview-panel { width: 50%; }
+    Screen.-narrow #log-panel { height: 8; }
+    Screen.-tiny #sidebar { display: none; }
+    Screen.-tiny #log-panel { height: 6; }
+
+    /* Focus mode: everything that is not a picture gets out of the way. */
+    Screen.-focus #sidebar { display: none; }
+    Screen.-focus #tiles { display: none; }
+    Screen.-focus #log-panel { display: none; }
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("s", "start", "Start"),
         Binding("x", "stop", "Stop"),
+        Binding("r", "restart", "Restart", show=False),
         Binding("l", "toggle_log", "Log"),
-        Binding("d", "cycle_theme", "Theme"),
+        Binding("f", "toggle_focus", "Focus"),
+        Binding("c", "clear_log", "Clear", show=False),
+        Binding("t", "pick_theme", "Theme"),
+        Binding("d", "cycle_theme", "Next theme", show=False),
+        Binding("D", "cycle_theme_back", "Previous theme", show=False),
+        Binding("ctrl+s", "snapshot", "Screenshot", show=False),
+        Binding("question_mark", "help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -344,8 +339,10 @@ class TinyDiffusionApp(App[None]):
         self.observer: TuiObserver | None = None
         self.train_loss = Series()
         self.val_loss = Series()
+        self.plan: TrainPlan | None = None
         self._stats: dict[str, str] = {}
         self._started: float | None = None
+        self._restart = False
 
     # ---- layout --------------------------------------------------------
 
@@ -355,48 +352,89 @@ class TinyDiffusionApp(App[None]):
         Yields:
             The app's widgets.
         """
-        yield Header(show_clock=True)
+        yield Header(show_clock=True, icon="◈")
+        yield StatusBar()
         with Horizontal(id="columns"):
             with VerticalScroll(id="sidebar"):
-                with Vertical():
-                    yield Label("run", classes="heading")
+                with Panel(title="run", id="run-panel"):
                     yield Static(self.plan_text(), id="plan")
-                with Vertical():
-                    yield Label("progress", classes="heading")
+                with Panel(title="progress", id="progress-panel"):
                     yield Label("epoch -", id="epoch-label")
                     yield ProgressBar(total=100, show_eta=False, id="epoch-bar")
                     yield Label("batch -", id="batch-label")
                     yield ProgressBar(total=100, show_eta=False, id="batch-bar")
-                with Vertical():
-                    yield Label("stats", classes="heading")
+                with Panel(title="stats", id="stats-panel"):
                     yield Static("not started", id="stats")
             with Vertical(id="main"):
-                with Vertical():
-                    yield Label("train/loss per epoch", classes="heading")
-                    yield Sparkline([0.0], id="train-spark")
-                    yield Label("val/loss per epoch", classes="heading")
-                    yield Sparkline([0.0], id="val-spark")
-                with Vertical():
-                    yield Label("train loss by timestep quartile", classes="heading")
-                    yield QuartileBars()
-                with Vertical(id="preview-panel"):
-                    yield Label("latest samples (generated above real)", classes="heading")
-                    yield SamplePreview()
-        with Vertical(id="log-panel"):
+                with Horizontal(id="tiles"):
+                    yield StatTile("loss", "tile-loss", "text-primary")
+                    yield StatTile("val", "tile-val", "text-secondary")
+                    yield StatTile("img/s", "tile-rate", "text-accent")
+                    yield StatTile("eta", "tile-eta", "text-warning")
+                    yield StatTile("elapsed", "tile-elapsed", "text-muted")
+                with Panel(title="loss per epoch", id="chart-panel"):
+                    yield LossChart()
+                with Horizontal(id="lower"):
+                    with Panel(title="loss by timestep", id="quartile-panel"):
+                        yield QuartileBars()
+                    with Panel(title="samples", id="preview-panel"):
+                        yield SamplePreview()
+        with Panel(title="log", id="log-panel"):
             yield RichLog(markup=True, wrap=True, id="log")
         yield Footer()
 
     def on_mount(self) -> None:
-        """Say what is loaded, and start straight away if that was asked for."""
+        """Register the themes, say what is loaded, and start if asked to."""
+        for theme in CUSTOM_THEMES:
+            self.register_theme(theme)
+        preferred = load_preferred_theme() or DEFAULT_THEME
+        self.theme = preferred if preferred in self.available_themes else DEFAULT_THEME
+
         self.sub_title = f"{self.cfg.dataset} · {self.cfg.device}"
+        self.query_one(StatusBar).detail = f"{self.cfg.dataset} · {self.cfg.device}"
+        self.apply_width(self.size.width)
+        # Elapsed is the one number that moves without an event to move it.
+        self.set_interval(1.0, self.tick)
+
         self.log_line(f"[dim]logs:[/dim] {self.cfg.log_dir}")
         if self.resume is not None:
             self.log_line(f"[dim]resuming from:[/dim] {self.resume}")
-        self.log_line(
-            "[b]s[/b] start · [b]x[/b] stop · [b]l[/b] log · [b]d[/b] theme · [b]q[/b] quit"
-        )
+        self.log_line("[dim]press[/dim] [b]s[/b] [dim]to start,[/dim] [b]?[/b] [dim]for keys[/dim]")
         if self.autostart:
             self.action_start()
+
+    def on_resize(self) -> None:
+        """Re-lay-out for the terminal's new width."""
+        self.apply_width(self.size.width)
+
+    def apply_width(self, width: int) -> None:
+        """Choose the layout that fits `width` columns.
+
+        Args:
+            width: the terminal width.
+        """
+        screen = self.screen
+        screen.set_class(width < NARROW, "-narrow")
+        screen.set_class(width < VERY_NARROW, "-tiny")
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        """Put the dashboard's own actions in the command palette.
+
+        Args:
+            screen: the screen the palette was opened over.
+
+        Yields:
+            Textual's commands, then ours — so everything the app can do is
+            reachable by typing its name, not only by knowing its key.
+        """
+        yield from super().get_system_commands(screen)
+        yield SystemCommand("Start training", "Begin a run", self.action_start)
+        yield SystemCommand("Stop training", "End at the next batch", self.action_stop)
+        yield SystemCommand("Restart training", "Stop, then start again", self.action_restart)
+        yield SystemCommand("Theme picker", "Preview every theme", self.action_pick_theme)
+        yield SystemCommand("Toggle focus mode", "Charts only", self.action_toggle_focus)
+        yield SystemCommand("Toggle log", "Show or hide the log", self.action_toggle_log)
+        yield SystemCommand("Keys", "Everything the dashboard does", self.action_help)
 
     # ---- actions -------------------------------------------------------
 
@@ -408,6 +446,7 @@ class TinyDiffusionApp(App[None]):
         self.running = True
         self._started = time.monotonic()
         self.observer = TuiObserver(self)
+        self.query_one(StatusBar).state = "running"
         self.log_line("[b green]starting[/b green]")
         self.train_worker()
 
@@ -416,17 +455,97 @@ class TinyDiffusionApp(App[None]):
         if not self.running or self.observer is None:
             self.notify("nothing is running", severity="warning")
             return
+        self.query_one(StatusBar).state = "stopping"
         self.log_line("[yellow]stopping at the next batch boundary…[/yellow]")
         self.observer.request_stop()
+
+    def action_restart(self) -> None:
+        """Stop the current run and begin another once the worker has left.
+
+        Restarting is the commonest thing to want after changing nothing but
+        one's mind about a seed or a checkpoint, and doing it by hand means
+        watching for the stop to land before pressing start.
+        """
+        if not self.running:
+            self.action_start()
+            return
+        self._restart = True
+        self.action_stop()
 
     def action_toggle_log(self) -> None:
         """Show or hide the log pane, for when the pictures matter more."""
         panel = self.query_one("#log-panel")
         panel.display = not panel.display
 
+    def action_clear_log(self) -> None:
+        """Empty the log pane."""
+        self.query_one("#log", RichLog).clear()
+
+    def action_toggle_focus(self) -> None:
+        """Hide everything that is not a chart, and put it back again."""
+        screen = self.screen
+        screen.toggle_class("-focus")
+        self.notify("focus mode on" if screen.has_class("-focus") else "focus mode off")
+
+    def action_pick_theme(self) -> None:
+        """Open the theme picker."""
+        self.push_screen(ThemeScreen())
+
+    def action_help(self) -> None:
+        """Open the key list."""
+        self.push_screen(HelpScreen())
+
     def action_cycle_theme(self) -> None:
-        """Switch between the light and dark themes."""
-        self.theme = "textual-light" if self.theme == "textual-dark" else "textual-dark"
+        """Move to the next theme in the cycle, and remember it."""
+        self.step_theme(1)
+
+    def action_cycle_theme_back(self) -> None:
+        """Move to the previous theme in the cycle, and remember it."""
+        self.step_theme(-1)
+
+    def step_theme(self, step: int) -> None:
+        """Walk the theme cycle by `step` places.
+
+        Args:
+            step: how far to move, negative to go back.
+        """
+        order = cycle_order(list(self.available_themes))
+        if not order:
+            return
+        current = order.index(self.theme) if self.theme in order else 0
+        name = order[(current + step) % len(order)]
+        self.theme = name
+        save_preferred_theme(name)
+        self.notify(f"theme: {name}", timeout=2)
+
+    def action_snapshot(self) -> None:
+        """Write the dashboard to an SVG, for the run that is worth showing someone.
+
+        Saved beside the run's metrics rather than in the working directory, so
+        a screenshot belongs to the run it is of. A directory that does not
+        exist yet — nothing has been trained — is made rather than raised over.
+        """
+        try:
+            self.cfg.log_dir.mkdir(parents=True, exist_ok=True)
+            saved = self.save_screenshot(path=str(self.cfg.log_dir))
+        except OSError as exc:
+            self.notify(f"could not save a screenshot: {exc}", severity="error")
+            return
+        self.notify(f"saved {saved}")
+
+    def watch_theme(self) -> None:
+        """Redraw everything that colours itself from the theme.
+
+        Textual restyles what it laid out; the charts, bars and tiles hold Rich
+        text with colours baked in, so a theme change has to reach them — every
+        widget that can redraw itself is asked to.
+        """
+        if not self.is_running:
+            return
+        for widget in self.query(Static):
+            redraw = getattr(widget, "redraw", None)
+            if callable(redraw):
+                redraw()
 
     # ---- the worker ----------------------------------------------------
 
@@ -458,12 +577,19 @@ class TinyDiffusionApp(App[None]):
         """
         self.running = False
         self.observer = None
+        status = self.query_one(StatusBar)
         if message.error is not None:
+            status.state = "failed"
+            self._restart = False
             self.log_line(f"[b red]training failed:[/b red] {message.error}")
             self.notify(str(message.error), severity="error", timeout=10)
         else:
+            status.state = "done"
             self.log_line("[b green]training finished[/b green]")
             self.notify("training finished")
+        if self._restart:
+            self._restart = False
+            self.action_start()
 
     # ---- applied on the event loop, from TuiObserver -------------------
 
@@ -473,11 +599,16 @@ class TinyDiffusionApp(App[None]):
         Args:
             plan: what the run settled on.
         """
+        self.plan = plan
         self.query_one("#plan", Static).update(self.plan_text(plan))
         self.query_one("#epoch-bar", ProgressBar).update(
             total=max(plan.num_epochs, 1), progress=plan.start_epoch
         )
+        detail = (
+            f"{plan.dataset} {plan.image_size}px · {plan.device_description} · {plan.precision}"
+        )
         self.sub_title = f"{plan.dataset} · {plan.device} · {plan.precision}"
+        self.query_one(StatusBar).detail = f"{detail} · {plan.parameters / 1e6:.2f}M params"
 
     def apply_message(self, text: str) -> None:
         """Put one of the run's own lines into the log.
@@ -509,10 +640,17 @@ class TinyDiffusionApp(App[None]):
         )
         if progress.loss is not None:
             self._stats["train loss"] = f"{progress.loss:.5f}"
+            self.tile("tile-loss", f"{progress.loss:.5f}")
         self._stats["throughput"] = f"{progress.images_per_second:.1f} img/s"
+        self.tile("tile-rate", f"{progress.images_per_second:.1f}")
         self._stats["epoch time"] = duration(progress.seconds)
         if (eta := run_eta(progress)) is not None:
             self._stats["eta"] = duration(eta)
+            self.tile("tile-eta", duration(eta))
+        self.query_one(StatusBar).note = (
+            f"epoch {progress.epoch + 1}/{progress.num_epochs}"
+            f"  ·  {progress.epoch_fraction * 100:.0f}%"
+        )
         self.refresh_stats()
 
     def apply_epoch(self, step: int, metrics: Mapping[str, float]) -> None:
@@ -524,10 +662,10 @@ class TinyDiffusionApp(App[None]):
         """
         if (loss := metrics.get("train/loss")) is not None:
             self.train_loss.add(loss)
-            self.query_one("#train-spark", Sparkline).data = self.train_loss.for_sparkline()
         if (val := metrics.get("val/loss")) is not None:
             self.val_loss.add(val)
-            self.query_one("#val-spark", Sparkline).data = self.val_loss.for_sparkline()
+            self.tile("tile-val", f"{val:.5f}")
+        self.refresh_chart()
 
         for key, label in (
             ("val/loss", "val loss"),
@@ -551,8 +689,36 @@ class TinyDiffusionApp(App[None]):
             path: the PNG.
         """
         self.query_one(SamplePreview).show(path)
+        self.query_one("#preview-panel", Panel).border_title = f"samples · {path.name}"
 
     # ---- rendering -----------------------------------------------------
+
+    def tick(self) -> None:
+        """Once a second: move the clock-driven numbers on."""
+        if self._started is not None:
+            elapsed = duration(time.monotonic() - self._started)
+            self.tile("tile-elapsed", elapsed)
+            if self.running:
+                self.refresh_stats()
+
+    def tile(self, tile_id: str, value: str) -> None:
+        """Set one of the headline tiles.
+
+        Args:
+            tile_id: the tile's widget id.
+            value: the formatted number to show.
+        """
+        with contextlib.suppress(Exception):  # pragma: no cover - during teardown
+            self.query_one(f"#{tile_id}", StatTile).value = value
+
+    def refresh_chart(self) -> None:
+        """Redraw the loss chart from the series held on the app."""
+        self.query_one(LossChart).show(
+            [
+                ("train", "text-primary", self.train_loss.values),
+                ("val", "text-secondary", self.val_loss.values),
+            ]
+        )
 
     def log_line(self, text: str | Text) -> None:
         """Append one line to the log pane.
