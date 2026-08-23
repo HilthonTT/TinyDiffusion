@@ -25,7 +25,8 @@ uv sync --all-extras --dev --no-sources
 ```
 
 See [docs/INSTALL.md](docs/INSTALL.md) for the details, and for checking that
-the wheel supports your card.
+the wheel supports your card. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+maps the codebase and suggests an order to read it in.
 
 ## Everyday commands
 
@@ -71,6 +72,8 @@ CI runs exactly these checks, so a clean `pre-commit run --all-files` plus
 
 ## Releasing
 
-1. Update `CHANGELOG.md` and bump `version` in `pyproject.toml`.
+1. Update `CHANGELOG.md` and bump `__version__` in
+   `src/tinydiffusion/version.py` — `pyproject.toml` reads the number from
+   there, so it lives in exactly one place.
 2. Tag: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The `Release` workflow builds and publishes to PyPI via trusted publishing.

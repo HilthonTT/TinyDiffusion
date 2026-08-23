@@ -359,8 +359,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trains eagerly, rather than failing on the first batch inside dynamo. The
   PyTorch Windows wheels do not ship Triton.
 - `docs/INSTALL.md`: install, GPU verification and troubleshooting.
+- `docs/ARCHITECTURE.md`: how the model and the codebase are put together —
+  the shape of a run, a module map, the forward process, the backbone, the
+  parameterisation choices, conditioning, sampling, EMA, DDP, and the
+  metrics, plus an order to read the source in.
 
 ### Changed
+
+- The README is half its former length and no longer duplicates USAGE.md. It
+  had grown into a second usage guide — a paragraph per subcommand, each of
+  them already documented at greater length one file over, which meant two
+  places to keep in step and neither being the obvious one to read. What is
+  left is what a landing page owes a reader: what the project is, a quickstart
+  that runs, a table of the eight subcommands linking into the section of
+  USAGE.md that documents each, and the map of the other documents. The
+  "How it works" section moved to the new `docs/ARCHITECTURE.md` rather than
+  being cut, and gained a diagram of a run, a module-by-module table of where
+  everything lives, and a suggested order to read the source in.
 
 - The training dashboard (`tui`) has been rebuilt. The two sparklines are now
   one chart: `train/loss` and `val/loss` drawn as braille lines on a single
@@ -399,6 +414,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Documentation that predated the CUDA pinning in `pyproject.toml`. USAGE.md
+  still told Windows readers that `uv sync` gives them a CPU-only PyTorch and
+  walked them through an out-of-lockfile `uv pip install --torch-backend=auto`
+  that the next sync would silently undo — the failure mode the `tool.uv.index`
+  entry exists to remove. Its install and GPU sections now describe what
+  actually happens, the corrupt-install repair uses `uv sync
+  --reinstall-package` so it keeps the pinned index, and the startup banner it
+  quotes is the one the loop prints today. Also: its table of contents linked
+  to an anchor that no longer existed, and CONTRIBUTING.md's release steps
+  pointed at a `version` field in `pyproject.toml` that has been dynamic since
+  the number moved to `src/tinydiffusion/version.py`.
 - The test suite no longer fails on an install without the `server` extra.
   `tests/test_server.py` imported FastAPI at module scope and broke collection
   outright, and one CLI test patched a module that does the same — so the

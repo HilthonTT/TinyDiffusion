@@ -1,7 +1,8 @@
 # Usage
 
 Everything needed to install, run, and troubleshoot TinyDiffusion. For what
-the project *is*, see [README.md](README.md); for contributing, see
+the project *is*, see [README.md](README.md); for how it is built, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for contributing, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [Install](#install)
@@ -12,7 +13,7 @@ the project *is*, see [README.md](README.md); for contributing, see
 - [Metrics and logging](#metrics-and-logging)
 - [Sampling](#sampling)
 - [Evaluating a checkpoint](#evaluating-a-checkpoint)
-- [Measuring sample quality with FID](#measuring-sample-quality-with-fid)
+- [Measuring sample quality](#measuring-sample-quality)
 - [Serving a checkpoint over HTTP](#serving-a-checkpoint-over-http)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
@@ -23,7 +24,6 @@ the project *is*, see [README.md](README.md); for contributing, see
 > A fuller walkthrough, with GPU setup and troubleshooting, lives in
 > [docs/INSTALL.md](docs/INSTALL.md).
 
-
 Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
@@ -31,7 +31,15 @@ uv sync --all-extras --dev
 ```
 
 That creates `.venv/` in the repo and installs the project into it in editable
-mode. On Windows this gives you a **CPU-only** PyTorch; see below to get CUDA.
+mode. It also installs a **CUDA** build of PyTorch on Windows and Linux —
+`pyproject.toml` points the Windows wheels at PyTorch's own index, because
+PyPI's Windows wheel is CPU-only — so a machine with an NVIDIA GPU is ready to
+use it with no second step. Add `--no-sources` for a CPU-only environment,
+which is what CI uses:
+
+```bash
+uv sync --all-extras --dev --no-sources
+```
 
 ## Using a GPU
 
@@ -48,31 +56,16 @@ your card. Check what you have:
 
 The arch list must contain your card's compute capability. Blackwell
 (RTX 50-series) is `sm_120` and needs CUDA 12.8 or newer; an older wheel such
-as `cu124` installs happily and then never sees the GPU.
+as `cu124` installs happily and then never sees the GPU. Both builds are
+recorded in `uv.lock` and chosen by platform marker, so a later `uv sync` — or
+the implicit one a bare `uv run` does — cannot silently put a CPU wheel back.
+[docs/INSTALL.md](docs/INSTALL.md#how-the-gpu-build-is-selected) has the
+details, including how to move to a different CUDA version.
 
-### Getting a CUDA build on Windows
-
-The lockfile resolves PyTorch from PyPI, whose **Windows** wheel is CPU-only —
-CUDA builds live on PyTorch's own index. (The Linux wheel on PyPI already
-bundles CUDA, so this section is Windows-only.) `--torch-backend=auto` reads
-your driver and picks a matching CUDA version:
-
-```powershell
-uv pip install --reinstall --torch-backend=auto torch torchvision
-```
-
-> **This install sits outside the lockfile.** `uv sync` — and `uv run`, which
-> syncs first — restores the locked CPU build and silently undoes it. Use
-> `.\scripts\run.ps1`, `./scripts/run.sh`, or `uv run --no-sync` day to day, and re-run the
-> command above after any deliberate `uv sync`.
->
-> Pinning CUDA in `pyproject.toml` instead would drag multi-gigabyte wheels
-> onto the Windows CI runner, which has no GPU to use them.
-
-Once installed, the training banner names the device it is actually using:
+Training then names the device it is actually using on its first line:
 
 ```
-2.36M parameters | device cuda (NVIDIA GeForce RTX 5060 Laptop GPU) | amp True
+6.95M parameters | mnist 32px x1 | device cuda (NVIDIA GeForce RTX 5060 Laptop GPU) | amp fp16 | ...
 ```
 
 On CUDA the loop also turns on cuDNN autotuning, TF32 matmuls, and fp16
@@ -1690,15 +1683,20 @@ The install is corrupt, not misconfigured — typically an uninstall that was
 interrupted partway. `uv` reports the same thing as
 `Failed to uninstall … due to missing RECORD file`. Repair it by reinstalling:
 
-```powershell
-uv pip install --reinstall --torch-backend=auto torch torchvision
+```bash
+uv sync --all-extras --dev --reinstall-package torch --reinstall-package torchvision
 ```
+
+Repairing through `uv sync` rather than `uv pip install` keeps the lockfile's
+CUDA index in play, so the replacement is the same build the project asks for.
 
 Avoid running `uv sync`/`uv run` against the project while something else is
 using `.venv`; that race is a common way to get here.
 
 **Training says `device cpu` on a machine with a GPU**
-The installed torch is a CPU-only build. See [Using a GPU](#using-a-gpu).
+The installed torch is a CPU-only build — usually the result of a sync that
+passed `--no-sources`. Re-run `uv sync --all-extras --dev` without it, then see
+[Using a GPU](#using-a-gpu) to confirm.
 
 **`no CUDA device visible, falling back to CPU`**
 `--device cuda` was asked for but torch cannot see a GPU. The run continues on
@@ -1719,10 +1717,10 @@ Environment:
 | Command | What it does |
 | --- | --- |
 | `uv sync --all-extras --dev` | Create/refresh `.venv` to match `uv.lock`. **Reverts a manually installed CUDA torch.** |
-| `uv run --no-sync <cmd>` | Run inside `.venv` without syncing first — safe with a CUDA torch installed. |
-| `uv run <cmd>` | Syncs, then runs. Convenient, but undoes an out-of-lockfile install. |
+| `uv run --no-sync <cmd>` | Run inside `.venv` without syncing first — the fastest path once installed. |
+| `uv run <cmd>` | Syncs, then runs. Convenient, and safe: the lockfile pins the CUDA build. |
 | `uv pip install -e .` | Install this project into the active environment. |
-| `uv pip install --reinstall --torch-backend=auto torch torchvision` | Fetch a CUDA build matching your driver; also the repair for a corrupt install. |
+| `uv sync --reinstall-package torch --reinstall-package torchvision` | Reinstall the locked torch build — the repair for a corrupt install. |
 | `uv pip list` | What is actually installed. |
 | `uv lock --upgrade` | Re-resolve dependencies and update `uv.lock`. |
 
