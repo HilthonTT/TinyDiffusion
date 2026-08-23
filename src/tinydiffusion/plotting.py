@@ -98,7 +98,7 @@ def plot_runs(
         The file written.
 
     Raises:
-        RuntimeError: if matplotlib is not installed.
+        ImportError: if matplotlib is not installed.
         ValueError: if a metrics file is missing or empty, or nothing in any of
             them matches any panel.
     """
@@ -111,7 +111,10 @@ def plot_runs(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as exc:
-        raise RuntimeError(
+        # ImportError rather than something broader, and the same shape the
+        # server's extra raises: it is what the CLI catches to turn a missing
+        # optional dependency into a one-line message instead of a traceback.
+        raise ImportError(
             "plotting needs the 'plots' extra: pip install 'tinydiffusion[plots]'"
         ) from exc
 

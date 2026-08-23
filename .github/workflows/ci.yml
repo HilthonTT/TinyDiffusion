@@ -77,6 +77,41 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
 
+  base-install:
+    name: Test (no extras)
+    runs-on: ubuntu-latest
+    # tracking, server and plots are optional, and every other job installs all
+    # three — so nothing here notices when the package stops working without
+    # them. The failure that reaches a user is a traceback from an ImportError
+    # nobody guarded, and it reaches them on the install the README describes
+    # as supported. This is the job that has to run the suite on a base install.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install without extras
+        run: uv sync --dev --no-sources
+
+      - name: Confirm the extras really are absent
+        # Guard the guard: if an extra creeps into the base dependencies this
+        # job keeps passing while testing nothing it was written to test.
+        run: |
+          uv run python - <<'PY'
+          import importlib.util, sys
+          present = [m for m in ("matplotlib", "fastapi", "tensorboard")
+                     if importlib.util.find_spec(m) is not None]
+          if present:
+              sys.exit(f"expected a base install, but these are installed: {present}")
+          PY
+
+      - name: Run tests
+        run: uv run pytest -m "not gpu"
+
   smoke:
     name: End-to-end smoke run
     runs-on: ubuntu-latest

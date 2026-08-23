@@ -38,3 +38,24 @@ def wake():
         return module
 
     return perturb
+
+
+@pytest.fixture
+def pyplot():
+    """The plotting backend, or a skip where the optional 'plots' extra is absent.
+
+    matplotlib is an extra, so a base install is a supported way to have the
+    package — and a test that simply fails there reports a missing optional
+    dependency as a broken build. Only the tests that actually draw take this
+    fixture: the path helpers and the one that checks the message a missing
+    matplotlib produces still have to run on a base install, since that is the
+    install they are about.
+
+    Agg is selected here for the same reason plot_runs selects it — a headless
+    machine should not fail inside a GUI toolkit.
+    """
+    matplotlib = pytest.importorskip("matplotlib", reason="needs the 'plots' extra")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt

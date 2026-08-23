@@ -1,4 +1,5 @@
 import argparse
+import builtins
 import dataclasses
 from pathlib import Path
 
@@ -526,9 +527,31 @@ def test_plot_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
     assert seen["runs"] == [Path("runs/mnist")]
 
 
-def test_main_reports_a_run_with_no_metrics(capsys, tmp_path):
+def test_main_reports_a_run_with_no_metrics(pyplot, capsys, tmp_path):
+    # Takes `pyplot` because plot_runs checks for matplotlib before it looks at
+    # the run: without the extra this would pass on the wrong error.
     assert main(["plot", str(tmp_path / "nowhere"), "--out", str(tmp_path / "f.png")]) == 1
     assert "error:" in capsys.readouterr().out
+
+
+def test_main_reports_a_missing_plots_extra(capsys, tmp_path, monkeypatch):
+    """Without the extra, `plot` is a one-line message rather than a traceback.
+
+    The CLI catches ImportError for exactly this, the way `serve` relies on for
+    the server extra. Raising anything else out of plot_runs walks straight
+    past that handler, and the only install that notices is the one without
+    matplotlib.
+    """
+    real_import = builtins.__import__
+
+    def refuse_matplotlib(name, *args, **kwargs):
+        if name.startswith("matplotlib"):
+            raise ImportError("no matplotlib")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_matplotlib)
+    assert main(["plot", str(tmp_path), "--out", str(tmp_path / "f.png")]) == 1
+    assert "plots" in capsys.readouterr().out
 
 
 def test_interpolate_defaults():

@@ -263,6 +263,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `plot` without the `plots` extra now reports the extra that supplies it
+  instead of a traceback. `plot_runs` caught the `ImportError` matplotlib
+  raises and re-raised it as a `RuntimeError`, which walked straight past the
+  handler in `main` that exists to turn a missing optional dependency into one
+  line — the same handler `serve` relies on for the `server` extra, which
+  raises `ImportError` and has always reported cleanly. It raises `ImportError`
+  now, so the two extras behave alike.
+- The test suite no longer fails on an install without the `plots` extra. The
+  twelve tests that draw a figure take a `pyplot` fixture that skips when
+  matplotlib is absent; the ones that do not draw — the path helpers, and the
+  test covering the message a missing matplotlib produces — still run there,
+  since a base install is the install they are about. Every CI job synced
+  `--all-extras`, so nothing exercised the configuration the optional extras
+  exist to make possible; a `base-install` job now runs the suite without them,
+  and fails if any extra has crept into the base dependencies.
 - A metric that reached NaN or an infinity no longer makes `metrics.jsonl`
   unparsable. Python's `json` writes the bare tokens `NaN` and `Infinity`,
   which are an extension rather than JSON, and `jq` and `pandas.read_json`
