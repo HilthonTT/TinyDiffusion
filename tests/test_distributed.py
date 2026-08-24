@@ -124,24 +124,33 @@ def _launch(script, args_per_rank, env, timeout):
     ]
 
     results: list[tuple[int | None, str]] = []
-    for proc in procs:
-        try:
-            output = proc.communicate(timeout=timeout)[0]
-            results.append((proc.returncode, output))
-        except subprocess.TimeoutExpired:
-            # One rank stuck means the rest are stuck waiting on it, so the
-            # whole group goes rather than each timing out in turn.
-            for other in procs:
-                other.kill()
-            results.append((None, "timed out"))
-
-    # Reap whatever the kills left behind, so no rank outlives the test and
-    # holds the rendezvous port.
-    for proc in procs:
-        if proc.poll() is None:
-            proc.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.communicate(timeout=5)
+    try:
+        for proc in procs:
+            try:
+                output = proc.communicate(timeout=timeout)[0]
+                results.append((proc.returncode, output))
+            except subprocess.TimeoutExpired:
+                # One rank stuck means the rest are stuck waiting on it, so the
+                # whole group goes rather than each timing out in turn.
+                for other in procs:
+                    other.kill()
+                results.append((None, "timed out"))
+    finally:
+        # Reap whatever the kills left behind, so no rank outlives the test and
+        # holds the rendezvous port, then close the read ends by hand. A
+        # `communicate` that timed out never reached EOF, so it never closed
+        # its pipe, and `poll` on the rank we just killed reaps it here — which
+        # skips the second `communicate` that would otherwise have done it. The
+        # handle is then left to the garbage collector, which reports it as a
+        # ResourceWarning against whichever test happens to be running at the
+        # time.
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
     return results
 
 
