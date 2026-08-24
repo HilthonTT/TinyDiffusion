@@ -8,6 +8,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `sample --batch-size`, splitting a draw into chunks. A sampler runs one
+  reverse chain over the whole batch it is handed, so the memory a draw needs
+  followed `--num-images` directly and a few hundred images at once was an
+  out-of-memory error rather than a slow run — on the very command whose job is
+  to produce images in bulk. `fid` has batched its generation all along; this
+  gives `sample` the same thing.
+  The split is a memory knob and not a sampling one: every image's starting
+  latent is drawn before the first chunk and handed out in order, and the label
+  vector is sliced with the chunk, so image `i` gets the latent and the class it
+  would have had unsplit. Two caveats, both documented: a positive `--eta` makes
+  the sampler itself stochastic and its per-step noise does follow the split,
+  and on CUDA the convolutions pick their algorithm by batch shape, so two
+  splits agree to a pixel of rounding rather than byte-for-byte. Unset, the
+  whole draw is one chunk and the images are exactly what they were.
+
+- `sample --save-individual`, writing each image beside the grid and named after
+  it — `samples.png` gives `samples_0000.png` onwards. A grid is for looking at;
+  anything downstream of a generated set wants the files.
+
 - Multi-GPU training, over `torch.distributed`. One process per GPU, launched
   by `torchrun --nproc_per_node=N -m tinydiffusion train ...`: every rank holds
   a complete copy of the network and draws a disjoint shard of each epoch, and
@@ -413,6 +432,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than `q0` through `q3` — and take a colour each from the theme.
 
 ### Fixed
+
+- `timestep_sampler = "loss_second_moment"` no longer synchronises with the
+  device on every batch. Its history update copied the batch's timesteps and
+  losses to the host and folded them in with a Python loop, which is a blocking
+  read per step — undoing, for any run that turned the setting on, exactly what
+  the loop's `DRAIN_EVERY` buffering exists to buy. The history now lives on the
+  training device and is updated with a handful of kernels: the ring's write
+  slots are computed by sorting, so duplicate timesteps within a batch land on
+  successive slots the way the sequential loop put them there, and the proposal
+  picks between its adaptive and uniform branches with `torch.where` rather than
+  a Python `if` on a device tensor. Verified two ways — against the previous
+  implementation over 300 randomised cases including batches that overflow the
+  ring, and under `torch.cuda.set_sync_debug_mode("error")`, which the old path
+  trips and the new one does not. `warm` still reads back, and is documented as
+  the one accessor that does; nothing on the hot path calls it.
+
+- The same sampler now builds one proposal per *group* rather than one per rank.
+  Each rank saw only its own shard, so an N-way run warmed N private histories
+  on 1/N of the evidence each — not wrong, since the importance weights keep
+  every rank's estimator unbiased, but N times the variance the group paid for,
+  and with a small enough shard a timestep could go unseen and the proposal
+  never warm at all. `all_gather_cat` collects the whole group's timesteps and
+  losses first. It is opt-in from the training loop, so the single-process path
+  is untouched, and the collective runs unconditionally once wired, so a rank
+  cannot strand the others by skipping it.
+
+- `tests/test_distributed.py` no longer hangs for five minutes on machines where
+  gloo picks an unusable interface. Left to itself gloo resolves the hostname
+  and binds the first address that comes back, which on a developer machine is
+  quite often a VPN or hypervisor adapter that both ranks bind and neither can
+  reach the other over; the symptom is not an error but the whole group sitting
+  in `init_process_group` until the 300-second timeout fires. A session fixture
+  now probes for a working configuration with a cheap two-rank all-reduce —
+  gloo's own default first, since that is what CI uses, then the platform's
+  loopback interface — and skips with a message naming `GLOO_SOCKET_IFNAME` if
+  none works, rather than hanging. An operator who has already set that variable
+  is left alone. Separately, the rendezvous port is now found rather than
+  hard-coded at 29517, which was flaky by construction against a previous rank's
+  socket in TIME_WAIT or a second copy of the suite.
 
 - Documentation that predated the CUDA pinning in `pyproject.toml`. USAGE.md
   still told Windows readers that `uv sync` gives them a CPU-only PyTorch and

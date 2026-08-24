@@ -103,6 +103,7 @@ def sample_from_checkpoint(
     out: Path,
     *,
     num_images: int = 8,
+    batch_size: int | None = None,
     num_steps: int | None = None,
     eta: float = 0.0,
     sampler: str | None = None,
@@ -110,6 +111,7 @@ def sample_from_checkpoint(
     labels: Sequence[int] | None = None,
     guidance: float | None = None,
     guidance_rescale: float | None = None,
+    save_individual: bool = False,
     seed: int | None = None,
     device: str | None = None,
     precision: str = DEFAULT_PRECISION,
@@ -120,6 +122,23 @@ def sample_from_checkpoint(
         checkpoint: file to sample from.
         out: image path to write.
         num_images: how many images to generate.
+        batch_size: how many to draw at a time, or None for all of them at
+            once. A whole chain runs over the batch it is given, so the peak
+            memory is set by this rather than by `num_images` — which is what
+            makes a large `num_images` possible on a card that cannot hold one.
+
+            It is not meant to change *what* is drawn. The starting latents are
+            drawn for every image up front and handed to each batch in turn,
+            rather than each batch drawing its own, so image `i` gets the same
+            latent and the same label however the work is split — which is the
+            part this module controls, and it holds exactly. Two caveats sit
+            underneath it. A positive `eta` makes the sampler itself stochastic:
+            it draws per-step noise per batch, and those draws do follow the
+            split. And on CUDA the convolutions pick their algorithm by batch
+            shape, so two splits agree to floating-point rounding rather than
+            bit-for-bit — in practice a scattering of pixels off by 1/255,
+            which is the ordinary cost of a different kernel and not something
+            batching introduces here.
         num_steps: denoising steps. Defaults to the checkpoint's
             ``sample_steps``.
         eta: 0.0 is deterministic DDIM; 1.0 reproduces DDPM ancestral
@@ -140,6 +159,10 @@ def sample_from_checkpoint(
             :func:`~tinydiffusion.diffusion.guidance.rescale_guided`; 0.7 is
             the published value, and it is worth reaching for whenever
             `guidance` is above about 3.
+        save_individual: also write each image on its own, beside the grid and
+            named after it — ``samples.png`` gives ``samples_0000.png`` and so
+            on. A grid is for looking at; a directory of images is what
+            anything downstream of this actually consumes.
         seed: seed applied before sampling, or None to leave the RNG alone.
         device: device to sample on. Defaults to CUDA when available.
         precision: what to run the network in; see
@@ -148,15 +171,17 @@ def sample_from_checkpoint(
             hardware it ran on.
 
     Returns:
-        The path that was written.
+        The path of the grid that was written.
 
     Raises:
-        ValueError: if ``num_images`` is not positive, no sampler, spacing or
-            precision goes by that name, or the conditioning arguments do not
-            match the checkpoint.
+        ValueError: if ``num_images`` or ``batch_size`` is not positive, no
+            sampler, spacing or precision goes by that name, or the
+            conditioning arguments do not match the checkpoint.
     """
     if num_images < 1:
         raise ValueError(f"num_images must be positive, got {num_images}")
+    if batch_size is not None and batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
     if seed is not None:
         seed_everything(seed)
 
@@ -173,19 +198,50 @@ def sample_from_checkpoint(
     # rescales in float32 whatever the network itself runs in.
     net = apply_precision(ema.module, resolve_precision(precision, cfg.device), cfg.device)
 
-    images = get_sampler(cfg.sampler if sampler is None else sampler)(
-        diffusion,
-        num_images,
-        (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
-        cfg.device,
-        num_steps=num_steps if num_steps is not None else cfg.sample_steps,
-        eta=eta,
-        model=conditioned(net, y, num_classes=cfg.num_classes, scale=scale, rescale=rescale),
-        spacing=cfg.sample_spacing if spacing is None else spacing,
-    )
+    shape = (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size)
+    draw = get_sampler(cfg.sampler if sampler is None else sampler)
+    batch = num_images if batch_size is None else min(batch_size, num_images)
+    # Every image's starting latent, drawn before the loop rather than by each
+    # batch as it starts. This is the same draw the sampler would make for an
+    # unbatched run — same shape, same device, same generator, and still the
+    # first draw of the chain — so splitting the work leaves the images alone.
+    noise = torch.randn(num_images, *shape, device=cfg.device)
+
+    chunks = []
+    for start in range(0, num_images, batch):
+        stop = min(start + batch, num_images)
+        chunks.append(
+            draw(
+                diffusion,
+                stop - start,
+                shape,
+                cfg.device,
+                num_steps=num_steps if num_steps is not None else cfg.sample_steps,
+                eta=eta,
+                model=conditioned(
+                    net,
+                    # Sliced with the batch, so image i keeps the label it
+                    # would have had whatever the split.
+                    None if y is None else y[start:stop],
+                    num_classes=cfg.num_classes,
+                    scale=scale,
+                    rescale=rescale,
+                ),
+                noise=noise[start:stop],
+                spacing=cfg.sample_spacing if spacing is None else spacing,
+            )
+            # Off the device as each batch finishes: holding every batch in
+            # VRAM would put back the ceiling the batching just removed.
+            .cpu()
+        )
+    images = torch.cat(chunks)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_image(denormalize(images), out, nrow=grid_width(num_images, cfg.num_classes, labels))
+    images = denormalize(images)
+    save_image(images, out, nrow=grid_width(num_images, cfg.num_classes, labels))
+    if save_individual:
+        for index, image in enumerate(images):
+            save_image(image, out.with_name(f"{out.stem}_{index:04d}{out.suffix}"))
     return out
 
 

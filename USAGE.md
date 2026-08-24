@@ -546,6 +546,7 @@ be turned on for one run without editing the TOML.
 | --- | --- | --- |
 | `--checkpoint` | required | Checkpoint to sample from |
 | `--num-images` | 8 | How many images to generate |
+| `--batch-size` | all of them at once | Images drawn at a time; sets peak memory |
 | `--steps` | the checkpoint's `sample_steps` | Denoising steps; fewer is faster, coarser |
 | `--sampler` | the checkpoint's `sampler` | `ddim` or `dpmpp`; see [Choosing a sampler](#choosing-a-sampler) |
 | `--spacing` | the checkpoint's `sample_spacing` | `uniform` or `quadratic`; see [Spacing the steps](#spacing-the-steps) |
@@ -554,6 +555,7 @@ be turned on for one run without editing the TOML.
 | `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
 | `--guidance-rescale` | the checkpoint's `guidance_rescale` | Corrects the scale guidance inflates; 0.7 above `--guidance 3` |
 | `--out` | `contents/samples.png` | Where to write the grid |
+| `--save-individual` | off | Also write each image on its own beside the grid |
 | `--seed` | 0 | Seed applied before sampling |
 | `--device` | auto | `cuda`, `cpu`, `cuda:1`, … |
 | `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](#half-precision) |
@@ -562,6 +564,31 @@ Checkpoints embed the config they were trained with, so this reconstructs the
 architecture from the `.pt` alone — the TOML that produced it is not needed.
 Sampling always uses the EMA weights, which is what the training grids are
 drawn from.
+
+### Generating more images than fit at once
+
+A sampler runs one reverse chain over the whole batch it is handed, so the
+memory a draw needs follows `--num-images` directly, and asking an 8 GB card
+for a few hundred images at once is an out-of-memory error rather than a slow
+run. `--batch-size` splits the draw instead:
+
+```bash
+./scripts/run.sh sample --checkpoint checkpoints/last.pt \
+  --num-images 256 --batch-size 32 --save-individual --out contents/set.png
+```
+
+The split does not change which images come out. Every image's starting latent
+is drawn before the first batch and handed out in order, so image `i` gets the
+latent and the label it would have had unsplit — `--batch-size` is a memory
+knob, not a sampling one. Two things sit underneath that. `--eta 0` (the
+default) is deterministic, but a positive `--eta` draws per-step noise per
+batch and so does follow the split; and on a GPU the convolutions choose their
+algorithm by batch shape, which leaves two splits agreeing to a pixel or so of
+rounding rather than byte-for-byte.
+
+`--save-individual` writes each image beside the grid, named after it:
+`set.png` gives `set_0000.png` through `set_0255.png`. The grid is for looking
+at; the individual files are what anything downstream actually reads.
 
 ### Choosing a sampler
 
@@ -1559,7 +1586,13 @@ back through by the sampling probability so the estimator stays unbiased. The
 draw is uniform until every timestep has a full history. It earns its keep on
 the variational objectives, whose per-timestep terms differ by orders of
 magnitude, and does very little for plain `mse`. The history lives in memory
-only, so a resumed run re-warms it over its first few hundred batches.
+only, so a resumed run re-warms it over its first few hundred batches. Under a
+multi-GPU run it is the *group's* history: each rank's timesteps and losses are
+gathered before they are folded in, so every rank warms on the whole global
+batch and they all draw from the same proposal. It costs one small collective
+per step and nothing else — the history is kept on the training device and
+updated without ever reading a value back to the host, so turning it on does
+not reintroduce the per-batch synchronisation the loop is written to avoid.
 
 ### Class conditioning
 

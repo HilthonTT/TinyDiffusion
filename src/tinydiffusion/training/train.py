@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,6 +30,7 @@ from tinydiffusion.data.datasets import denormalize, image_dataloader, set_loade
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import Conditioned, conditioned, drop_labels
 from tinydiffusion.diffusion.samplers import get_sampler
+from tinydiffusion.diffusion.timesteps import LossSecondMomentResampler
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.checkpoints import (
     BEST_CHECKPOINT,
@@ -42,6 +44,8 @@ from tinydiffusion.training.checkpoints import (
 )
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.distributed import (
+    Distributed,
+    all_gather_cat,
     all_reduce_mean,
     all_reduce_sum,
     any_rank,
@@ -233,6 +237,29 @@ def _can_compile(device_type: str) -> bool:
     if device_type != "cuda":
         return True
     return importlib.util.find_spec("triton") is not None
+
+
+def _share_timestep_sampler(diffusion: Diffusion, group: Distributed) -> None:
+    """Let an adaptive timestep proposal see the whole group's losses.
+
+    :class:`~tinydiffusion.diffusion.timesteps.LossSecondMomentResampler`
+    builds its proposal from the losses it is shown, and each rank is shown
+    only its own shard of the global batch. Left alone, an eight-way run warms
+    eight private proposals on an eighth of the evidence each — which is not
+    wrong, since the importance weights still make every rank's own estimator
+    unbiased, but it is eight times the variance the group paid for.
+
+    Handing it a gather is what makes the history the group's rather than the
+    rank's. Nothing happens for the uniform sampler, which has no history, or
+    outside a group, where the collective would have nothing to collect.
+
+    Args:
+        diffusion: the process this run is training.
+        group: the training group.
+    """
+    sampler = getattr(diffusion, "timestep_sampler", None)
+    if group.enabled and isinstance(sampler, LossSecondMomentResampler):
+        sampler.gather = partial(all_gather_cat, group=group)
 
 
 def epoch_seed(seed: int, epoch: int) -> int:
@@ -593,6 +620,9 @@ def train(
         enable_tf32()
 
     diffusion = build_model(cfg).to(cfg.device)
+    # build_model has no idea whether it is being called inside a group, so the
+    # one part of the process that wants to know is told here.
+    _share_timestep_sampler(diffusion, group)
     if group.enabled:
         # Deliberately *after* the network is built, and only after. Every rank
         # has to start from identical weights — DDP asserts on it — which is

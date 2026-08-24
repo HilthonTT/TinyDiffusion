@@ -343,6 +343,14 @@ def build_parser() -> argparse.ArgumentParser:
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
+    sample.add_argument(
+        "--batch-size",
+        type=int,
+        help="Images to draw at a time. Peak memory follows this rather than --num-images, "
+        "so it is what makes a large --num-images fit. Each image keeps the latent and the "
+        "label it would have had unsplit, so at the default --eta 0 the pictures are the "
+        "same. Defaults to drawing them all in one go.",
+    )
     sample.add_argument("--steps", type=int, help="Denoising steps. Defaults to the checkpoint's.")
     sample.add_argument(
         "--sampler",
@@ -378,6 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
         "plain guidance starts washing images out. Defaults to the checkpoint's.",
     )
     sample.add_argument("--out", type=Path, default=Path("contents/samples.png"), help="Output.")
+    sample.add_argument(
+        "--save-individual",
+        action="store_true",
+        help="Also write each image on its own beside the grid, named after it — "
+        "'samples.png' gives 'samples_0000.png' and so on.",
+    )
     sample.add_argument("--seed", type=int, default=0, help="Random seed.")
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(sample)
@@ -681,6 +695,7 @@ def _sample(args: argparse.Namespace) -> int:
         args.checkpoint,
         args.out,
         num_images=args.num_images,
+        batch_size=args.batch_size,
         num_steps=args.steps,
         eta=args.eta,
         sampler=args.sampler,
@@ -688,11 +703,14 @@ def _sample(args: argparse.Namespace) -> int:
         labels=args.labels,
         guidance=args.guidance,
         guidance_rescale=args.guidance_rescale,
+        save_individual=args.save_individual,
         seed=args.seed,
         device=args.device,
         precision=args.precision,
     )
     print(f"wrote {args.num_images} images to {out}")
+    if args.save_individual:
+        print(f"and one file each, {out.with_name(f'{out.stem}_0000{out.suffix}')} onwards")
     return 0
 
 

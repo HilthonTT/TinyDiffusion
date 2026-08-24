@@ -43,6 +43,7 @@ from tinydiffusion.utils.device import resolve_device
 __all__ = [
     "TIMEOUT",
     "Distributed",
+    "all_gather_cat",
     "all_reduce_mean",
     "all_reduce_sum",
     "any_rank",
@@ -252,6 +253,37 @@ def all_reduce_sum(value: torch.Tensor, group: Distributed) -> torch.Tensor:
         return value
     dist.all_reduce(value, op=dist.ReduceOp.SUM)
     return value
+
+
+def all_gather_cat(value: torch.Tensor, group: Distributed) -> torch.Tensor:
+    """Collect a tensor from every rank and concatenate them, in rank order.
+
+    The reductions above turn every rank's copy of one number into a single
+    number. This is the other shape: each rank holds a *different* slice of the
+    global batch, and something wants all of them side by side rather than
+    summed. The adaptive timestep proposal is the case in point — it is built
+    from the losses it has seen, and a rank that only ever sees its own shard
+    builds it from ``1 / world_size`` of the evidence.
+
+    Every rank must hold the same shape and dtype, which the training loader
+    guarantees by dropping the ragged batch at the end of an epoch: with
+    ``drop_last`` set on the sampler, every rank is handed the same number of
+    equally sized batches.
+
+    Args:
+        value: this rank's tensor. Must have the same shape and dtype on every
+            rank, and live on this rank's device under NCCL.
+        group: the training group.
+
+    Returns:
+        The concatenation over all ranks, identical on every one of them, and
+        `value` itself when there is no group.
+    """
+    if not group.enabled or not dist.is_initialized():
+        return value
+    parts = [torch.empty_like(value) for _ in range(group.world_size)]
+    dist.all_gather(parts, value)
+    return torch.cat(parts)
 
 
 def any_rank(flag: bool, group: Distributed, *, device: str = "cpu") -> bool:

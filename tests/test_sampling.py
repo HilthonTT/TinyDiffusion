@@ -118,6 +118,111 @@ def test_num_images_must_be_positive(make_checkpoint, tmp_path):
         sample_from_checkpoint(make_checkpoint(), tmp_path / "gen.png", num_images=0)
 
 
+def test_batch_size_must_be_positive(make_checkpoint, tmp_path):
+    with pytest.raises(ValueError, match="batch_size"):
+        sample_from_checkpoint(make_checkpoint(), tmp_path / "gen.png", batch_size=0)
+
+
+@pytest.fixture
+def sampler_calls(monkeypatch):
+    """Record the batch size and labels of every call into the sampler."""
+    calls = []
+
+    def spy(diffusion, num_samples, size, device, **kwargs):
+        model = kwargs["model"]
+        calls.append(
+            {
+                "num_samples": num_samples,
+                "noise": kwargs["noise"],
+                "labels": None if not hasattr(model, "labels") else model.labels.tolist(),
+            }
+        )
+        return torch.zeros(num_samples, *size)
+
+    monkeypatch.setattr(sampling, "get_sampler", lambda name: spy)
+    return calls
+
+
+def test_a_batch_size_splits_the_draw_into_chunks(make_checkpoint, tmp_path, sampler_calls):
+    """Peak memory follows the chunk, which is the whole point of the flag."""
+    sample_from_checkpoint(
+        make_checkpoint(), tmp_path / "gen.png", num_images=10, batch_size=4, seed=0
+    )
+
+    # The ragged last chunk is drawn at its own size, not padded up to 4.
+    assert [call["num_samples"] for call in sampler_calls] == [4, 4, 2]
+
+
+def test_the_whole_draw_is_one_chunk_by_default(make_checkpoint, tmp_path, sampler_calls):
+    sample_from_checkpoint(make_checkpoint(), tmp_path / "gen.png", num_images=6, seed=0)
+
+    assert [call["num_samples"] for call in sampler_calls] == [6]
+
+
+def test_a_batch_size_larger_than_the_draw_is_not_padded(make_checkpoint, tmp_path, sampler_calls):
+    sample_from_checkpoint(
+        make_checkpoint(), tmp_path / "gen.png", num_images=3, batch_size=99, seed=0
+    )
+
+    assert [call["num_samples"] for call in sampler_calls] == [3]
+
+
+def test_the_chunks_carry_the_latents_the_unbatched_draw_would_have(
+    make_checkpoint, tmp_path, sampler_calls
+):
+    """Batch-invariance, at the seam where it could break: the latents."""
+    checkpoint = make_checkpoint()
+    sample_from_checkpoint(checkpoint, tmp_path / "one.png", num_images=6, seed=7)
+    whole = sampler_calls[0]["noise"]
+
+    sampler_calls.clear()
+    sample_from_checkpoint(checkpoint, tmp_path / "many.png", num_images=6, batch_size=2, seed=7)
+    split = torch.cat([call["noise"] for call in sampler_calls])
+
+    assert torch.equal(whole, split)
+
+
+def test_labels_stay_with_their_images_across_a_split(make_checkpoint, tmp_path, sampler_calls):
+    """A chunk taking the whole label vector would relabel every image after the first."""
+    sample_from_checkpoint(
+        make_checkpoint(CONDITIONAL),
+        tmp_path / "gen.png",
+        num_images=6,
+        batch_size=2,
+        labels=[0, 1, 2],
+        seed=0,
+    )
+
+    assert [call["labels"] for call in sampler_calls] == [[0, 1], [2, 0], [1, 2]]
+
+
+def test_batching_does_not_change_the_images(make_checkpoint, tmp_path):
+    """The real chain, end to end: same seed and same images however it is split."""
+    checkpoint = make_checkpoint()
+    whole = sample_from_checkpoint(checkpoint, tmp_path / "one.png", num_images=6, seed=3)
+    split = sample_from_checkpoint(
+        checkpoint, tmp_path / "many.png", num_images=6, batch_size=2, seed=3
+    )
+
+    assert whole.read_bytes() == split.read_bytes()
+
+
+def test_save_individual_writes_one_file_per_image(make_checkpoint, tmp_path):
+    out = sample_from_checkpoint(
+        make_checkpoint(), tmp_path / "gen.png", num_images=3, save_individual=True, seed=0
+    )
+
+    assert out.exists()
+    written = sorted(path.name for path in tmp_path.glob("gen_*.png"))
+    assert written == ["gen_0000.png", "gen_0001.png", "gen_0002.png"]
+
+
+def test_individual_files_are_not_written_unless_asked(make_checkpoint, tmp_path):
+    sample_from_checkpoint(make_checkpoint(), tmp_path / "gen.png", num_images=3, seed=0)
+
+    assert not list(tmp_path.glob("gen_*.png"))
+
+
 @pytest.mark.parametrize(
     ("num_images", "num_classes", "labels", "expected"),
     [

@@ -72,6 +72,19 @@ def test_sample_defaults():
     assert args.guidance_rescale is None
     # Likewise the sampler it was trained to be drawn with.
     assert args.sampler is None
+    # Unset, so the whole draw happens in one batch exactly as it always has.
+    assert args.batch_size is None
+    assert args.save_individual is False
+
+
+def test_sample_parses_the_batch_size():
+    args = build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--batch-size", "64"])
+    assert args.batch_size == 64
+
+
+def test_sample_parses_save_individual():
+    args = build_parser().parse_args(["sample", "--checkpoint", "m.pt", "--save-individual"])
+    assert args.save_individual is True
 
 
 @pytest.mark.parametrize(
