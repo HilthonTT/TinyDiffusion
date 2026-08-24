@@ -137,7 +137,7 @@ jobs:
       # depending on that mirror being up, and takes the download off every
       # build but the first.
       - name: Cache MNIST
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data/MNIST
           key: mnist-v1
