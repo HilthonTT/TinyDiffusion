@@ -90,7 +90,7 @@ network predicts, where the reverse variance comes from, and what is optimised
 | `loss_weighting = "min_snr"` | Stops the low-noise timesteps dominating the gradient |
 
 Each is documented with its trade-off in
-[USAGE.md](../USAGE.md#choosing-the-parameterisation).
+[USAGE.md](usage/configuration.md#choosing-the-parameterisation).
 
 ## Conditioning
 

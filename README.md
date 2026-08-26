@@ -68,14 +68,14 @@ full.
 
 | Command | What it does |
 | --- | --- |
-| [`train`](USAGE.md#training) | Trains from a config, checkpointing and sampling each epoch |
-| [`sample`](USAGE.md#sampling) | Generates images from a checkpoint — `--labels`, `--guidance`, `--sampler`, `--steps` |
-| [`eval`](USAGE.md#evaluating-a-checkpoint) | Scores a checkpoint's loss on the held-out test split |
-| [`fid`](USAGE.md#measuring-sample-quality) | Measures sample *quality* against real images, with `--kid` and `--precision-recall` |
-| [`tui`](USAGE.md#the-dashboard) | Trains inside a terminal dashboard — live loss charts, ETA, sample grids |
-| [`plot`](USAGE.md#plotting-a-run) | Draws a run's `metrics.jsonl` as a figure, or several runs on shared axes |
-| [`interpolate`](USAGE.md#walking-between-two-latents) | Samples every point on a walk between two latents |
-| [`serve`](USAGE.md#serving-a-checkpoint-over-http) | Puts a checkpoint behind a JSON API |
+| [`train`](docs/usage/training.md#training) | Trains from a config, checkpointing and sampling each epoch |
+| [`sample`](docs/usage/sampling.md#sampling) | Generates images from a checkpoint — `--labels`, `--guidance`, `--sampler`, `--steps` |
+| [`eval`](docs/usage/evaluation.md#evaluating-a-checkpoint) | Scores a checkpoint's loss on the held-out test split |
+| [`fid`](docs/usage/evaluation.md#measuring-sample-quality) | Measures sample *quality* against real images, with `--kid` and `--precision-recall` |
+| [`tui`](docs/usage/training.md#the-dashboard) | Trains inside a terminal dashboard — live loss charts, ETA, sample grids |
+| [`plot`](docs/usage/metrics.md#plotting-a-run) | Draws a run's `metrics.jsonl` as a figure, or several runs on shared axes |
+| [`interpolate`](docs/usage/sampling.md#walking-between-two-latents) | Samples every point on a walk between two latents |
+| [`serve`](docs/usage/serving.md#serving-a-checkpoint-over-http) | Puts a checkpoint behind a JSON API |
 
 Three that are worth a sentence each:
 
@@ -95,7 +95,7 @@ Three that are worth a sentence each:
 | | |
 | --- | --- |
 | [docs/INSTALL.md](docs/INSTALL.md) | Install, GPU setup, verification, troubleshooting |
-| [USAGE.md](USAGE.md) | Downloads and disk use, training, sampling, evaluation, every CLI flag, config reference |
+| [USAGE.md](USAGE.md) | Index of the usage pages: installing, training, sampling, evaluation, serving, every CLI flag and config field |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the model and the codebase are put together |
 | [RESULTS.md](RESULTS.md) | Measured scores, with the commands and hardware that produced them |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |

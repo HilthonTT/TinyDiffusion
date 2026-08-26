@@ -385,6 +385,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- USAGE.md is now an index over nine pages under `docs/usage/`, one per topic:
+  installing, running the CLI, training and checkpoints, metrics and logging,
+  sampling, evaluation, serving, configuration, and troubleshooting. At 1,778
+  lines it had become a document nobody read linearly and in-page search was
+  the only way to navigate it — and a table of contents twenty entries long is
+  the symptom, not the fix. `USAGE.md` keeps its path and every link to it
+  still resolves; what was a heading anchor is now a page. Section anchors are
+  unchanged within their new pages, so only the file part of a cross-reference
+  moved, and README.md, RESULTS.md and `docs/ARCHITECTURE.md` were repointed
+  accordingly.
+
+- A checkpoint loaded for sampling no longer builds its U-Net with gradient
+  checkpointing, whatever the run that produced it used. Every consumer of
+  `load_for_sampling` — `sample`, `eval`, `fid`, `interpolate` and the server —
+  runs under `no_grad`, where the blocks fall through to the plain call
+  already, so no result changes and nothing gets faster; it just stops a model
+  that can never take a backward pass from carrying wrappers built for one. The
+  config handed back still reports the setting the checkpoint was trained with.
+
+- `lr_warmup` documents that it counts *applied* optimiser steps. Under
+  `amp_dtype = "fp16"` a step whose gradients overflowed is skipped and does
+  not advance the ramp, which is the intent — the ramp exists for exactly those
+  steps — but it means the field is not reliably the first `lr_warmup` batches
+  of a run, and the docstring said "optimiser steps" without saying which kind.
+
 - The README is half its former length and no longer duplicates USAGE.md. It
   had grown into a second usage guide — a paragraph per subcommand, each of
   them already documented at greater length one file over, which meant two

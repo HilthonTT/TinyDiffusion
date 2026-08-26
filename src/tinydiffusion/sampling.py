@@ -1,6 +1,7 @@
 """Generate images from a trained checkpoint."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -46,7 +47,14 @@ def load_for_sampling(
         raise KeyError(f"{checkpoint} stores no config; cannot infer the architecture")
 
     cfg = TrainConfig.from_mapping({**ckpt["config"], "device": resolved})
-    diffusion = build_model(cfg).to(resolved)
+    # Gradient checkpointing is a backward-pass trade, and nothing that loads a
+    # checkpoint for sampling runs one. The blocks would fall through to the
+    # plain call anyway — see
+    # :func:`~tinydiffusion.models.blocks._checkpointed` — so this changes no
+    # result; it just stops a run trained with it on building wrappers that can
+    # never fire. The returned config is left alone, so it still reports what
+    # the checkpoint was trained with.
+    diffusion = build_model(replace(cfg, grad_checkpoint=False)).to(resolved)
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
     restore_checkpoint(ckpt, diffusion=diffusion, ema=ema)
     return diffusion, ema, cfg

@@ -5,7 +5,8 @@ import torch
 
 from tinydiffusion import sampling
 from tinydiffusion.diffusion.guidance import ClassifierFreeGuidance
-from tinydiffusion.sampling import resolve_labels, sample_from_checkpoint
+from tinydiffusion.models.blocks import ResBlock, SelfAttention
+from tinydiffusion.sampling import load_for_sampling, resolve_labels, sample_from_checkpoint
 from tinydiffusion.training.checkpoints import save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
@@ -234,3 +235,19 @@ def test_individual_files_are_not_written_unless_asked(make_checkpoint, tmp_path
 )
 def test_grid_width(num_images, num_classes, labels, expected):
     assert sampling.grid_width(num_images, num_classes, labels) == expected
+
+
+def test_a_loaded_model_never_gradient_checkpoints(make_checkpoint):
+    # The trade only pays for a backward pass, and nothing that loads a
+    # checkpoint for sampling runs one.
+    checkpoint = make_checkpoint(dataclasses.replace(TINY, grad_checkpoint=True))
+
+    diffusion, _, cfg = load_for_sampling(checkpoint, "cpu")
+
+    blocks = [
+        module for module in diffusion.net.modules() if isinstance(module, ResBlock | SelfAttention)
+    ]
+    assert blocks
+    assert not any(block.use_checkpoint for block in blocks)
+    # The config still reports what the run was trained with.
+    assert cfg.grad_checkpoint is True

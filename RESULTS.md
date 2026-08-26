@@ -17,7 +17,7 @@ implying the config's number.
 | PyTorch | 2.13.0+cu132 |
 | Python | 3.14.7 |
 
-One GPU. Every multi-GPU claim in [USAGE.md](USAGE.md#training-on-several-gpus)
+One GPU. Every multi-GPU claim in [USAGE.md](docs/usage/configuration.md#training-on-several-gpus)
 is a correctness claim verified on CPU over gloo, not a speedup measured here —
 see [What is not measured](#what-is-not-measured).
 

@@ -92,7 +92,13 @@ class TrainConfig:
 
     ``lr_warmup`` ramps the learning rate linearly from zero over that many
     optimiser steps before holding it at ``lr``. Diffusion training is unstable
-    in the first few hundred steps at full LR; 0 turns the ramp off.
+    in the first few hundred steps at full LR; 0 turns the ramp off. The count
+    is of steps the optimiser actually *applied*: under ``amp_dtype = "fp16"``
+    a step whose gradients overflowed is skipped, and a skipped step does not
+    advance the ramp. Early instability therefore stretches the warmup in
+    wall-clock time rather than burning through it, which is the intent — the
+    ramp exists for exactly those steps — but it does mean ``lr_warmup = 500``
+    is not reliably the first 500 batches of the run.
     ``lr_schedule`` decides what happens after the ramp: ``constant`` holds
     ``lr`` for the rest of the run, and ``cosine`` decays it to zero over the
     remaining optimiser steps, which usually buys a little final quality. The
@@ -186,7 +192,7 @@ class TrainConfig:
     # optimisation
     num_epochs: int = 30
     lr: float = 2e-4
-    lr_warmup: int = 500  # optimiser steps to ramp the LR over; 0 disables it
+    lr_warmup: int = 500  # *applied* optimiser steps to ramp the LR over; 0 disables it
     lr_schedule: Literal["constant", "cosine"] = "constant"
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.0
