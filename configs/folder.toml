@@ -1,0 +1,77 @@
+# Training on your own images, rather than a packaged dataset.
+#
+# Point data_root at a directory and run it. Two layouts work, and which one
+# you have is inferred rather than configured:
+#
+#   photos/               photos/          <- one subdirectory per class
+#       img001.png            cats/
+#       img002.png                img001.png
+#       ...                   dogs/
+#                                 img002.png
+#
+# The flat one trains unconditionally: leave num_classes unset below. The
+# second gives each subdirectory a class, numbered by sorted name, and
+# num_classes has to equal how many there are — the run says so and stops if it
+# does not. Optionally split the images yourself by putting train/ and test/
+# (or val/) subdirectories at the top, each holding either layout; without them
+# folder_holdout keeps a slice back for val_every, eval and fid.
+#
+#   ./scripts/run.sh train --config configs/folder.toml --set data_root=photos
+#   ./scripts/run.sh sample --checkpoint runs/folder/checkpoints/last.pt \
+#       --out runs/folder/gen.png
+#
+# Sized as a starting point rather than a finished recipe: images are more
+# varied than digits, so expect to want more epochs and a wider net than this
+# once the pipeline is working.
+
+[data]
+dataset = "folder"
+data_root = "photos"   # the directory of images; nothing is downloaded
+image_size = 32        # every image is resized and centre-cropped to this
+batch_size = 128
+num_workers = 4
+
+# Only read when dataset = "folder".
+folder_channels = 3    # 1 reads the images as greyscale, 3 as RGB
+folder_hflip = true    # false for anything with a handedness — text, digits
+folder_holdout = 0.1   # held back for scoring, unless train/ and test/ exist
+
+[model]
+base_channels = 64
+channel_mult = [1, 2, 2]
+num_res_blocks = 2
+attn_resolutions = [16]
+dropout = 0.1
+
+[conditioning]
+# Uncomment for the one-subdirectory-per-class layout, matching the count.
+# num_classes = 2
+# class_dropout = 0.1
+# guidance = 3.0
+
+[diffusion]
+num_timesteps = 1000
+schedule = "cosine"
+predict = "v"
+zero_snr = true
+loss_weighting = "min_snr"
+
+[optimisation]
+num_epochs = 60
+lr = 2e-4
+lr_warmup = 500
+lr_schedule = "cosine"
+ema_decay = 0.9995
+ema_warmup = 2000
+
+[bookkeeping]
+seed = 0
+sample_every = 1
+num_samples = 16
+sampler = "dpmpp"
+sample_steps = 20
+out_dir = "runs/folder/contents"
+ckpt_dir = "runs/folder/checkpoints"
+
+[tracking]
+log_dir = "runs/folder"

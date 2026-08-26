@@ -5,6 +5,7 @@ from torch.utils.data import RandomSampler
 
 from tinydiffusion.data import (
     DATASETS,
+    FOLDER_DATASET,
     dataset_names,
     dataset_spec,
     denormalize,
@@ -22,7 +23,10 @@ def _fake_digit(size=MNIST.native_size):
 
 def test_every_registered_spec_is_keyed_under_its_own_name():
     assert all(name == spec.name for name, spec in DATASETS.items())
-    assert dataset_names() == tuple(sorted(DATASETS))
+    # Every registry entry is offerable, plus "folder", which is a name a
+    # config may give but has no fixed spec to register.
+    assert set(dataset_names()) == set(DATASETS) | {FOLDER_DATASET}
+    assert dataset_names() == tuple(sorted(dataset_names()))
 
 
 def test_an_unregistered_dataset_names_the_ones_that_exist():

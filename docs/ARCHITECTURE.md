@@ -56,6 +56,7 @@ same model and the same process without being told how.
 | `models/{unet,blocks,embeddings}.py` | The backbone, its ResBlocks and attention, its embeddings |
 | `metrics/` | FID, KID, precision/recall, Inception features, and the reference cache |
 | `data/datasets.py` | The dataset registry — MNIST, Fashion-MNIST, CIFAR-10 |
+| `data/folder.py` | `dataset = "folder"`: a directory of your own images, and how it is split |
 | `tui/` | The training dashboard |
 | `server/` | The JSON sampling API |
 | `utils/` | Device selection, precision, seeding, metric logging |

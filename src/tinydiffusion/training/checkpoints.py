@@ -56,6 +56,7 @@ one bearing the same label.
 
 ARCHITECTURE_FIELDS = (
     "dataset",
+    "folder_channels",
     "image_size",
     "base_channels",
     "channel_mult",
@@ -72,9 +73,10 @@ ARCHITECTURE_FIELDS = (
 )
 """Config fields a checkpoint's weights are tied to.
 
-The first seven decide the shape of every tensor in the state dict — ``dataset``
-by way of its channel count, which is the U-Net's input and output width — and
-the rest
+The first eight decide the shape of every tensor in the state dict — ``dataset``
+by way of its channel count, which is the U-Net's input and output width, and
+``folder_channels``, which is where that count comes from when the dataset is a
+folder — and the rest
 decide the schedule buffers and what the network's output means. Neither kind
 survives being changed under a ``--resume``, and only the first kind fails
 loudly on its own.

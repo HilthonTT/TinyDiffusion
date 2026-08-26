@@ -8,6 +8,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `dataset = "folder"`, training on a directory of your own images rather than
+  a packaged download. Two layouts work and which one you have is inferred:
+  loose images in `data_root` are unlabelled data, and one subdirectory per
+  class is conditional data, numbered by sorted name. Everything is resized and
+  centre-cropped to `image_size` and converted to `folder_channels`, so the
+  images need not be square, uniformly sized, or all the same mode — a
+  directory of photographs rarely is, and the U-Net's input width is fixed by
+  the config rather than by whichever file was read first. `configs/folder.toml`
+  is a starting point for both layouts.
+  The facts a packaged dataset ships with are declared rather than detected:
+  `folder_channels` (1 for greyscale, 3 for RGB), `folder_hflip` and
+  `folder_holdout`, plus the existing `num_classes`. The config therefore
+  resolves without reading the directory, which is what keeps a checkpoint
+  loadable and samplable on a machine that never had the images; the
+  declaration is checked against the disk when the folder is first opened, so a
+  `num_classes` that disagrees with the layout is a message naming both counts
+  rather than an index error at the embedding table. `folder_channels` joins
+  `dataset` in the fields `--resume` refuses to see change, since it is the
+  width of every tensor in the state dict.
+  A folder carries no train/test split and `val_every`, `eval` and `fid` all
+  need one. `train/` and `test/` (or `val/`) subdirectories are used verbatim
+  where they exist; otherwise `folder_holdout` of the images are held back,
+  chosen by hashing each image's path rather than by cutting a sorted list —
+  adding one photo then moves that photo alone between the splits, where an
+  index-based cut would reshuffle everything after it and quietly promote
+  already-scored images into the training set. The hash is over the POSIX
+  relative path, so the split is the same on Windows and Linux. A `train/` with
+  no held-out directory beside it is an error rather than a silent fallback to
+  the hash split, which would score the held-out loss on training images and
+  never say so.
+  Non-images, hidden directories and subdirectories holding no images are all
+  ignored — which is what stops the `fid_cache/` that `fid` writes into
+  `data_root` from becoming a class — and a directory mixing loose images with
+  class subdirectories is rejected rather than guessed at.
+
 - `sample --batch-size`, splitting a draw into chunks. A sampler runs one
   reverse chain over the whole batch it is handed, so the memory a draw needs
   followed `--num-images` directly and a few hundred images at once was an

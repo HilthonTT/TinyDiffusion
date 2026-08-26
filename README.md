@@ -47,6 +47,20 @@ end (~28 s per epoch on an RTX 5060, ~3.5 min on a CPU). The real run is
 MNIST (63 MB) downloads itself on first use. Each epoch writes a sample grid —
 generated digits above real ones — and a resumable checkpoint.
 
+### Your own images
+
+`dataset = "folder"` trains on a directory instead of a download — either loose
+images, or one subdirectory per class:
+
+```bash
+./scripts/run.sh train --config configs/folder.toml --set data_root=photos
+```
+
+Everything is resized and centre-cropped to `image_size`, so the images need
+not be square or uniform, and a slice is held back automatically for
+validation. See
+[Training on your own images](docs/usage/configuration.md#training-on-your-own-images).
+
 Any config field can be overridden from the command line with `--set`, which is
 what turns a sweep into a shell loop:
 

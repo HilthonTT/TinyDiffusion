@@ -8,7 +8,13 @@ from typing import Any, Literal, Self
 
 import torch
 
-from tinydiffusion.data.datasets import DEFAULT_DATASET, DatasetSpec, dataset_spec
+from tinydiffusion.data.datasets import (
+    DEFAULT_DATASET,
+    FOLDER_DATASET,
+    DatasetSpec,
+    dataset_spec,
+    folder_spec,
+)
 from tinydiffusion.diffusion.ddim import DEFAULT_SPACING, get_spacing
 from tinydiffusion.diffusion.gaussian_diffusion import (
     LossType,
@@ -73,6 +79,21 @@ class TrainConfig:
     count, the label space and the augmentation come from. Nothing downstream
     hard-codes any of them, so switching datasets is this field plus whatever
     ``num_classes`` and ``image_size`` the new one implies.
+
+    ``dataset = "folder"`` is the one name that is not a registry entry: it
+    trains on the images in ``data_root``, either loose in it or one
+    subdirectory per class. A folder has none of the facts a packaged dataset
+    ships with, so the three ``folder_*`` fields supply them and the directory
+    is checked against them when it is first read — the config cannot check
+    itself, since a checkpoint has to stay loadable on a machine that never had
+    the images. ``folder_channels`` is 1 to read them as greyscale and 3 as
+    RGB, and is part of what the weights are tied to; ``folder_hflip`` is the
+    augmentation, defaulting on because a folder is usually photographs; and
+    ``folder_holdout`` is the fraction kept back for ``val_every``, ``eval``
+    and ``fid``, used only when the directory does not already have ``train/``
+    and ``test/`` subdirectories of its own. See
+    :mod:`tinydiffusion.data.folder`. The other three fields are ignored
+    outright by the packaged datasets, whose own spec answers all of it.
 
     ``num_classes`` opts into class-conditional training — 10 for MNIST's
     digits. ``class_dropout`` is the fraction of training labels replaced by
@@ -163,6 +184,11 @@ class TrainConfig:
     batch_size: int = 128
     num_workers: int = 4
 
+    # folder datasets (dataset = "folder"); ignored by the packaged ones
+    folder_channels: int = 3
+    folder_hflip: bool = True
+    folder_holdout: float = 0.1
+
     # model
     base_channels: int = 64
     channel_mult: tuple[int, ...] = (1, 2, 2)
@@ -247,6 +273,12 @@ class TrainConfig:
                 size or rate falls outside the range it has to lie in, or the
                 conditioning settings do not describe a trainable model.
         """
+        if self.folder_channels not in (1, 3):
+            # Checked before the spec is built, since the spec is what carries
+            # it and a folder spec would otherwise hand a bad width to the U-Net.
+            raise ValueError(f"folder_channels must be 1 or 3, got {self.folder_channels}")
+        if not 0.0 <= self.folder_holdout < 1.0:
+            raise ValueError(f"folder_holdout must lie in [0, 1), got {self.folder_holdout}")
         # Raises on an unregistered name, and is what every downstream shape
         # is read from, so it is checked before anything else can use it.
         spec = self.dataset_spec()
@@ -388,11 +420,17 @@ class TrainConfig:
             )
 
     def dataset_spec(self) -> DatasetSpec:
-        """Resolve ``dataset`` to the registry entry it names.
+        """Resolve ``dataset`` to the spec it names.
 
         Called from :meth:`__post_init__`, so a config that names nothing fails
         while it is being read rather than once a loader is built, and again by
         everything that needs the channel count or the label space.
+
+        ``"folder"`` is the one name with no registry entry behind it: its spec
+        is built from the ``folder_*`` fields here, and reads nothing from the
+        disk. That is what lets a checkpoint be loaded and sampled from on a
+        machine that does not have the training images — see
+        :mod:`tinydiffusion.data.folder`.
 
         Returns:
             The spec for :attr:`dataset`.
@@ -400,6 +438,14 @@ class TrainConfig:
         Raises:
             ValueError: if no dataset is registered under that name.
         """
+        if self.dataset == FOLDER_DATASET:
+            return folder_spec(
+                channels=self.folder_channels,
+                image_size=self.image_size,
+                num_classes=self.num_classes,
+                hflip=self.folder_hflip,
+                holdout=self.folder_holdout,
+            )
         return dataset_spec(self.dataset)
 
     def diffusion_types(self) -> tuple[ModelMeanType, ModelVarType, LossType, LossWeighting]:

@@ -261,6 +261,10 @@ A few things that are worth knowing before you reach for this:
 | `fashion_mnist` | 1 | 28 | 10 | yes |
 | `cifar10` | 3 | 32 | 10 | yes |
 
+...plus `folder`, which is not a registry entry at all: it trains on a
+directory of your own images, and takes the four columns above from the config
+instead. See [Training on your own images](#training-on-your-own-images).
+
 Nothing downstream hard-codes a channel count: the U-Net's input and output
 width, the shape the samplers draw, and the reference side of a FID all read it
 from the spec the config names. Switching datasets is therefore the one key,
@@ -285,6 +289,65 @@ weights.
 A checkpoint records the dataset it was trained on, and `--resume` refuses to
 carry a run across a change to it — the channel count is part of the shape of
 every tensor in the state dict.
+
+### Training on your own images
+
+`dataset = "folder"` is the fourth name `dataset` accepts, and the only one
+that is not a registry entry: it trains on the images already in `data_root`,
+and downloads nothing. Two layouts work, and which one you have is inferred
+rather than configured:
+
+```text
+photos/                 photos/
+    img001.png              cats/
+    img002.png                  img001.png
+    ...                     dogs/
+                                img002.png
+```
+
+The flat one is unlabelled — leave `num_classes` unset and train
+unconditionally. The second gives each immediate subdirectory a class, numbered
+by sorted name, so `cats` is 0 and `dogs` is 1. `configs/folder.toml` is a
+starting point for both:
+
+```bash
+./scripts/run.sh train --config configs/folder.toml --set data_root=photos
+```
+
+A folder ships with none of the facts the packaged datasets carry, so three
+fields supply them:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `folder_channels` | 3 | 1 reads the images as greyscale, 3 as RGB |
+| `folder_hflip` | `true` | False for anything with a handedness — text, digits |
+| `folder_holdout` | 0.1 | Fraction kept back for scoring |
+
+Everything is resized and centre-cropped to `image_size`, so the images do not
+have to be square or all the same size, and each is converted to
+`folder_channels` whatever it was on disk — a directory of photographs is
+rarely uniform, and the U-Net's input width is fixed by the config rather than
+by whichever file happened to be read first.
+
+`num_classes` is checked against the directory when it is first read, rather
+than when the config is: the config cannot look, because a checkpoint has to
+stay loadable — and samplable — on a machine that never had the images. That is
+also why `folder_channels` is declared instead of detected, and why it sits
+alongside `dataset` in the fields `--resume` refuses to see change.
+
+A folder carries no train/test split, and `val_every`, `eval` and `fid` all
+want one. If the directory has `train/` and `test/` (or `val/`) subdirectories
+at the top, each holding either layout above, those are used verbatim.
+Otherwise `folder_holdout` of the images are held back, chosen by hashing each
+image's path — so adding one photo moves that photo alone between the splits,
+where cutting a sorted list would reshuffle every image after it and quietly
+promote already-scored images into the training set. The same hash runs on
+every platform, so a run on Windows scores the same images as one on Linux.
+
+Files that are not images are ignored, as are hidden directories and any
+subdirectory holding no images — which is what keeps the `fid_cache/` that
+`fid` writes into `data_root` from becoming a class. A directory holding both
+loose images and class subdirectories is rejected rather than guessed at.
 
 ### Validation and `best.pt`
 
@@ -437,11 +500,14 @@ starting it over, not `--resume`.
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `dataset` | `mnist` | Also `fashion_mnist`, `cifar10`; see [Choosing a dataset](#choosing-a-dataset) |
-| `data_root` | `data` | The dataset is downloaded here on first use |
+| `dataset` | `mnist` | Also `fashion_mnist`, `cifar10`, `folder`; see [Choosing a dataset](#choosing-a-dataset) |
+| `data_root` | `data` | The dataset is downloaded here on first use, or read from here by `folder` |
 | `image_size` | 32 | 32 keeps 28x28 digits intact and halves exactly |
 | `batch_size` | 128 | 8 GB of VRAM has room for 256 |
 | `num_workers` | 4 | 0 when debugging; see [The dataloader is not the bottleneck](#the-dataloader-is-not-the-bottleneck) |
+| `folder_channels` | 3 | `folder` only; 1 for greyscale, 3 for RGB |
+| `folder_hflip` | `true` | `folder` only; see [Training on your own images](#training-on-your-own-images) |
+| `folder_holdout` | 0.1 | `folder` only; fraction held back for scoring |
 | `base_channels` | 64 | Width; DDPM uses 128 for CIFAR-10 |
 | `channel_mult` | `[1, 2, 2]` | One entry per resolution level |
 | `num_res_blocks` | 2 | Residual blocks per level |
