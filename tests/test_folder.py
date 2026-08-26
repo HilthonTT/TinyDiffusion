@@ -78,6 +78,18 @@ def test_loose_images_beside_class_directories_are_rejected(classed):
         scan_folder(classed)
 
 
+def test_a_hidden_file_beside_class_directories_is_not_a_loose_image(classed):
+    # A folder copied off a Mac carries a `._name.png` sidecar per image, and
+    # the walk already skips dot-entries — so counting one as a loose image
+    # would reject a perfectly ordinary class layout.
+    _write(classed / "._cats0.png")
+
+    scan = scan_folder(classed, holdout=0.0)
+
+    assert scan.classes == ["cats", "dogs", "emus"]
+    assert len(scan.paths) == 30
+
+
 def test_the_two_splits_partition_the_directory(flat):
     train = scan_folder(flat, train=True, holdout=0.25)
     test = scan_folder(flat, train=False, holdout=0.25)

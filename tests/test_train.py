@@ -436,6 +436,10 @@ def test_an_unchanged_config_resumes(tiny_cfg, tmp_path):
         # A learned variance needs an objective that trains it, so the pair
         # has to change together for the config to build at all.
         ("variance", {"variance": "learned_range", "objective": "rescaled_mse"}),
+        # zero_snr rescales the betas the whole schedule comes from, and epsilon
+        # prediction cannot invert the result — so, like variance, the pair has
+        # to move together.
+        ("zero_snr", {"zero_snr": True, "predict": "v"}),
     ],
 )
 def test_a_changed_architecture_refuses_to_resume(tiny_cfg, tmp_path, field, overrides):

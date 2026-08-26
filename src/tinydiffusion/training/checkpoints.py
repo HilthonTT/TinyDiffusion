@@ -67,6 +67,7 @@ ARCHITECTURE_FIELDS = (
     "schedule",
     "beta_start",
     "beta_end",
+    "zero_snr",
     "predict",
     "variance",
     "objective",
@@ -77,9 +78,11 @@ The first eight decide the shape of every tensor in the state dict — ``dataset
 by way of its channel count, which is the U-Net's input and output width, and
 ``folder_channels``, which is where that count comes from when the dataset is a
 folder — and the rest
-decide the schedule buffers and what the network's output means. Neither kind
-survives being changed under a ``--resume``, and only the first kind fails
-loudly on its own.
+decide the schedule buffers and what the network's output means. ``zero_snr``
+belongs to the second kind: it rescales the betas the whole schedule is derived
+from, so flipping it under a ``--resume`` continues the run against a different
+forward process while every tensor still fits. Neither kind survives being
+changed under a ``--resume``, and only the first kind fails loudly on its own.
 """
 
 

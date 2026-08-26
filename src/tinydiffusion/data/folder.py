@@ -235,7 +235,10 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
 
     classes = _class_dirs(scan_root)
     loose = sorted(
-        (path for path in scan_root.glob("*") if _is_image(path)),
+        # Filtered exactly as `_images_under` filters, or a dot-entry that
+        # nothing would ever train on — a macOS `._img.jpg` sidecar, most
+        # often — reads as a loose image and makes a class layout look mixed.
+        (path for path in scan_root.glob("*") if _is_image(path) and _visible(path, scan_root)),
         key=lambda path: path.as_posix(),
     )
     if classes and loose:
