@@ -1,4 +1,4 @@
-"""Metric logging: console, JSONL on disk, and optionally TensorBoard.
+"""Metric logging: console, JSONL on disk, and optionally TensorBoard or W&B.
 
 A training run produces two kinds of number. Some are worth watching live, in
 the progress bar; all of them are worth keeping so a finished run can be
@@ -25,11 +25,13 @@ from typing import Any, Protocol, Self, runtime_checkable
 import torch
 
 __all__ = [
+    "DEFAULT_WANDB_PROJECT",
     "ConsoleBackend",
     "JsonlBackend",
     "LoggerBackend",
     "RunLogger",
     "TensorBoardBackend",
+    "WandbBackend",
     "null_logger",
     "quartile_means",
     "read_metrics",
@@ -39,6 +41,9 @@ __all__ = [
 
 METRICS_FILENAME = "metrics.jsonl"
 """Name of the JSONL file written inside a run's log directory."""
+
+DEFAULT_WANDB_PROJECT = "tinydiffusion"
+"""W&B project a run logs into when the config does not name one."""
 
 
 def _write_line(text: str) -> None:
@@ -304,6 +309,82 @@ class TensorBoardBackend:
         self._writer.close()
 
 
+class WandbBackend:
+    """Stream metrics to a Weights & Biases run.
+
+    The one backend here that talks to a machine that is not this one, which
+    is the whole reason to want it — a run on a remote box is watchable from a
+    laptop, and several runs land on shared axes without anyone copying
+    ``metrics.jsonl`` around. It is also the reason it is opt-in and the reason
+    it never raises during training: a network that drops mid-run must cost the
+    run nothing, since ``metrics.jsonl`` already holds everything this is
+    sending.
+
+    ``wandb`` is imported lazily so the module stays importable without it, and
+    is available via the ``tracking`` extra. Authentication is wandb's own —
+    ``wandb login``, or ``WANDB_API_KEY`` in the environment. Set
+    ``WANDB_MODE=offline`` to record locally and sync later, which is what a
+    training box with no outbound network wants.
+
+    The run's config is sent once at creation, so the sweep view can group and
+    filter by hyperparameter. Nothing else about the run leaves the machine:
+    no images, no checkpoints, no dataset.
+    """
+
+    def __init__(
+        self,
+        log_dir: Path,
+        *,
+        project: str,
+        name: str | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Start a W&B run.
+
+        Args:
+            log_dir: the run's local directory. Handed to wandb as its own
+                working directory, so its cache sits beside the run it belongs
+                to rather than in the current directory.
+            project: W&B project to log into.
+            name: display name for the run, or None to let wandb generate one.
+            config: hyperparameters to record alongside the metrics. Values
+                that are not JSON-native — :class:`~pathlib.Path`, tuples —
+                are stringified by wandb itself.
+
+        Raises:
+            ImportError: if wandb is not installed.
+        """
+        import wandb
+
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._run = wandb.init(
+            project=project,
+            name=name,
+            dir=str(log_dir),
+            config=dict(config) if config is not None else None,
+        )
+
+    def write(self, metrics: Mapping[str, float], step: int) -> None:
+        """Send one step's metrics.
+
+        A failure here is warned about and swallowed: the numbers are already
+        on disk, and a dropped connection is not a reason to lose an epoch of
+        training.
+
+        Args:
+            metrics: metric name to value.
+            step: step index used as the x-axis.
+        """
+        try:
+            self._run.log(dict(metrics), step=step)
+        except Exception as exc:
+            warnings.warn(f"wandb logging failed, continuing: {exc}", stacklevel=2)
+
+    def close(self) -> None:
+        """Finish the run, so the last step is flushed before the process exits."""
+        self._run.finish()
+
+
 class RunLogger:
     """Collect metrics during an epoch and flush their means to every backend.
 
@@ -329,6 +410,9 @@ class RunLogger:
         console: bool = True,
         jsonl: bool = True,
         tensorboard: bool = False,
+        wandb: bool = False,
+        wandb_project: str = DEFAULT_WANDB_PROJECT,
+        wandb_config: Mapping[str, Any] | None = None,
         extra: Sequence[LoggerBackend] = (),
     ) -> Self:
         """Build a logger with the usual set of backends.
@@ -339,6 +423,11 @@ class RunLogger:
             jsonl: append to ``metrics.jsonl``.
             tensorboard: also write TensorBoard events. Requires the
                 ``tracking`` extra.
+            wandb: also stream to Weights & Biases. Requires the ``tracking``
+                extra and an authenticated wandb; see :class:`WandbBackend`.
+            wandb_project: W&B project to log into. Ignored unless `wandb`.
+            wandb_config: hyperparameters to record with the W&B run, normally
+                the training config. Ignored unless `wandb`.
             extra: further backends to fan out to, appended after the built-in
                 ones. This is how something outside the loop — a display, a
                 test — receives the epoch metrics without the loop growing a
@@ -348,7 +437,8 @@ class RunLogger:
             A logger ready for use as a context manager.
 
         Raises:
-            RuntimeError: if `tensorboard` is requested but not installed.
+            RuntimeError: if `tensorboard` or `wandb` is requested but the
+                package behind it is not installed.
         """
         backends: list[LoggerBackend] = []
         if console:
@@ -361,6 +451,24 @@ class RunLogger:
             except ImportError as exc:
                 raise RuntimeError(
                     "tensorboard logging needs the 'tracking' extra: "
+                    "pip install 'tinydiffusion[tracking]'"
+                ) from exc
+        if wandb:
+            try:
+                backends.append(
+                    WandbBackend(
+                        log_dir,
+                        project=wandb_project,
+                        # The run directory is what distinguishes one run from
+                        # the next locally, so it is the name that makes a W&B
+                        # dashboard line up with the checkpoints on disk.
+                        name=log_dir.name,
+                        config=wandb_config,
+                    )
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "wandb logging needs the 'tracking' extra: "
                     "pip install 'tinydiffusion[tracking]'"
                 ) from exc
         backends.extend(extra)

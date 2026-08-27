@@ -114,12 +114,12 @@ def test_it_routes_a_non_epsilon_process_through_p_mean_variance():
     assert torch.isfinite(samples).all()
 
 
-def test_the_registry_holds_both_samplers():
-    assert sampler_names() == ("ddim", "dpmpp")
+def test_the_registry_holds_every_sampler():
+    assert sampler_names() == ("ddim", "dpmpp", "heun", "plms")
     assert get_sampler("dpmpp") is dpmpp_sample
     assert set(SAMPLERS) == set(sampler_names())
 
 
 def test_an_unregistered_sampler_says_what_is_available():
-    with pytest.raises(ValueError, match=r"unknown sampler 'euler'.*ddim, dpmpp"):
+    with pytest.raises(ValueError, match=r"unknown sampler 'euler'.*ddim, dpmpp, heun, plms"):
         get_sampler("euler")

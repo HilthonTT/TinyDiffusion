@@ -24,6 +24,7 @@ from tinydiffusion.diffusion.gaussian_diffusion import (
 )
 from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
 from tinydiffusion.diffusion.timesteps import timestep_sampler
+from tinydiffusion.utils.tracking import DEFAULT_WANDB_PROJECT
 
 # Fields whose declared type is not what TOML (or a checkpoint's provenance
 # dict, which stringifies Paths) hands back, so they need coercing on the way in.
@@ -175,6 +176,16 @@ class TrainConfig:
     the weights. ``keep_best`` uses it to maintain ``best.pt`` alongside
     ``last.pt``: training loss alone cannot tell you which epoch to sample
     from, and the last one is not reliably the best.
+
+    ``tensorboard`` and ``wandb`` add sinks alongside ``metrics.jsonl``, which
+    is written either way and stays the record the ``plot`` command reads. Of
+    the two only ``wandb`` leaves the machine: it sends the per-epoch metrics
+    and this config to a Weights & Biases run under ``wandb_project``, named
+    after ``log_dir``, which is what makes a run on a remote box watchable from
+    somewhere else. It needs the ``tracking`` extra and an authenticated
+    ``wandb``; ``WANDB_MODE=offline`` records locally to sync later. See
+    :class:`~tinydiffusion.utils.tracking.WandbBackend` for what is and is not
+    sent.
     """
 
     # data
@@ -257,6 +268,8 @@ class TrainConfig:
     log_console: bool = True
     log_jsonl: bool = True
     tensorboard: bool = False
+    wandb: bool = False
+    wandb_project: str = DEFAULT_WANDB_PROJECT
 
     def __post_init__(self) -> None:
         """Reject configurations that would only fail an epoch into the run.
@@ -367,6 +380,10 @@ class TrainConfig:
                 )
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
+        if self.wandb and not self.wandb_project.strip():
+            # wandb would otherwise invent a project called "uncategorized" and
+            # the run would be findable only by someone who knew that.
+            raise ValueError("wandb needs a wandb_project to log into, got an empty one")
         self._check_conditioning(spec)
         self.diffusion_types()
 

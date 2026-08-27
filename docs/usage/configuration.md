@@ -547,7 +547,7 @@ starting it over, not `--resume`.
 | `grad_checkpoint` | `false` | Recompute activations in the backward pass: roughly a third more compute for a large cut in memory |
 | `sample_every` | 1 | Epochs between sample grids; 0 disables |
 | `num_samples` | 16 | Images per grid |
-| `sampler` | `ddim` | Or `dpmpp` (DPM-Solver++(2M)), which needs about a third of the steps |
+| `sampler` | `ddim` | Or `dpmpp`, `heun`, `plms`; see [Choosing a sampler](sampling.md#choosing-a-sampler) |
 | `sample_steps` | 50 | Denoising steps for those grids; 15-20 is plenty for `dpmpp` |
 | `sample_spacing` | `uniform` | Or `quadratic`, which packs the steps near `t = 0`; free, and worth it at low `sample_steps` |
 | `out_dir` | `contents` | Sample grids |
@@ -557,6 +557,8 @@ starting it over, not `--resume`.
 | `log_console` | `true` | Per-epoch metrics table |
 | `log_jsonl` | `true` | Append `metrics.jsonl` |
 | `tensorboard` | `false` | TensorBoard events; needs the `tracking` extra |
+| `wandb` | `false` | Stream to Weights & Biases; needs the `tracking` extra and an authenticated `wandb` |
+| `wandb_project` | `tinydiffusion` | W&B project to log into |
 
 `configs/mnist.toml` lists every field with its default, `[conditioning]`
 aside;

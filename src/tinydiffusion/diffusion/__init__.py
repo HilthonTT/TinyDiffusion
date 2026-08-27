@@ -31,12 +31,14 @@ from tinydiffusion.diffusion.guidance import (
     drop_labels,
     rescale_guided,
 )
+from tinydiffusion.diffusion.heun import heun_sample
 from tinydiffusion.diffusion.latents import initial_latent
 from tinydiffusion.diffusion.losses import (
     discretized_gaussian_log_likelihood,
     mean_flat,
     normal_kl,
 )
+from tinydiffusion.diffusion.plms import PLMS_COEFFICIENTS, plms_sample
 from tinydiffusion.diffusion.prediction import predict_xstart_eps
 from tinydiffusion.diffusion.samplers import (
     DEFAULT_SAMPLER,
@@ -63,6 +65,7 @@ __all__ = [
     "DEFAULT_SAMPLER",
     "DEFAULT_SPACING",
     "KARRAS_RHO",
+    "PLMS_COEFFICIENTS",
     "SAMPLERS",
     "SPACINGS",
     "ClassifierFreeGuidance",
@@ -90,11 +93,13 @@ __all__ = [
     "enforce_zero_terminal_snr",
     "get_sampler",
     "get_spacing",
+    "heun_sample",
     "initial_latent",
     "karras_timesteps",
     "linear_beta_schedule",
     "mean_flat",
     "normal_kl",
+    "plms_sample",
     "predict_xstart_eps",
     "quadratic_timesteps",
     "rescale_guided",

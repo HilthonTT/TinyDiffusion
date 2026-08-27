@@ -6,6 +6,7 @@ from tinydiffusion.metrics.cache import (
     reference_stats_path,
     save_reference_features,
     save_reference_stats,
+    spatial_stats_path,
 )
 from tinydiffusion.metrics.evaluate import (
     DEFAULT_FID_IMAGES,
@@ -21,9 +22,17 @@ from tinydiffusion.metrics.fid import (
     fid_from_stats,
 )
 from tinydiffusion.metrics.inception import (
+    INCEPTION_CLASSES,
     INCEPTION_DIM,
+    SFID_DIM,
     FeatureExtractor,
     InceptionFeatures,
+    InceptionOutputs,
+)
+from tinydiffusion.metrics.inception_score import (
+    DEFAULT_IS_SPLITS,
+    InceptionScoreResult,
+    inception_score_from_probs,
 )
 from tinydiffusion.metrics.kid import (
     DEFAULT_KID_SUBSET_SIZE,
@@ -42,15 +51,20 @@ from tinydiffusion.metrics.precision_recall import (
 __all__ = [
     "CACHE_DIRNAME",
     "DEFAULT_FID_IMAGES",
+    "DEFAULT_IS_SPLITS",
     "DEFAULT_KID_SUBSETS",
     "DEFAULT_KID_SUBSET_SIZE",
     "DEFAULT_NEIGHBOURS",
+    "INCEPTION_CLASSES",
     "INCEPTION_DIM",
+    "SFID_DIM",
     "FeatureBank",
     "FeatureExtractor",
     "FeatureStats",
     "FidResult",
     "InceptionFeatures",
+    "InceptionOutputs",
+    "InceptionScoreResult",
     "KidResult",
     "PrecisionRecall",
     "accumulate_features",
@@ -60,6 +74,7 @@ __all__ = [
     "fid_for_checkpoint",
     "fid_from_stats",
     "generate_images",
+    "inception_score_from_probs",
     "kid_from_features",
     "load_reference_features",
     "load_reference_stats",
@@ -68,4 +83,5 @@ __all__ = [
     "reference_stats_path",
     "save_reference_features",
     "save_reference_stats",
+    "spatial_stats_path",
 ]

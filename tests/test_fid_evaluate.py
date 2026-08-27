@@ -449,3 +449,159 @@ def test_an_undersampled_score_points_at_the_metric_that_is_not(checkpoint, extr
     )
     assert result.undersampled
     assert "--kid is unbiased" in result.format()
+
+
+class HeadedStubExtractor(StubExtractor):
+    """StubExtractor plus the other two heads, so sFID and the IS have something to read.
+
+    Deliberately not Inception: the point of these tests is the wiring — that
+    one pass feeds three accumulators, that the spatial half is cached under
+    its own key, and that the numbers land on the result — none of which is a
+    claim about Inception's features.
+    """
+
+    SPATIAL_DIM = 5
+    CLASSES = 4
+
+    def __init__(self, image_size=8, dim=6):
+        super().__init__(image_size=image_size, dim=dim)
+        g = torch.Generator().manual_seed(1)
+        self.register_buffer(
+            "spatial_weight", torch.randn(image_size * image_size, self.SPATIAL_DIM, generator=g)
+        )
+        self.register_buffer(
+            "class_weight", torch.randn(image_size * image_size, self.CLASSES, generator=g)
+        )
+
+    def analyse(self, images):
+        from tinydiffusion.metrics.inception import InceptionOutputs
+
+        flat = images.flatten(1)
+        return InceptionOutputs(
+            pool=self(images),
+            spatial=flat @ self.spatial_weight,
+            probs=(flat @ self.class_weight).softmax(dim=-1),
+        )
+
+
+@pytest.fixture
+def headed_extractor(monkeypatch):
+    """A stub with all three heads, and SFID_DIM narrowed to match it.
+
+    The spatial accumulator is built at Inception's width, which a stub cannot
+    produce without doing Inception's work; pointing the constant at the stub's
+    own width is what keeps the test about the wiring.
+    """
+    monkeypatch.setattr(evaluate, "SFID_DIM", HeadedStubExtractor.SPATIAL_DIM)
+    monkeypatch.setattr(evaluate, "INCEPTION_CLASSES", HeadedStubExtractor.CLASSES)
+    return HeadedStubExtractor()
+
+
+def test_the_spatial_and_classifier_metrics_are_absent_unless_asked_for(checkpoint, extractor):
+    result = fid_for_checkpoint(
+        checkpoint, num_images=8, num_steps=2, extractor=extractor, progress=False
+    )
+    assert result.sfid is None
+    assert result.inception_score is None
+    # Line-wise, since pytest's tmp_path carries the test's own name.
+    lines = result.format().splitlines()
+    assert not any(line.startswith(("sfid", "inception score")) for line in lines)
+
+
+def test_sfid_is_reported_beside_the_fid(checkpoint, headed_extractor):
+    result = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=headed_extractor,
+        progress=False,
+        sfid=True,
+    )
+    assert result.sfid is not None
+    assert result.sfid >= 0.0
+    # Line-wise, since pytest's tmp_path carries the test's own name.
+    assert any(line.startswith("sfid") for line in result.format().splitlines())
+
+
+def test_the_inception_score_is_reported_with_its_spread(checkpoint, headed_extractor):
+    result = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=headed_extractor,
+        progress=False,
+        inception_score=True,
+        is_splits=2,
+    )
+    assert result.inception_score is not None
+    assert result.inception_score.splits == 2
+    assert 1.0 <= result.inception_score.mean <= HeadedStubExtractor.CLASSES + 1e-6
+    assert any(line.startswith("inception score") for line in result.format().splitlines())
+
+
+def test_the_extra_heads_ride_along_on_one_pass(checkpoint, headed_extractor):
+    """Two extra metrics must not cost two extra passes over every image.
+
+    The stub counts images through its pooled head, which every reading shares,
+    so asking for all three has to leave that count where a plain FID left it.
+    """
+    plain = fid_for_checkpoint(
+        checkpoint, num_images=8, num_steps=2, extractor=headed_extractor, progress=False
+    )
+    seen_plain = headed_extractor.seen
+
+    headed_extractor.seen = 0
+    everything = fid_for_checkpoint(
+        checkpoint,
+        num_images=8,
+        num_steps=2,
+        extractor=headed_extractor,
+        progress=False,
+        sfid=True,
+        inception_score=True,
+        is_splits=2,
+        # The first score cached the pooled reference half; the second needs
+        # the spatial one too, so it re-runs the real side. Off, to compare
+        # like with like.
+        cache=False,
+    )
+    assert headed_extractor.seen == seen_plain
+    # And the FID itself is untouched by the company it now keeps.
+    assert everything.fid == pytest.approx(plain.fid)
+
+
+def test_the_spatial_reference_half_is_cached_under_its_own_key(checkpoint, headed_extractor):
+    """A second sFID must not repeat the real pass, and must not collide with the first."""
+    from tinydiffusion.metrics.cache import CACHE_DIRNAME
+
+    kwargs = {
+        "num_images": 8,
+        "num_steps": 2,
+        "extractor": headed_extractor,
+        "progress": False,
+        "sfid": True,
+    }
+    first = fid_for_checkpoint(checkpoint, **kwargs)
+
+    cache_dir = next(p for p in checkpoint.parent.rglob(CACHE_DIRNAME) if p.is_dir())
+    entries = {p.name for p in cache_dir.iterdir()}
+    assert any(name.endswith("_spatial.pt") for name in entries)
+    # The pooled entry is still there beside it rather than overwritten.
+    assert any(not name.endswith("_spatial.pt") for name in entries)
+
+    headed_extractor.seen = 0
+    second = fid_for_checkpoint(checkpoint, **kwargs)
+    assert second.sfid == pytest.approx(first.sfid)
+
+
+def test_an_extractor_without_the_extra_heads_says_so(checkpoint, extractor):
+    """The stand-ins that keep FID testable are exactly this case."""
+    with pytest.raises(ValueError, match="does not expose"):
+        fid_for_checkpoint(
+            checkpoint,
+            num_images=8,
+            num_steps=2,
+            extractor=extractor,
+            progress=False,
+            sfid=True,
+        )

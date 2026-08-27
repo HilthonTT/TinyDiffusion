@@ -55,6 +55,7 @@ __all__ = [
     "reference_stats_path",
     "save_reference_features",
     "save_reference_stats",
+    "spatial_stats_path",
 ]
 
 CACHE_DIRNAME = "fid_cache"
@@ -147,6 +148,46 @@ def reference_features_path(
         extractor=extractor,
     )
     return stats.with_name(f"{stats.stem}_features{stats.suffix}")
+
+
+def spatial_stats_path(
+    root: Path,
+    *,
+    dataset: str,
+    split: str,
+    num_images: int,
+    image_size: int,
+    extractor: FeatureExtractor,
+) -> Path:
+    """Where the *spatial* statistics for one reference set are cached.
+
+    sFID is a FID taken in a different reading of the same network, so its
+    reference half is cached the same way and under the same key, plus a
+    suffix. The payload's own feature width is what actually distinguishes it —
+    :func:`load_reference_stats` rejects an entry whose ``dim`` disagrees with
+    the one asked for — so a suffix collision could not produce a wrong score,
+    only a wasted read.
+
+    Args:
+        root: the dataset directory.
+        dataset: registered dataset name.
+        split: ``"train"`` or ``"test"``.
+        num_images: how many images were asked for.
+        image_size: the resolution they were resized to.
+        extractor: the feature network they were run through.
+
+    Returns:
+        The path the entry would live at, whether or not it exists.
+    """
+    stats = reference_stats_path(
+        root,
+        dataset=dataset,
+        split=split,
+        num_images=num_images,
+        image_size=image_size,
+        extractor=extractor,
+    )
+    return stats.with_name(f"{stats.stem}_spatial{stats.suffix}")
 
 
 def _load_payload(path: Path) -> dict[str, Any] | None:

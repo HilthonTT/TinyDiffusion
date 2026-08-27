@@ -15,6 +15,8 @@ import torch.nn as nn
 from tinydiffusion.diffusion.ddim import ddim_sample
 from tinydiffusion.diffusion.dpm_solver import dpmpp_sample
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
+from tinydiffusion.diffusion.heun import heun_sample
+from tinydiffusion.diffusion.plms import plms_sample
 
 __all__ = ["DEFAULT_SAMPLER", "SAMPLERS", "Sampler", "get_sampler", "sampler_names"]
 
@@ -50,8 +52,25 @@ class Sampler(Protocol):
 SAMPLERS: dict[str, Sampler] = {
     "ddim": ddim_sample,
     "dpmpp": dpmpp_sample,
+    "heun": heun_sample,
+    "plms": plms_sample,
 }
-"""Name to sampler. ``ddim`` is the safe default; ``dpmpp`` is the fast one."""
+"""Name to sampler.
+
+``ddim`` is the safe default and the only one that can be made stochastic;
+the other three are deterministic ODE solvers that buy their accuracy in
+different currencies. ``dpmpp`` reaches second order by reusing the previous
+step's evaluation, so a step costs what a DDIM step costs — the fast one, and
+the one to reach for at 15 to 20 steps. ``heun`` reaches second order by
+evaluating twice per step, which is more expensive per step but correct from
+the first one rather than the second. ``plms`` reaches fourth order from three
+steps of history at one evaluation per step, and wants 20 steps or more for the
+order ramp to pay for itself.
+
+Which of them wins is a property of the model, not of the list: ``fid --kid``
+at a fixed number of *network evaluations* is the comparison that settles it,
+and ``heun`` spends two of those per step where the rest spend one.
+"""
 
 DEFAULT_SAMPLER = "ddim"
 """What a config that says nothing gets, and what every checkpoint so far used."""

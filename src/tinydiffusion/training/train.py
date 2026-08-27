@@ -14,7 +14,7 @@ import shutil
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -923,6 +923,11 @@ def train(
         console=cfg.log_console and group.is_main,
         jsonl=cfg.log_jsonl and group.is_main,
         tensorboard=cfg.tensorboard and group.is_main,
+        wandb=cfg.wandb and group.is_main,
+        wandb_project=cfg.wandb_project,
+        # The config as written, so the W&B sweep view can group and filter by
+        # any field a run was launched with.
+        wandb_config=asdict(cfg),
         extra=extra,
     )
 

@@ -8,6 +8,112 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Two more samplers, `heun` and `plms`, joining `ddim` and `dpmpp` in the
+  registry and so available to `--sampler`, the `sampler` config field, the
+  per-epoch grids, `fid`, `interpolate` and the server alike. Both are
+  deterministic ODE solvers that beat DDIM's first-order step, and they differ
+  in what they spend to do it, which is the reason to have both.
+  `heun` takes the DDIM step provisionally, evaluates the network again at
+  where it landed, and re-takes the step along the average of the two
+  directions — second order, at two network calls a step rather than one. What
+  that buys over `dpmpp`, which reaches second order for free by reusing the
+  previous step's evaluation, is being correct from the *first* step: a
+  multistep method has no history until its second, and a very short chain is
+  mostly first steps. `num_steps` therefore counts steps and not evaluations,
+  and the docs say so — the comparison against the other three only means
+  anything at a fixed evaluation budget.
+  `plms` (Liu et al. 2022) goes the other way and remembers: an
+  Adams-Bashforth formula fits a cubic through the last four noise estimates,
+  which are already paid for, and extrapolates. Fourth order at one call a
+  step, the cheapest order on offer, with the order ramping 1, 2, 3, 4 as the
+  buffer fills — so it wants 20 steps or more before the ramp has paid for
+  itself. The estimate stored is the measured one rather than the extrapolated
+  one, or the error would compound.
+  Only `ddim` remains stochastic; the other three refuse a non-zero `--eta`
+  rather than ignoring it, since the probability-flow ODE has no noise term to
+  scale.
+
+- `eval --bpd`, evaluating the full variational bound in bits per dimension.
+  The held-out loss is whatever the run was trained on, which makes it useless
+  for comparing a v-prediction model against an epsilon one or either against a
+  published number; every diffusion model defines the same bound, and
+  `GaussianDiffusion.calc_bpd_loop` has implemented it all along with nothing
+  reaching it. The prior term is reported beside the total rather than folded
+  into it: it depends on the schedule alone and no amount of training moves it,
+  so a reader comparing two checkpoints can see how much of the difference was
+  ever theirs to move.
+  Scored unclipped, since clamping the implied `x_0` tightens the number
+  without it still being an upper bound — which is the only thing that makes it
+  comparable with anyone else's. It walks every timestep of the training
+  schedule, so it costs `num_timesteps` network evaluations per image against
+  the couple of dozen the loss spends; `--bpd-images` bounds that and defaults
+  to 128. A checkpoint on the default parameterisation is served by the plain
+  DDPM implementation, which defines no bound, and the command says which
+  settings would give it one rather than failing on a missing method.
+
+- `fid --sfid`, the spatial FID (Nash et al. 2021). FID's features are pooled —
+  averaged over the image — which makes them a summary of what an image
+  contains and blind to where: a model that draws perfect strokes and arranges
+  them into something that is not a digit scores well on a metric that cannot
+  see the arrangement. sFID is the same distance in an unpooled reading of the
+  same network, the first seven channels of an intermediate feature map kept
+  spatially, for 2023 dimensions against FID's 2048.
+  It rides along on the Inception pass FID is already making rather than
+  running a second one, which matters on the generated side where there is no
+  second pass to run: the samples are produced lazily and are gone by the time
+  the first accumulator has seen them. Its reference half is a different
+  feature space, so it caches separately under the same key plus `_spatial`;
+  the payload's own feature width is what a load checks, so a suffix collision
+  could only waste a read, never produce a wrong score.
+
+- `fid --inception-score`, with `--is-splits`. The one metric here that never
+  looks at a real image: it asks the classifier whether each sample is
+  confidently some ImageNet class and whether the samples between them cover
+  many, and reports the exponentiated KL between the two. That is both its
+  appeal — no reference set — and its limit, and the documentation is blunt
+  about the limit: on MNIST it is close to meaningless, since handwritten
+  digits are not an ImageNet class. It is here because it is free on a pass
+  already running Inception over every sample.
+  Getting it meant keeping Inception's 1000-way classifier rather than
+  discarding it. `InceptionFeatures` now moves `fc` aside instead of replacing
+  it, and `analyse` returns all three readings — pooled, spatial and class
+  probabilities — from one forward pass, with the spatial map captured by a
+  hook on the block that produces it rather than by re-implementing
+  torchvision's forward.
+
+- `sweep`, training one config over a grid of hyperparameters. `--set` already
+  made a sweep a shell loop, and the moment one of the directory overrides is
+  forgotten every point writes over the last one's record of itself — which is
+  the comparison the sweep was for. This is that loop with `log_dir`,
+  `ckpt_dir` and `out_dir` set per point, each named after the values that
+  distinguish it, so `plot runs/sweep/*` draws the whole grid on shared axes
+  with a legend that reads itself.
+  `--axis field=a,b,c` is repeatable and every combination is run; values are
+  read exactly as `--set` reads one, and `--set` still works alongside for the
+  settings a sweep holds fixed, which keeps them out of the directory names.
+  A combination that is not a valid config is rejected while the grid is being
+  expanded rather than after the points before it have already run, and an axis
+  over one of the three directory fields is refused outright. `--dry-run`
+  prints the grid without training anything, `--skip-existing` leaves a point
+  whose directory already holds metrics alone and reads its numbers, and a
+  point that fails is reported rather than ending the sweep — five good runs
+  are not worth losing to one bad combination — with the whole command exiting
+  non-zero if any did. `Ctrl+C` still ends the sweep rather than one point. It
+  finishes by printing what each point reached, ranked by best `val/loss`.
+
+- A Weights & Biases logging backend, `--wandb` and `--wandb-project`, joining
+  the console, JSONL and TensorBoard sinks. The one that leaves the machine,
+  which is the reason to want it: a run on a remote box is watchable from a
+  laptop, and several runs land on shared axes without anyone copying
+  `metrics.jsonl` around. The run is named after `log_dir` so the dashboard
+  lines up with the checkpoints on disk, and the training config is sent once
+  so the sweep view can group and filter by hyperparameter; nothing else goes.
+  A send that fails warns and continues rather than raising — the numbers are
+  already on disk, and losing an epoch of training to a network blip would make
+  the backend cost more than it is worth. Needs the `tracking` extra, which now
+  carries `wandb` alongside `tensorboard`, and rank 0 alone logs under
+  `torchrun`.
+
 - `dataset = "folder"`, training on a directory of your own images rather than
   a packaged download. Two layouts work and which one you have is inferred:
   loose images in `data_root` are unlabelled data, and one subdirectory per

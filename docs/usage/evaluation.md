@@ -1,11 +1,13 @@
 # Evaluating a checkpoint
 
-Held-out loss, and the sample-quality scores — FID, KID, precision and
-recall — that loss cannot tell you.
+Held-out loss, the variational bound, and the sample-quality scores — FID,
+sFID, KID, precision and recall, the Inception Score — that loss cannot tell
+you.
 
 Part of [Usage](../../USAGE.md).
 
 - [Evaluating a checkpoint](#evaluating-a-checkpoint)
+- [Bits per dimension](#bits-per-dimension)
 - [Measuring sample quality](#measuring-sample-quality)
 
 ## Evaluating a checkpoint
@@ -53,6 +55,8 @@ has learned the easy end of the schedule and little else.
 | `--batch-size` | the checkpoint's | Larger is faster |
 | `--data-root` | the checkpoint's | Dataset directory |
 | `--no-ema` | off | Score the raw weights instead of the EMA |
+| `--bpd` | off | Also evaluate the variational bound; see [Bits per dimension](#bits-per-dimension) |
+| `--bpd-images` | 128 | Images the bound is estimated over |
 | `--seed` | 0 | Fixes the noise; change it to resample |
 | `--device` | auto | `cuda`, `cpu`, … |
 
@@ -68,6 +72,51 @@ One caveat: this is a proxy. Lower held-out loss means the network predicts
 noise better, which correlates with sample quality but does not measure it
 directly. For that, use `fid` below — and keep looking at the grids.
 
+## Bits per dimension
+
+The held-out loss is whatever *this* run was trained on, which is what makes it
+useless for comparing a v-prediction model against an epsilon one, or either
+against a published number. The variational bound is not: every diffusion model
+defines the same bound on the negative log-likelihood of real data, and
+`--bpd` evaluates it.
+
+```bash
+./scripts/run.sh eval --checkpoint checkpoints/last.pt --bpd
+```
+
+```
+checkpoints/last.pt | test split | 10000 images | ema weights
+loss 0.09984
+bpd 3.61204 (prior 0.00003) over 128 images
+
+     t     loss
+...
+```
+
+Two numbers, and the second is the more interesting one. `prior` is the gap
+between `q(x_T | x_0)` and the standard normal the chain starts from. It depends
+on the schedule alone — no amount of training moves it — so a large share of the
+total means the forward process has not finished destroying the signal by `x_T`,
+which is exactly what
+[`zero_snr`](configuration.md#choosing-the-parameterisation) exists to fix.
+
+Three things to know before reading the number:
+
+- **It needs the generalised process.** The default parameterisation is served
+  by the plain DDPM implementation, which has no bound to walk; the command says
+  so rather than guessing. Train with a non-default `predict`, `variance` or
+  `objective` — `variance = "learned_range"` with `objective = "rescaled_mse"`
+  is the configuration the bound is normally quoted for, and the one Nichol &
+  Dhariwal's improved DDPM is.
+- **It is expensive.** The bound walks *every* timestep of the training
+  schedule, so it costs `num_timesteps` network evaluations per image — a
+  thousand at the default — against the couple of dozen the loss spends. Hence
+  `--bpd-images`, which defaults to 128; a few hundred is enough for the third
+  decimal, and the whole split is neither affordable nor necessary.
+- **It disagrees with FID, and that is not a bug.** Likelihood and sample
+  quality are different questions, and a model can win on one and lose on the
+  other. Reporting both is the point.
+
 ## Measuring sample quality
 
 `eval` scores the training objective; `fid` scores the thing you actually care
@@ -75,10 +124,12 @@ about. It draws samples, pushes them and an equal number of real images through
 a pretrained Inception-v3, and measures the distance between the two clouds of
 activations.
 
-FID is the default and always reported. Two more are available on request, and
-each answers something FID cannot: `--kid` is unbiased, so it survives the
-small sample counts a single GPU can afford, and `--precision-recall` splits a
-bad score into the two different problems it might be.
+FID is the default and always reported. Four more are available on request, and
+each answers something FID cannot: `--kid` is unbiased, so it survives the small
+sample counts a single GPU can afford; `--precision-recall` splits a bad score
+into the two different problems it might be; `--sfid` sees the spatial
+incoherence FID's pooled features average away; and `--inception-score` reads
+the samples without reference to the real data at all.
 
 ```bash
 ./scripts/run.sh fid --checkpoint checkpoints/last.pt
@@ -183,6 +234,66 @@ The cost is quadratic in `--num-images` — every generated image is measured
 against every real one — so this is a flag for the low thousands, not for
 50,000.
 
+### sFID, when the parts are right and the whole is not
+
+FID's features are *pooled* — averaged over the image — which is what makes them
+a summary of what an image contains and blind to where. A model that draws
+perfect strokes and assembles them into something that is not a digit scores
+well on a metric that cannot see the arrangement.
+
+sFID (Nash et al. 2021) is the same distance taken in an *unpooled* reading of
+the same network: the first seven channels of an intermediate Inception feature
+map, kept spatially, for 7 x 17 x 17 = 2023 dimensions against FID's 2048. It
+rides along on the Inception pass FID is already making, so it costs almost no
+time:
+
+```bash
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --sfid
+```
+
+```
+checkpoints/last.pt | train split | ema weights
+fid 18.472
+sfid 9.317
+```
+
+Read the two together — a good FID beside a bad sFID is the finding, and says
+the samples have the right ingredients in the wrong places. The absolute values
+are not comparable with each other, only each with itself across checkpoints.
+It caches its reference half separately, under the same key plus `_spatial`,
+so the first `--sfid` run re-reads the real images even if a plain `fid` has
+already scored the same set.
+
+### The Inception Score, and why it is here
+
+The Inception Score never looks at a real image. It asks the classifier whether
+each sample is confidently *some* ImageNet class and whether the samples between
+them cover *many*, and reports the exponentiated KL between the two. High means
+individually decisive and collectively varied.
+
+```bash
+./scripts/run.sh fid --checkpoint checkpoints/last.pt --inception-score
+```
+
+```
+checkpoints/last.pt | train split | ema weights
+fid 18.472
+inception score 2.114 +- 0.087 (10 splits of 1000)
+```
+
+Not looking at the real data is the whole of its appeal and the whole of its
+problem: it cannot tell you whether the samples resemble *your* dataset, only
+whether they resemble ImageNet. **On MNIST that is close to meaningless** —
+handwritten digits are not an ImageNet class, and a model that has learned them
+perfectly scores whatever Inception happens to think a 7 is. It earns its keep
+on natural images, and it is here because it is free on a pass that is already
+running Inception over every sample.
+
+The spread is over `--is-splits` disjoint chunks of the sample set, so it says
+whether the number is stable, not whether two models differ. The score depends
+on the chunk size, so hold `--is-splits` and `--num-images` fixed across
+checkpoints.
+
 ### The reference features are cached
 
 Half of every score is the real images, and that half does not depend on the
@@ -231,8 +342,8 @@ scored over the same set.
 | `--batch-size` | the checkpoint's | Larger is faster |
 | `--data-root` | the checkpoint's | Dataset directory |
 | `--steps` | the checkpoint's | Denoising steps per sample |
-| `--sampler` | the checkpoint's | `ddim` or `dpmpp`; hold it fixed across compared checkpoints |
-| `--spacing` | the checkpoint's | `uniform` or `quadratic`; hold it fixed too |
+| `--sampler` | the checkpoint's | `ddim`, `dpmpp`, `heun` or `plms`; hold it fixed across compared checkpoints |
+| `--spacing` | the checkpoint's | `uniform`, `quadratic` or `karras`; hold it fixed too |
 | `--eta` | 0.0 | 0 is DDIM, 1 is ancestral DDPM |
 | `--guidance` | the checkpoint's | Classifier-free guidance scale |
 | `--guidance-rescale` | the checkpoint's | Guidance rescale factor; sweep it jointly with `--guidance` |
@@ -243,6 +354,9 @@ scored over the same set.
 | `--kid-subset-size` | 1000 | Images per KID subset, per side; hold it fixed across compared checkpoints |
 | `--precision-recall` | off | Also report manifold precision and recall |
 | `--neighbours` | 3 | k for the precision/recall manifolds |
+| `--sfid` | off | Also report the spatial FID |
+| `--inception-score` | off | Also report the Inception Score, with its spread |
+| `--is-splits` | 10 | Chunks the Inception Score is averaged over |
 | `--seed` | 0 | Fixes the samples; change it to redraw |
 | `--device` | auto | `cuda`, `cpu`, … |
 | `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](sampling.md#half-precision) |

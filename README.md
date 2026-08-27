@@ -68,6 +68,13 @@ what turns a sweep into a shell loop:
 ./scripts/run.sh train --config configs/mnist.toml --set lr=1e-4 --set batch_size=64
 ```
 
+Or hand the sweep to `sweep`, which gives each point its own directory:
+
+```bash
+./scripts/run.sh sweep --config configs/mnist.toml --axis lr=1e-4,2e-4,4e-4
+./scripts/run.sh plot runs/sweep/* --out contents/sweep.png
+```
+
 **Using a GPU:** `uv sync` installs a CUDA build of PyTorch on Windows and
 Linux, so an NVIDIA GPU is picked up automatically, and training falls back to
 the CPU when none is visible — its first line says which it chose. Add
@@ -84,20 +91,25 @@ full.
 | --- | --- |
 | [`train`](docs/usage/training.md#training) | Trains from a config, checkpointing and sampling each epoch |
 | [`sample`](docs/usage/sampling.md#sampling) | Generates images from a checkpoint — `--labels`, `--guidance`, `--sampler`, `--steps` |
-| [`eval`](docs/usage/evaluation.md#evaluating-a-checkpoint) | Scores a checkpoint's loss on the held-out test split |
-| [`fid`](docs/usage/evaluation.md#measuring-sample-quality) | Measures sample *quality* against real images, with `--kid` and `--precision-recall` |
+| [`sweep`](docs/usage/training.md#sweeping-a-grid) | Trains one config over a grid of hyperparameters, one directory per point |
+| [`eval`](docs/usage/evaluation.md#evaluating-a-checkpoint) | Scores a checkpoint's loss on the held-out test split, and its likelihood with `--bpd` |
+| [`fid`](docs/usage/evaluation.md#measuring-sample-quality) | Measures sample *quality* against real images, with `--kid`, `--sfid`, `--precision-recall` and `--inception-score` |
 | [`tui`](docs/usage/training.md#the-dashboard) | Trains inside a terminal dashboard — live loss charts, ETA, sample grids |
 | [`plot`](docs/usage/metrics.md#plotting-a-run) | Draws a run's `metrics.jsonl` as a figure, or several runs on shared axes |
 | [`interpolate`](docs/usage/sampling.md#walking-between-two-latents) | Samples every point on a walk between two latents |
 | [`serve`](docs/usage/serving.md#serving-a-checkpoint-over-http) | Puts a checkpoint behind a JSON API |
 
-Three that are worth a sentence each:
+Four that are worth a sentence each:
 
 - **`fid`** caches the real images' half of the score under `data/fid_cache` —
   it does not depend on the checkpoint, which is what makes sweeping
   `--guidance` or `--steps` affordable. FID needs ~10,000 images to mean
   anything; `--kid` is unbiased, so a score over 2,000 means what one over
-  50,000 does, and `--precision-recall` splits a bad score into its two causes.
+  50,000 does, `--precision-recall` splits a bad score into its two causes, and
+  `--sfid` sees the spatial incoherence FID's pooled features average away.
+- **`sweep`** is the shell loop over `--set` with the bookkeeping done: every
+  point gets its own `log_dir`, `ckpt_dir` and `out_dir`, named after what
+  distinguishes it, so `plot runs/sweep/*` compares them on shared axes.
 - **`tui`** starts with `s`, stops at a batch boundary and checkpoints with `x`,
   and lists every key under `?`. Needs the `tui` extra.
 - **`interpolate`** says something a grid of samples cannot: whether the space

@@ -2,8 +2,10 @@ import pytest
 import torch
 
 from tinydiffusion.metrics.inception import (
+    INCEPTION_CLASSES,
     INCEPTION_DIM,
     INCEPTION_SIZE,
+    SFID_DIM,
     FeatureExtractor,
     InceptionFeatures,
 )
@@ -62,3 +64,54 @@ def test_it_stays_in_eval_mode(untrained):
     # Dropout would make the features non-deterministic, which would show up as
     # score noise rather than as an obvious failure.
     assert untrained.net.training is False
+
+
+def test_analyse_returns_all_three_heads(untrained):
+    outputs = untrained.analyse(torch.zeros(2, 1, 8, 8))
+    assert outputs.pool.shape == (2, INCEPTION_DIM)
+    assert outputs.spatial.shape == (2, SFID_DIM)
+    assert outputs.probs.shape == (2, INCEPTION_CLASSES)
+
+
+def test_the_pooled_head_is_what_a_plain_call_returns(untrained):
+    """One pass has to give the same features as the pass FID already took.
+
+    If it did not, `--sfid` would silently move the FID it is reported beside.
+    """
+    images = torch.randn(2, 1, 8, 8).clamp(-1, 1)
+    assert torch.allclose(untrained.analyse(images).pool, untrained(images), atol=1e-5)
+
+
+def test_the_probabilities_are_a_distribution(untrained):
+    probs = untrained.analyse(torch.zeros(2, 1, 8, 8)).probs
+    assert torch.allclose(probs.sum(dim=-1), torch.ones(2), atol=1e-5)
+    assert (probs >= 0).all()
+
+
+def test_the_spatial_head_keeps_geometry_the_pooled_one_averages_away(untrained):
+    """The point of sFID: two images with the same content differently arranged.
+
+    Rolling an image shifts the feature map without changing much of what is in
+    it, so the spatial reading has to move further than the pooled one. Without
+    that the second score would be a noisier copy of the first.
+    """
+    images = torch.randn(1, 1, 64, 64).clamp(-1, 1)
+    rolled = images.roll(shifts=24, dims=-1)
+
+    first, second = untrained.analyse(images), untrained.analyse(rolled)
+    pooled_shift = (first.pool - second.pool).norm() / first.pool.norm()
+    spatial_shift = (first.spatial - second.spatial).norm() / first.spatial.norm()
+    assert spatial_shift > pooled_shift
+
+
+def test_analyse_leaves_no_hook_behind(untrained):
+    """A hook left registered would append to a dead list on the next call."""
+    untrained.analyse(torch.zeros(1, 1, 8, 8))
+    untrained.analyse(torch.zeros(1, 1, 8, 8))
+    assert not untrained.net.Mixed_6e._forward_hooks
+
+
+def test_the_classifier_survives_being_moved_aside(untrained):
+    """It is the head FID discards and the Inception Score needs."""
+    assert untrained.net.fc.__class__.__name__ == "Identity"
+    assert untrained.classifier.out_features == INCEPTION_CLASSES

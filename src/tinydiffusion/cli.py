@@ -11,9 +11,14 @@ from tinydiffusion import __version__
 from tinydiffusion.data.datasets import dataset_names
 from tinydiffusion.diffusion.ddim import spacing_names
 from tinydiffusion.diffusion.samplers import sampler_names
-from tinydiffusion.evaluation import DEFAULT_EVAL_STEPS, evaluate_checkpoint
+from tinydiffusion.evaluation import (
+    DEFAULT_BPD_IMAGES,
+    DEFAULT_EVAL_STEPS,
+    evaluate_checkpoint,
+)
 from tinydiffusion.interpolation import interpolate_from_checkpoint
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
+from tinydiffusion.metrics.inception_score import DEFAULT_IS_SPLITS
 from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
 from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
 from tinydiffusion.plotting import plot_runs
@@ -26,6 +31,7 @@ from tinydiffusion.server.config import (
     DEFAULT_PORT,
     ServerConfig,
 )
+from tinydiffusion.sweep import run_sweep, sweep_points, sweep_summary
 from tinydiffusion.training.checkpoints import config_from_checkpoint
 from tinydiffusion.training.config import TrainConfig, load_config
 from tinydiffusion.training.train import train as train_run
@@ -77,14 +83,52 @@ def config_override(value: str) -> tuple[str, Any]:
     name = name.strip()
     if not sep or not name:
         raise argparse.ArgumentTypeError(f"expected field=value, got {value!r}")
+    return name, toml_value(raw)
+
+
+def toml_value(raw: str) -> Any:
+    """Read one config value the way a config file would read it.
+
+    Args:
+        raw: the text on the right of an ``=``.
+
+    Returns:
+        The TOML value it denotes, or `raw` itself where TOML cannot parse it —
+        the common case for paths and registry names, which
+        :meth:`~tinydiffusion.training.config.TrainConfig.from_mapping` then
+        coerces to whatever the field holds.
+    """
     try:
-        # A one-key document is the cheapest way to borrow TOML's own literals;
-        # anything it rejects is a bare string, which is the common case for
-        # paths and registry names.
-        parsed = tomllib.loads(f"value = {raw}")["value"]
+        # A one-key document is the cheapest way to borrow TOML's own literals.
+        return tomllib.loads(f"value = {raw}")["value"]
     except tomllib.TOMLDecodeError:
-        return name, raw
-    return name, parsed
+        return raw
+
+
+def sweep_axis(value: str) -> tuple[str, list[Any]]:
+    """Parse one ``--axis field=a,b,c`` into a config field and its values.
+
+    Each value is read exactly as ``--set`` reads one, so a sweep's literals
+    and a config file's are the same literals.
+
+    Args:
+        value: the raw argument, e.g. ``"lr=1e-4,2e-4"``.
+
+    Returns:
+        The field name and the values to sweep it over, in the order given.
+
+    Raises:
+        argparse.ArgumentTypeError: if there is no ``=``, the name is empty, or
+            no values follow it.
+    """
+    name, sep, raw = value.partition("=")
+    name = name.strip()
+    if not sep or not name:
+        raise argparse.ArgumentTypeError(f"expected field=value[,value...], got {value!r}")
+    values = [toml_value(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError(f"axis {name!r} has no values: {value!r}")
+    return name, values
 
 
 def add_precision_argument(parser: argparse.ArgumentParser) -> None:
@@ -161,6 +205,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also write TensorBoard events. Needs the 'tracking' extra.",
     )
     train.add_argument(
+        "--wandb",
+        action="store_true",
+        default=None,
+        help="Also stream metrics to Weights & Biases. Needs the 'tracking' extra "
+        "and an authenticated wandb; WANDB_MODE=offline records locally to sync later.",
+    )
+    train.add_argument(
+        "--wandb-project",
+        help="W&B project to log into. Ignored without --wandb.",
+    )
+    train.add_argument(
         "--deterministic",
         action="store_true",
         default=None,
@@ -191,6 +246,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--data-root", type=Path, help="Override the dataset directory.")
     evaluate.add_argument(
         "--no-ema", action="store_false", dest="use_ema", help="Score the raw weights, not the EMA."
+    )
+    evaluate.add_argument(
+        "--bpd",
+        action="store_true",
+        help="Also evaluate the full variational bound, in bits per dimension. "
+        "Unlike the loss it is comparable against published likelihoods and "
+        "across parameterisations, and unlike the loss it costs a network "
+        "evaluation per timestep per image, so it covers --bpd-images rather "
+        "than the split. Needs a checkpoint trained with a non-default "
+        "predict, variance or objective; plain DDPM defines no bound.",
+    )
+    evaluate.add_argument(
+        "--bpd-images",
+        type=int,
+        default=DEFAULT_BPD_IMAGES,
+        metavar="N",
+        help="Images to estimate the bound over. Rounded up to a whole batch.",
     )
     evaluate.add_argument("--seed", type=int, default=0, help="Random seed.")
     evaluate.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
@@ -280,6 +352,30 @@ def build_parser() -> argparse.ArgumentParser:
         "samples look real, and what fraction of the real data the samples cover. "
         "They split a bad score into its two causes, which no single number can. "
         "Cost is quadratic in --num-images.",
+    )
+    fid.add_argument(
+        "--sfid",
+        action="store_true",
+        help="Also report the spatial FID: the same distance taken in an "
+        "intermediate, unpooled Inception feature map. FID's features are "
+        "spatially averaged, so it cannot see an image whose parts are each "
+        "plausible and jointly arranged wrong; this is the reading that can. "
+        "It rides along on the same Inception pass and costs almost nothing.",
+    )
+    fid.add_argument(
+        "--inception-score",
+        action="store_true",
+        help="Also report the Inception Score. It reads only the generated "
+        "samples, so it says nothing about whether they resemble your data — "
+        "worth little on MNIST, and free to compute.",
+    )
+    fid.add_argument(
+        "--is-splits",
+        type=int,
+        default=DEFAULT_IS_SPLITS,
+        metavar="N",
+        help="Chunks to average the Inception Score over. The score depends on "
+        "the chunk size, so hold this fixed across the checkpoints being compared.",
     )
     fid.add_argument(
         "--neighbours",
@@ -491,6 +587,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Begin training as soon as the dashboard opens, rather than waiting for 's'.",
     )
 
+    sweep = subparsers.add_parser(
+        "sweep",
+        help="Train one config over a grid of hyperparameters, one directory per point.",
+    )
+    sweep.add_argument(
+        "--config",
+        type=Path,
+        help="Config every point starts from. Omit for the defaults.",
+    )
+    sweep.add_argument(
+        "--axis",
+        type=sweep_axis,
+        action="append",
+        dest="axes",
+        required=True,
+        metavar="FIELD=A,B,C",
+        help="A field to vary and the values to vary it over, repeatable: "
+        "--axis lr=1e-4,2e-4 --axis sample_spacing=uniform,quadratic. Every "
+        "combination is run, so that is four points and four training runs. "
+        "Values are read exactly as --set reads one.",
+    )
+    sweep.add_argument(
+        "--set",
+        type=config_override,
+        action="append",
+        dest="overrides",
+        metavar="FIELD=VALUE",
+        help="Override a field for every point, repeatable. This is where the "
+        "settings a sweep holds fixed go, so they stay out of the directory names.",
+    )
+    sweep.add_argument(
+        "--out-root",
+        type=Path,
+        default=Path("runs/sweep"),
+        help="Directory the points are created under. Each gets its own "
+        "metrics.jsonl, checkpoints and samples, so `plot <root>/*` compares them.",
+    )
+    sweep.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the grid and what each point would be, without training anything.",
+    )
+    sweep.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Leave a point alone if its directory already holds metrics, which "
+        "is how an interrupted sweep is resumed without redoing what finished.",
+    )
+    sweep.add_argument("--seed", type=int, help="Random seed, overriding the config.")
+    sweep.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
+    sweep.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
+
     plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
     plot.add_argument(
         "runs",
@@ -550,6 +698,8 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
             "num_epochs",
             "log_dir",
             "tensorboard",
+            "wandb",
+            "wandb_project",
             "log_console",
             "deterministic",
         )
@@ -585,6 +735,8 @@ def _eval(args: argparse.Namespace) -> int:
         use_ema=args.use_ema,
         seed=args.seed,
         device=args.device,
+        bpd=args.bpd,
+        bpd_images=args.bpd_images,
     )
     print(result.format())
     return 0
@@ -614,6 +766,9 @@ def _fid(args: argparse.Namespace) -> int:
         precision_recall=args.precision_recall,
         neighbours=args.neighbours,
         sample_precision=args.precision,
+        sfid=args.sfid,
+        inception_score=args.inception_score,
+        is_splits=args.is_splits,
     )
     print(result.format())
     return 0
@@ -652,6 +807,28 @@ def _tui(args: argparse.Namespace) -> int:
     cfg = dataclasses.replace(cfg, log_console=False)
     run_tui(cfg, resume=args.resume, autostart=args.start)
     return 0
+
+
+def _sweep(args: argparse.Namespace) -> int:
+    """Run the sweep subcommand."""
+    # `sweep` defines no --resume, and config_from_args reads one; supplying it
+    # as absent keeps that shared resolver usable rather than forked.
+    args.resume = None
+    base = config_from_args(args)
+    points = sweep_points(base, args.axes, args.out_root)
+
+    print(f"{len(points)} points under {args.out_root}")
+    for point in points:
+        print(f"  {point.name}")
+    if args.dry_run:
+        return 0
+
+    runs = list(run_sweep(points, train=train_run, skip_existing=args.skip_existing))
+    print()
+    print(sweep_summary(runs))
+    # Non-zero when any point failed: a sweep is normally the last thing in a
+    # script, and a summary nobody reads is not a way to report a failure.
+    return 0 if all(run.ok for run in runs) else 1
 
 
 def _plot(args: argparse.Namespace) -> int:
@@ -731,6 +908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "interpolate": _interpolate,
         "plot": _plot,
         "sample": _sample,
+        "sweep": _sweep,
         "serve": _serve,
         "tui": _tui,
     }

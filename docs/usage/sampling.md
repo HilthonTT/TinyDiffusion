@@ -17,9 +17,9 @@ Part of [Usage](../../USAGE.md).
 | `--num-images` | 8 | How many images to generate |
 | `--batch-size` | all of them at once | Images drawn at a time; sets peak memory |
 | `--steps` | the checkpoint's `sample_steps` | Denoising steps; fewer is faster, coarser |
-| `--sampler` | the checkpoint's `sampler` | `ddim` or `dpmpp`; see [Choosing a sampler](#choosing-a-sampler) |
+| `--sampler` | the checkpoint's `sampler` | `ddim`, `dpmpp`, `heun` or `plms`; see [Choosing a sampler](#choosing-a-sampler) |
 | `--spacing` | the checkpoint's `sample_spacing` | `uniform` or `quadratic`; see [Spacing the steps](#spacing-the-steps) |
-| `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM. `dpmpp` accepts only 0 |
+| `--eta` | 0.0 | 0 is deterministic DDIM, 1 is ancestral DDPM. Only `ddim` accepts anything else |
 | `--labels` | one image per class | Classes to generate, e.g. `7` or `0,1,2` |
 | `--guidance` | the checkpoint's `guidance` | Classifier-free guidance scale |
 | `--guidance-rescale` | the checkpoint's `guidance_rescale` | Corrects the scale guidance inflates; 0.7 above `--guidance 3` |
@@ -61,27 +61,59 @@ at; the individual files are what anything downstream actually reads.
 
 ### Choosing a sampler
 
-Two samplers, both usable with any checkpoint — which one to draw with is a
+Four samplers, all usable with any checkpoint — which one to draw with is a
 runtime choice, not something baked into the weights:
 
-| `--sampler` | What it is | Steps it wants |
-| --- | --- | --- |
-| `ddim` | DDIM (Song et al. 2020), a first-order step along the probability-flow ODE | 50 |
-| `dpmpp` | DPM-Solver++(2M) (Lu et al. 2022), second-order multistep | 15-20 |
+| `--sampler` | What it is | Order | Network calls per step | Steps it wants |
+| --- | --- | --- | --- | --- |
+| `ddim` | DDIM (Song et al. 2020), a step along the probability-flow ODE | 1st | 1 | 50 |
+| `dpmpp` | DPM-Solver++(2M) (Lu et al. 2022), multistep | 2nd | 1 | 15-20 |
+| `heun` | Heun's method, as EDM (Karras et al. 2022) uses it | 2nd | 2 | 15-20 |
+| `plms` | PLMS (Liu et al. 2022), Adams-Bashforth on the noise estimate | 4th | 1 | 20+ |
 
-`dpmpp` integrates the linear part of the same ODE in closed form and
-approximates only the `x_0` prediction, reusing the previous step's network
-evaluation rather than paying for a second one. A step therefore costs exactly
-what a DDIM step costs, and ten to twenty of them land about where fifty DDIM
-steps do:
+They differ in what they spend to beat DDIM's first-order step, and the whole
+comparison is only meaningful at a fixed number of *network evaluations* —
+which is `--steps` for three of them and twice `--steps` for `heun`.
+
+`dpmpp` integrates the linear part of the ODE in closed form and approximates
+only the `x_0` prediction, reusing the previous step's network evaluation rather
+than paying for a second one. A step costs exactly what a DDIM step costs, and
+ten to twenty of them land about where fifty DDIM steps do:
 
 ```bash
 ./scripts/run.sh sample --checkpoint checkpoints/last.pt --sampler dpmpp --steps 20
 ```
 
-It is deterministic, so `--eta` above 0 is refused rather than ignored — the
-solver has no noise term to scale. `--eta 1` remains available under `ddim`,
-where it reproduces ancestral DDPM sampling.
+`heun` gets its second order the other way: it takes the DDIM step
+provisionally, evaluates the network again at where it landed, and re-takes the
+step along the average of the two directions. That is two calls a step rather
+than one — so compare it at half the step count — and it buys something
+`dpmpp` cannot, which is being correct from the *first* step. `dpmpp` has no
+history to extrapolate from until its second, and a very short chain is mostly
+first steps:
+
+```bash
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --sampler heun --steps 10
+```
+
+`plms` remembers instead of re-evaluating: it fits a cubic through the last four
+noise estimates, which are already paid for, and extrapolates. Fourth order at
+one call a step, and the cheapest order on offer — but the first three steps
+have no history, so the order ramps 1, 2, 3, 4 and those early steps are exactly
+where a short chain is worst. Below about 15 steps the ramp eats the benefit:
+
+```bash
+./scripts/run.sh sample --checkpoint checkpoints/last.pt --sampler plms --steps 25
+```
+
+Only `ddim` is stochastic. The other three integrate the probability-flow ODE,
+which has no noise term to scale, so `--eta` above 0 is refused rather than
+ignored. `--eta 1` remains available under `ddim`, where it reproduces ancestral
+DDPM sampling.
+
+Which of the four wins is a property of the model, not of the list. `fid --kid`
+at a fixed evaluation budget is the comparison that settles it — see
+[Measuring sample quality](evaluation.md#measuring-sample-quality).
 
 `sampler` is also a config field, so a run's per-epoch grids are drawn the same
 way, and a checkpoint remembers what it was trained to be sampled with.

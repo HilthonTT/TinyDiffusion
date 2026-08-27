@@ -90,26 +90,65 @@ share every axis, one line per run, which is how a sweep is read:
 ./scripts/run.sh plot runs/baseline runs/min_snr --out contents/compare.png
 ```
 
+Each run is labelled by its directory name, which is what makes this the other
+half of [`sweep`](training.md#sweeping-a-grid): a sweep names every point's
+directory after the values that distinguish it, so the whole root plots as a
+legend that reads itself.
+
+```bash
+./scripts/run.sh plot runs/sweep/* --out contents/sweep.png
+```
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `RUN...` | required | Run log directories, or `metrics.jsonl` files |
 | `--out` | `contents/metrics.png` | Image to write; the extension picks the format, so `.svg` works |
 | `--dpi` | 120 | Resolution for raster formats |
 
-TensorBoard is optional and off by default. It needs the `tracking` extra
-(`uv sync --all-extras`, or `pip install 'tinydiffusion[tracking]'`) and writes
-to `log_dir/tb`:
+### TensorBoard and Weights & Biases
+
+Two further sinks, both optional and both off by default. They need the
+`tracking` extra (`uv sync --all-extras`, or
+`pip install 'tinydiffusion[tracking]'`). Neither replaces `metrics.jsonl`,
+which is written either way and stays what `plot` reads.
+
+TensorBoard writes to `log_dir/tb`:
 
 ```bash
 ./scripts/run.sh train --config configs/mnist.toml --tensorboard
 tensorboard --logdir runs/mnist/tb
 ```
 
+Weights & Biases is the one that leaves the machine, which is the whole reason
+to want it: a run on a remote box is watchable from a laptop, and several runs
+land on shared axes without anyone copying files around.
+
+```bash
+wandb login                       # or export WANDB_API_KEY=...
+./scripts/run.sh train --config configs/mnist.toml --wandb
+```
+
+The run is named after `log_dir`, so the W&B dashboard lines up with the
+checkpoints on disk, and the training config is sent once at the start so the
+sweep view can group and filter by hyperparameter. Nothing else goes: no
+images, no checkpoints, no dataset. `WANDB_MODE=offline` records locally to
+sync later, which is what a training box with no outbound network wants.
+
+A network that drops mid-run costs the run nothing — a failed send warns and
+training continues, since `metrics.jsonl` already holds everything W&B was
+being told.
+
 | Flag | Config field | Meaning |
 | --- | --- | --- |
 | `--log-dir` | `log_dir` | Where `metrics.jsonl` and `tb/` are written |
 | `--tensorboard` | `tensorboard` | Also write TensorBoard events |
+| `--wandb` | `wandb` | Also stream to Weights & Biases |
+| `--wandb-project` | `wandb_project` | W&B project to log into (default `tinydiffusion`) |
 | `--quiet` | `log_console` | Suppress the per-epoch table |
 
-An unpassed flag leaves the config file's value alone, so `--tensorboard` can
-be turned on for one run without editing the TOML.
+An unpassed flag leaves the config file's value alone, so `--tensorboard` or
+`--wandb` can be turned on for one run without editing the TOML.
+
+Under `torchrun`, only rank 0 logs. The metrics are already the group's — the
+losses are all-reduced before they reach the logger — so a second rank would
+add no information and one more W&B run per GPU.

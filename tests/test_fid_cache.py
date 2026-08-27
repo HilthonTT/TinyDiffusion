@@ -15,6 +15,7 @@ from tinydiffusion.metrics.cache import (
     reference_stats_path,
     save_reference_features,
     save_reference_stats,
+    spatial_stats_path,
 )
 from tinydiffusion.metrics.evaluate import fid_for_checkpoint
 from tinydiffusion.metrics.features import FeatureBank
@@ -369,5 +370,11 @@ def test_the_two_kinds_of_entry_key_the_same_way(tmp_path):
     }
     stats = reference_stats_path(tmp_path, **key)
     features = reference_features_path(tmp_path, **key)
-    assert features.parent == stats.parent
+    spatial = spatial_stats_path(tmp_path, **key)
+    assert features.parent == stats.parent == spatial.parent
     assert features.name == f"{stats.stem}_features.pt"
+    assert spatial.name == f"{stats.stem}_spatial.pt"
+    # Three distinct files: the moments, the vectors, and the spatial moments
+    # sFID is taken in. One overwriting another would silently score a set of
+    # images in the wrong feature space.
+    assert len({stats, features, spatial}) == 3

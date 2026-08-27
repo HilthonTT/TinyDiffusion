@@ -29,10 +29,21 @@ from tinydiffusion.metrics.cache import (
     reference_stats_path,
     save_reference_features,
     save_reference_stats,
+    spatial_stats_path,
 )
 from tinydiffusion.metrics.features import FeatureBank
 from tinydiffusion.metrics.fid import FeatureStats, fid_from_stats
-from tinydiffusion.metrics.inception import FeatureExtractor
+from tinydiffusion.metrics.inception import (
+    INCEPTION_CLASSES,
+    SFID_DIM,
+    FeatureExtractor,
+    InceptionOutputs,
+)
+from tinydiffusion.metrics.inception_score import (
+    DEFAULT_IS_SPLITS,
+    InceptionScoreResult,
+    inception_score_from_probs,
+)
 from tinydiffusion.metrics.kid import (
     DEFAULT_KID_SUBSET_SIZE,
     DEFAULT_KID_SUBSETS,
@@ -59,6 +70,96 @@ The moments alone, which is all FID needs and all that fits in constant memory,
 or the vectors themselves, which KID and precision/recall need. The two share
 the ``update``-and-``n`` interface :func:`accumulate_features` uses, and nothing
 else."""
+
+
+class _ExtraHeads:
+    """One Inception pass, fanned out to the metrics that read its other heads.
+
+    sFID and the Inception Score are taken from readings of the same network
+    the pooled features come from — an intermediate feature map and the class
+    probabilities. Running a second pass for each would double Inception's
+    share of a score on the real side, and on the generated side there is no
+    second pass to run: the samples are produced lazily and are gone by the
+    time the first accumulator has seen them.
+
+    So this stands in for the extractor, presents the same
+    :class:`~tinydiffusion.metrics.inception.FeatureExtractor` interface
+    :func:`accumulate_features` drives, and folds the other heads into their
+    own accumulators on the way past.
+
+    Args:
+        extractor: the real feature network, which must be able to
+            :meth:`~tinydiffusion.metrics.inception.InceptionFeatures.analyse`.
+        spatial: accumulator for the flattened intermediate features, or None.
+        probs: accumulator for the class probabilities, or None. A bank rather
+            than moments, since the Inception Score reads the rows themselves.
+
+    Raises:
+        ValueError: if `extractor` cannot produce the extra heads. The stand-in
+            extractors that keep the FID plumbing testable without downloading
+            Inception weights are exactly this case, and failing here names the
+            problem rather than letting it surface as a missing attribute
+            somewhere inside the accumulation.
+    """
+
+    def __init__(
+        self,
+        extractor: FeatureExtractor,
+        *,
+        spatial: FeatureStats | None = None,
+        probs: FeatureBank | None = None,
+    ) -> None:
+        if not hasattr(extractor, "analyse"):
+            raise ValueError(
+                f"sfid and inception_score read Inception's other heads, which "
+                f"{type(extractor).__name__} does not expose; they need an "
+                "InceptionFeatures extractor"
+            )
+        self.dim = extractor.dim
+        self._extractor = extractor
+        self._spatial = spatial
+        self._probs = probs
+
+    def __call__(self, images: torch.Tensor) -> torch.Tensor:
+        """Analyse one batch, banking the extra heads and returning the pooled features.
+
+        Args:
+            images: ``(B, C, H, W)`` in [-1, 1].
+
+        Returns:
+            The pooled features, which is what the caller was accumulating.
+        """
+        outputs: InceptionOutputs = self._extractor.analyse(images)
+        if self._spatial is not None:
+            self._spatial.update(outputs.spatial)
+        if self._probs is not None:
+            self._probs.update(outputs.probs)
+        return outputs.pool
+
+
+def _reading(
+    extractor: FeatureExtractor,
+    *,
+    spatial: FeatureStats | None = None,
+    probs: FeatureBank | None = None,
+) -> FeatureExtractor:
+    """Wrap `extractor` only where something extra is actually being read.
+
+    Keeps the ordinary FID path — and every test double on it — running through
+    the extractor itself, so nothing about it changes when the opt-in metrics
+    are not asked for.
+
+    Args:
+        extractor: the feature network.
+        spatial: accumulator for the spatial features, or None.
+        probs: accumulator for the class probabilities, or None.
+
+    Returns:
+        The extractor, or a :class:`_ExtraHeads` around it.
+    """
+    if spatial is None and probs is None:
+        return extractor
+    return _ExtraHeads(extractor, spatial=spatial, probs=probs)
 
 
 @dataclass(slots=True)
@@ -95,6 +196,15 @@ class FidResult:
         precision_recall: the manifold precision and recall, or None if they
             were not asked for. They split a bad score into its two causes,
             which neither `fid` nor `kid` can do.
+        sfid: the same distance taken in Inception's *spatial* features rather
+            than its pooled ones, or None if it was not asked for. The pooled
+            features are spatially averaged, so FID cannot see an image whose
+            parts are individually right and collectively arranged wrong; sFID
+            is the reading that can. Comparable only against another sFID.
+        inception_score: the Inception Score and its spread, or None if it was
+            not asked for. The one number here that never looks at the real
+            images, which makes it free of the reference set and blind to it —
+            see :mod:`tinydiffusion.metrics.inception_score`.
     """
 
     checkpoint: Path
@@ -112,6 +222,8 @@ class FidResult:
     sample_precision: str = DEFAULT_PRECISION
     kid: KidResult | None = None
     precision_recall: PrecisionRecall | None = None
+    sfid: float | None = None
+    inception_score: InceptionScoreResult | None = None
 
     @property
     def undersampled(self) -> bool:
@@ -143,11 +255,23 @@ class FidResult:
                 f"kid {self.kid.mean:.5f} +- {self.kid.std:.5f} "
                 f"({self.kid.subsets} subsets of {self.kid.subset_size})"
             )
+        if self.sfid is not None:
+            # Printed under the FID rather than beside it: it is the same
+            # distance in a different space, and the pair is only ever read
+            # together — a good FID with a bad sFID is the finding.
+            lines.append(f"sfid {self.sfid:.3f}")
         if self.precision_recall is not None:
             lines.append(
                 f"precision {self.precision_recall.precision:.3f} | "
                 f"recall {self.precision_recall.recall:.3f} "
                 f"(k={self.precision_recall.neighbours})"
+            )
+        if self.inception_score is not None:
+            lines.append(
+                f"inception score {self.inception_score.mean:.3f} "
+                f"+- {self.inception_score.std:.3f} "
+                f"({self.inception_score.splits} splits of "
+                f"{self.inception_score.split_size})"
             )
         lines += [
             "",
@@ -312,6 +436,9 @@ def fid_for_checkpoint(
     precision_recall: bool = False,
     neighbours: int = DEFAULT_NEIGHBOURS,
     sample_precision: str = DEFAULT_PRECISION,
+    sfid: bool = False,
+    inception_score: bool = False,
+    is_splits: int = DEFAULT_IS_SPLITS,
 ) -> FidResult:
     """Sample a checkpoint and score the samples against real images.
 
@@ -380,15 +507,30 @@ def fid_for_checkpoint(
             features on the real side were computed with it. Sampling is where
             the time goes anyway — a 50-step chain with guidance is a hundred
             network evaluations per image against Inception's one.
+        sfid: also compute the spatial FID — the same distance taken in an
+            intermediate, *unpooled* Inception feature map. FID's features are
+            spatially averaged, which makes it blind to an image whose parts
+            are each plausible and jointly arranged wrong; this is the reading
+            that is not. It rides along on the same Inception pass, so it costs
+            a second reference cache entry and almost no time.
+        inception_score: also compute the Inception Score. It reads only the
+            generated samples, so it is the one number here that says nothing
+            about whether they resemble the reference set — worth little on
+            MNIST, and free to compute.
+        is_splits: chunks to average the Inception Score over. The score
+            depends on the chunk size, so hold this fixed across the
+            checkpoints being compared.
 
     Returns:
-        The scored result. `kid` and `precision_recall` on it are None unless
-        they were asked for.
+        The scored result. `kid`, `precision_recall`, `sfid` and
+        `inception_score` on it are None unless they were asked for.
 
     Raises:
         ValueError: if ``num_images`` is below 2, leaving the covariance
-            undefined, ``split`` is not ``"train"`` or ``"test"``, or no
-            sampler or spacing goes by the name given.
+            undefined, ``split`` is not ``"train"`` or ``"test"``, no sampler
+            or spacing goes by the name given, or ``sfid`` or
+            ``inception_score`` is asked of an extractor that does not expose
+            Inception's other heads.
     """
     # Both of the opt-in metrics read pairwise structure, so both need the
     # vectors kept rather than folded into moments as they go by.
@@ -444,9 +586,18 @@ def fid_for_checkpoint(
         image_size=cfg.image_size,
         extractor=extractor,
     )
+    spatial_path = spatial_stats_path(
+        root,
+        dataset=cfg.dataset,
+        split=split,
+        num_images=num_images,
+        image_size=cfg.image_size,
+        extractor=extractor,
+    )
 
     real_bank: FeatureBank | None = None
     real: FeatureStats | None = None
+    real_spatial: FeatureStats | None = None
     if cache:
         if retain:
             # A bank answers everything a stats entry does and more, so it is
@@ -455,7 +606,13 @@ def fid_for_checkpoint(
             real = real_bank.stats if real_bank is not None else None
         else:
             real = load_reference_stats(cache_path, dim=extractor.dim)
-    if real is None:
+        if sfid:
+            real_spatial = load_reference_stats(spatial_path, dim=SFID_DIM)
+    # A hit on the pooled entry and a miss on the spatial one still needs the
+    # pass, since the spatial features cannot be derived from the moments the
+    # first entry holds. Both are then recomputed together, which costs the
+    # pooled half a second time and keeps the branch to one condition.
+    if real is None or (sfid and real_spatial is None):
         loader = image_dataloader(
             cfg.dataset_spec(),
             root,
@@ -474,6 +631,7 @@ def fid_for_checkpoint(
         real_sink: FeatureSink = (
             FeatureBank(extractor.dim) if retain else FeatureStats(extractor.dim)
         )
+        real_spatial = FeatureStats(SFID_DIM) if sfid else None
         accumulate_features(
             tqdm(
                 real_batches,
@@ -481,7 +639,7 @@ def fid_for_checkpoint(
                 total=-(-num_images // batch),
                 disable=not progress,
             ),
-            extractor,
+            _reading(extractor, spatial=real_spatial),
             stats=real_sink,
             limit=num_images,
         )
@@ -494,9 +652,15 @@ def fid_for_checkpoint(
             save_reference_stats(cache_path, real)
             if real_bank is not None:
                 save_reference_features(features_path, real_bank)
+            if real_spatial is not None:
+                save_reference_stats(spatial_path, real_spatial)
 
     seed_everything(seed)
     generated: FeatureSink = FeatureBank(extractor.dim) if retain else FeatureStats(extractor.dim)
+    # The samples are produced lazily and not kept, so anything read from them
+    # has to be read on the one pass there is.
+    generated_spatial = FeatureStats(SFID_DIM) if sfid else None
+    generated_probs = FeatureBank(INCEPTION_CLASSES) if inception_score else None
     accumulate_features(
         tqdm(
             generate_images(
@@ -516,7 +680,7 @@ def fid_for_checkpoint(
             total=-(-num_images // batch),
             disable=not progress,
         ),
-        extractor,
+        _reading(extractor, spatial=generated_spatial, probs=generated_probs),
         stats=generated,
     )
     generated_bank = generated if isinstance(generated, FeatureBank) else None
@@ -542,6 +706,14 @@ def fid_for_checkpoint(
             generated_bank, real_bank, neighbours=neighbours, device=cfg.device
         )
 
+    sfid_score: float | None = None
+    if generated_spatial is not None and real_spatial is not None:
+        sfid_score = fid_from_stats(generated_spatial, real_spatial)
+
+    is_score: InceptionScoreResult | None = None
+    if generated_probs is not None:
+        is_score = inception_score_from_probs(generated_probs.features, splits=is_splits)
+
     if real.n < num_images:
         # The split ran out first; scoring uneven sides is legitimate but the
         # caller should know the count they asked for is not what they got.
@@ -566,4 +738,6 @@ def fid_for_checkpoint(
         sample_precision=drawn_at,
         kid=kid_score,
         precision_recall=pr_score,
+        sfid=sfid_score,
+        inception_score=is_score,
     )

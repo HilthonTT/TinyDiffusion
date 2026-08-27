@@ -151,6 +151,9 @@ for lr in 1e-4 2e-4 4e-4; do
 done
 ```
 
+That loop is what [`sweep`](#sweeping-a-grid) does with the bookkeeping already
+done, and the three `--set`s of directories are the bookkeeping.
+
 Values are read exactly as the config file would read them, so the types come
 out right without you saying which is which: `batch_size=64` is an integer,
 `lr=1e-4` a float, `amp=false` a boolean, `channel_mult=[1,2,2]` a list.
@@ -166,6 +169,78 @@ over `--epochs` and the other named flags:
 $ ./scripts/run.sh train --set batch_sizes=64
 error: unknown config field(s): batch_sizes
 ```
+
+### Sweeping a grid
+
+The shell loop above works, and the moment you forget one of the directory
+overrides every point writes over the last one's record of itself — which is
+the comparison the sweep was for. `sweep` is that loop with the directories
+handled:
+
+```bash
+./scripts/run.sh sweep --config configs/mnist.toml   --axis lr=1e-4,2e-4,4e-4 --axis sample_spacing=uniform,quadratic
+```
+
+Every combination is run — two axes of three and two values are six points, and
+six training runs — and each gets its own directory under `--out-root`, named
+after the values that distinguish it:
+
+```text
+runs/sweep/lr=0.0001_sample_spacing=uniform/
+runs/sweep/lr=0.0001_sample_spacing=quadratic/
+...
+```
+
+`log_dir`, `ckpt_dir` and `out_dir` are set per point, so metrics, checkpoints
+and sample grids all land inside it. Which means the whole root plots as one
+figure with a legend that reads itself:
+
+```bash
+./scripts/run.sh plot runs/sweep/* --out contents/sweep.png
+```
+
+At the end it prints what each point reached, ranked:
+
+```text
+point                                  epochs   best val/loss
+lr=0.0004_sample_spacing=quadratic         30         0.03812
+lr=0.0002_sample_spacing=quadratic         30         0.03904
+lr=0.0001_sample_spacing=uniform           30         0.04120
+```
+
+Values on an axis are read exactly as `--set` reads one, so the same types come
+out. `--set` still works alongside, and is where the settings the sweep holds
+*fixed* go — they are the same for every point, so they stay out of the
+directory names:
+
+```bash
+./scripts/run.sh sweep --config configs/mnist.toml   --axis lr=1e-4,4e-4 --set num_epochs=10 --set amp_dtype=bf16
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | the defaults | Config every point starts from |
+| `--axis` | required | `FIELD=A,B,C`, repeatable; every combination is run |
+| `--set` | — | Override a field for every point, repeatable |
+| `--out-root` | `runs/sweep` | Directory the points are created under |
+| `--dry-run` | off | Print the grid without training anything |
+| `--skip-existing` | off | Leave a point alone if its directory already holds metrics |
+| `--seed` | the config's | Random seed |
+| `--device` | the config's | `cuda`, `cpu`, … |
+| `--epochs` | the config's | Epochs per point |
+
+Three things worth knowing:
+
+- **`--dry-run` first.** It prints the grid and stops, which is the cheap way to
+  find out that a sweep is larger than it looked. Points multiply.
+- **One bad point does not stop the rest.** A combination that runs out of
+  memory is a fact about that point, and losing five good runs to it would be
+  the wrong trade; the failure is reported in the summary and the sweep exits
+  non-zero. `Ctrl+C` is different — that ends the sweep, not the point.
+- **`--skip-existing` resumes it.** A point whose directory already holds
+  `metrics.jsonl` is left alone and its existing numbers read, so an interrupted
+  sweep continues rather than restarting. Axes over `log_dir`, `ckpt_dir` or
+  `out_dir` are refused: those are the thing the sweep is setting.
 
 ### Stopping a run early
 

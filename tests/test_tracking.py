@@ -9,6 +9,7 @@ from tinydiffusion.utils.tracking import (
     JsonlBackend,
     LoggerBackend,
     RunLogger,
+    WandbBackend,
     null_logger,
     quartile_means,
     read_metrics,
@@ -321,3 +322,111 @@ def test_the_convenience_form_is_the_two_halves_composed():
     assert timestep_quartile_losses(losses, steps, 1000) == quartile_means(
         *timestep_quartile_totals(losses, steps, 1000)
     )
+
+
+class _FakeWandbRun:
+    """The parts of a wandb run this backend touches."""
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.logged = []
+        self.finished = False
+        self.fail = False
+
+    def log(self, metrics, step):
+        if self.fail:
+            raise RuntimeError("network down")
+        self.logged.append((dict(metrics), step))
+
+    def finish(self):
+        self.finished = True
+
+
+@pytest.fixture
+def fake_wandb(monkeypatch):
+    """Install a stand-in ``wandb`` module and hand back the run it creates.
+
+    The backend imports wandb lazily and inside its constructor, which is what
+    makes this substitutable at all: there is no import at module scope to have
+    already resolved by the time a test runs.
+    """
+    import sys
+    import types
+
+    module = types.ModuleType("wandb")
+    created = []
+
+    def init(**kwargs):
+        run = _FakeWandbRun(**kwargs)
+        created.append(run)
+        return run
+
+    module.init = init
+    monkeypatch.setitem(sys.modules, "wandb", module)
+    return created
+
+
+def test_wandb_sends_each_step_and_finishes_on_close(tmp_path, fake_wandb):
+    backend = WandbBackend(tmp_path / "run", project="proj", name="mnist", config={"lr": 1e-4})
+    backend.write({"train/loss": 0.5}, step=3)
+    backend.close()
+
+    (run,) = fake_wandb
+    assert run.init_kwargs["project"] == "proj"
+    assert run.init_kwargs["name"] == "mnist"
+    assert run.init_kwargs["config"] == {"lr": 1e-4}
+    assert run.logged == [({"train/loss": 0.5}, 3)]
+    assert run.finished
+
+
+def test_a_dropped_connection_warns_rather_than_ending_the_run(tmp_path, fake_wandb):
+    """metrics.jsonl already holds the numbers, so a remote sink must not raise.
+
+    Losing an epoch of training to a network blip would make this backend cost
+    more than it is worth.
+    """
+    backend = WandbBackend(tmp_path / "run", project="proj")
+    (run,) = fake_wandb
+    run.fail = True
+
+    with pytest.warns(UserWarning, match="wandb logging failed"):
+        backend.write({"train/loss": 0.5}, step=0)
+
+
+def test_for_run_wires_wandb_in_when_asked(tmp_path, fake_wandb):
+    logger = RunLogger.for_run(
+        tmp_path,
+        console=False,
+        jsonl=False,
+        wandb=True,
+        wandb_project="proj",
+        wandb_config={"seed": 0},
+    )
+    logger.set(train_loss=1.0)
+    logger.flush(step=0)
+    logger.close()
+
+    (run,) = fake_wandb
+    assert run.logged == [({"train_loss": 1.0}, 0)]
+    assert run.init_kwargs["config"] == {"seed": 0}
+
+
+def test_for_run_leaves_wandb_alone_by_default(tmp_path, fake_wandb):
+    RunLogger.for_run(tmp_path, console=False, jsonl=False).close()
+    assert fake_wandb == []
+
+
+def test_a_missing_wandb_names_the_extra_that_provides_it(tmp_path, monkeypatch):
+    """The failure a base install hits, reported as a missing optional dependency."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse(name, *args, **kwargs):
+        if name == "wandb":
+            raise ImportError("no module named wandb")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    with pytest.raises(RuntimeError, match="'tracking' extra"):
+        RunLogger.for_run(tmp_path, console=False, jsonl=False, wandb=True)

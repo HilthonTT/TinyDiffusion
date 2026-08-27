@@ -1,5 +1,25 @@
-"""Inception-v3 activations, the feature space FID is conventionally measured in."""
+"""Inception-v3 activations, the feature space FID is conventionally measured in.
 
+One network, three readings, and the metrics that want them differ.
+
+- The **pooled** 2048-d activation is what FID, KID and precision/recall are
+  measured in. It is spatially averaged, which is what makes it a summary of
+  *what* is in an image and blind to *where*.
+- The **spatial** reading keeps that geometry: the first few channels of an
+  intermediate feature map, unpooled. That is the space sFID is measured in,
+  and it is why sFID notices the spatial incoherence — a face with its features
+  rearranged — that a pooled score marks as fine.
+- The **class probabilities** are what the Inception Score reads. Alone among
+  the three it needs no real images at all, which is its appeal and also its
+  limitation: it measures whether samples look like confident ImageNet classes,
+  not whether they look like your data.
+
+All three come out of one forward pass, through :meth:`InceptionFeatures.analyse`.
+That matters because the alternative is running Inception once per metric over
+every image on both sides of a score.
+"""
+
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -11,11 +31,45 @@ from tinydiffusion.data.datasets import denormalize
 INCEPTION_DIM = 2048
 """Width of the final average-pooled Inception-v3 activation."""
 
+INCEPTION_CLASSES = 1000
+"""ImageNet classes the Inception classifier scores, which the IS reads."""
+
+SFID_CHANNELS = 7
+"""Intermediate channels sFID keeps.
+
+Nash et al. 2021 (https://arxiv.org/abs/2103.03841) take the first seven
+channels of the mixed 6/conv feature map rather than all 768, which is what
+keeps the feature width comparable to FID's 2048 and the covariance the same
+size of problem. Seven is theirs; there is nothing special about the number
+beyond the width it lands on.
+"""
+
+SFID_SPATIAL = 17
+"""Height and width of that feature map at Inception's own input resolution."""
+
+SFID_DIM = SFID_CHANNELS * SFID_SPATIAL * SFID_SPATIAL
+"""Width of the spatial feature vector: 7 x 17 x 17, or 2023."""
+
 INCEPTION_SIZE = 299
 """Resolution Inception-v3 was trained at."""
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+@dataclass(frozen=True, slots=True)
+class InceptionOutputs:
+    """Everything one Inception pass produces, for the metrics that read them.
+
+    Attributes:
+        pool: ``(B, 2048)`` pooled activations — FID, KID, precision/recall.
+        spatial: ``(B, 2023)`` flattened intermediate feature map — sFID.
+        probs: ``(B, 1000)`` softmax class probabilities — Inception Score.
+    """
+
+    pool: torch.Tensor
+    spatial: torch.Tensor
+    probs: torch.Tensor
 
 
 @runtime_checkable
@@ -74,7 +128,11 @@ class InceptionFeatures(nn.Module):
         # ImageNet normalisation; we normalise ourselves, so it stays off.
         net = inception_v3(weights=weights, transform_input=False, init_weights=False)
         # The 1000-way classifier is the part FID explicitly does not want: the
-        # score is over the 2048-d pooled features feeding it.
+        # score is over the 2048-d pooled features feeding it. Moved aside
+        # rather than thrown away, because the Inception Score is exactly the
+        # part that does want it, and re-loading the weights to get it back
+        # would be a second copy of a 100 MB network.
+        self.classifier = net.fc
         net.fc = nn.Identity()
         net.eval()
         self.net = net
@@ -133,3 +191,36 @@ class InceptionFeatures(nn.Module):
             ``(B, 2048)`` activations.
         """
         return self.net(self.preprocess(images.to(self.mean.device)))
+
+    @torch.no_grad()
+    def analyse(self, images: torch.Tensor) -> InceptionOutputs:
+        """Run one pass and return every reading the metrics take from it.
+
+        The spatial map is captured with a forward hook on the block that
+        produces it rather than by re-implementing Inception's forward, which
+        would be a copy of torchvision's to keep in step with torchvision's.
+
+        Args:
+            images: ``(B, C, H, W)`` in [-1, 1].
+
+        Returns:
+            The pooled features, the flattened spatial ones, and the class
+            probabilities, all for the same images in the same order.
+        """
+        captured: list[torch.Tensor] = []
+        handle = self.net.Mixed_6e.register_forward_hook(
+            lambda _module, _inputs, output: captured.append(output)
+        )
+        try:
+            pool = self.net(self.preprocess(images.to(self.mean.device)))
+        finally:
+            # Removed however the pass ended: a hook left behind would append
+            # to a dead list on the next call and hold the tensors alive.
+            handle.remove()
+
+        spatial = captured[0][:, :SFID_CHANNELS].flatten(1)
+        # softmax rather than log-softmax: the IS reads both p(y|x) and its
+        # mean over the batch, and the mean has to be taken in probability
+        # space.
+        probs = self.classifier(pool).softmax(dim=-1)
+        return InceptionOutputs(pool=pool, spatial=spatial, probs=probs)
