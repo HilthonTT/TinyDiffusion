@@ -32,6 +32,7 @@ decision without breaking (1).
 
 import datetime as dt
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,7 +140,9 @@ def from_environment() -> Distributed:
     )
 
 
-def setup(requested_device: str | None = None) -> tuple[Distributed, str]:
+def setup(
+    requested_device: str | None = None, *, say: Callable[[str], None] | None = print
+) -> tuple[Distributed, str]:
     """Join the process group, and say which device this rank owns.
 
     Called in a process the launcher did not mark as distributed, this
@@ -151,6 +154,10 @@ def setup(requested_device: str | None = None) -> tuple[Distributed, str]:
             automatically. Under a group it is honoured only for its *type*: a
             four-process run cannot put all four ranks on ``cuda:0``, so the
             index comes from ``local_rank`` instead.
+        say: where the CPU-fallback notice goes, on the single-process path
+            that can emit one. Passed through to :func:`resolve_device`; the
+            group path never reaches it, since a rank's device comes from its
+            ``local_rank`` rather than from the request.
 
     Returns:
         The group, and the device string this rank should train on.
@@ -163,7 +170,7 @@ def setup(requested_device: str | None = None) -> tuple[Distributed, str]:
         # The single-process answer, unchanged: whatever the config asked for,
         # with the CPU fallback resolve_device applies when CUDA was requested
         # and none is visible.
-        return group, resolve_device(requested_device)
+        return group, resolve_device(requested_device, say=say)
 
     # The backend follows the hardware, not the request: NCCL is the only one
     # that moves gradients between GPUs at a useful rate, and it does not touch

@@ -30,6 +30,7 @@ from tinydiffusion.data.datasets import (
     set_loader_epoch,
 )
 from tinydiffusion.training import distributed as dist_module
+from tinydiffusion.training.checkpoints import INTERRUPTED_CHECKPOINT
 from tinydiffusion.training.distributed import Distributed
 from tinydiffusion.utils.tracking import METRICS_FILENAME
 
@@ -286,6 +287,21 @@ def test_the_collectives_are_no_ops_without_a_group():
     assert dist_module.any_rank(False, solo) is False
     assert dist_module.broadcast_object({"stop": True}, solo) == {"stop": True}
     dist_module.barrier(solo)
+
+
+def test_setup_routes_the_device_notice_to_the_caller(monkeypatch, capsys):
+    # The training loop hands its own `say` down, so the CPU-fallback notice
+    # takes the same route as every line after it.
+    for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    said: list[str] = []
+
+    _, device = dist_module.setup("cuda", say=said.append)
+
+    assert device == "cpu"
+    assert any("falling back to CPU" in message for message in said)
+    assert capsys.readouterr().out == ""
 
 
 def test_setup_without_a_launcher_resolves_a_device_and_starts_nothing(monkeypatch):
@@ -596,6 +612,146 @@ def test_the_logged_throughput_covers_the_whole_group(group_run):
     images = epoch["time/images_per_second"] * epoch["time/epoch_seconds"]
     # 24 images, sharded two ways and dropped to whole batches of 4.
     assert images == pytest.approx(24, rel=0.2)
+
+
+# ---------------------------------------------------------------------------
+# Stopping a group from a watcher
+# ---------------------------------------------------------------------------
+
+# A watcher attaches to one process, so only rank 0's ever asks for the stop.
+# The run has to end on every rank anyway: a rank that left the loop on its own
+# would strand the others at the next gradient all-reduce, and a rank that stayed
+# would train against a group that is no longer there. Both symptoms are a hang
+# rather than an error, which is why these tests fail by timing out.
+OBSERVER_WORKER = textwrap.dedent(
+    """
+    import json, sys
+    from pathlib import Path
+
+    import torch
+
+    from tinydiffusion.data.datasets import DATASETS, DatasetSpec
+    from tinydiffusion.training.config import TrainConfig
+    from tinydiffusion.training.train import train
+
+    out = Path(sys.argv[1])
+    rank = int(sys.argv[2])
+
+    def builder(root, train, download, transform):
+        images = torch.arange(80, dtype=torch.float32).reshape(80, 1, 1, 1)
+        images = images.expand(80, 1, 16, 16).contiguous() / 80.0
+        return list(zip(images, range(80), strict=True))
+
+    DATASETS['synthetic'] = DatasetSpec(
+        name='synthetic', channels=1, native_size=16, num_classes=80,
+        hflip=False, builder=builder,
+    )
+
+    class Watcher:
+        # Rank 0 asks to stop once it has had a batch report; nobody else does.
+        def __init__(self, asks):
+            self.asks = asks
+            self.reports = 0
+
+        def on_plan(self, plan):
+            pass
+
+        def on_message(self, text):
+            pass
+
+        def on_batch(self, progress):
+            self.reports += 1
+
+        def on_epoch(self, step, metrics):
+            pass
+
+        def on_sample(self, path):
+            pass
+
+        def stop_requested(self):
+            return self.asks and self.reports >= 1
+
+    cfg = TrainConfig(
+        dataset='synthetic',
+        data_root=out / 'data',
+        image_size=16,
+        batch_size=4,
+        num_workers=0,
+        base_channels=8,
+        channel_mult=(1,),
+        num_res_blocks=1,
+        attn_resolutions=(),
+        num_classes=None,
+        num_timesteps=10,
+        num_epochs=2,
+        lr_warmup=0,
+        ema_warmup=0,
+        amp=False,
+        device='cpu',
+        val_every=0,
+        sample_every=0,
+        sample_steps=5,
+        out_dir=out / f'contents_{rank}',
+        # One directory per rank, so 'only rank 0 wrote it' is a fact about the
+        # filesystem rather than about which rank happened to write last.
+        ckpt_dir=out / f'checkpoints_{rank}',
+        log_dir=out / f'runs_{rank}',
+    )
+
+    train(cfg, observer=Watcher(asks=rank == 0))
+    (out / f'done_{rank}.json').write_text(json.dumps({'rank': rank}))
+    """
+)
+
+
+@pytest.fixture(scope="module")
+def observer_stop_run(tmp_path_factory, gloo_environment):
+    """A two-rank run that rank 0's watcher stops part way through epoch 0."""
+    out = tmp_path_factory.mktemp("observer-stop")
+    script = out / "worker.py"
+    script.write_text(OBSERVER_WORKER)
+
+    env = {**gloo_environment, "MASTER_PORT": str(_free_port())}
+    args = [[str(out), str(rank)] for rank in range(WORLD_SIZE)]
+    results = _launch(script, args, env, RUN_TIMEOUT)
+
+    for rank, (code, output) in enumerate(results):
+        if code is None:
+            pytest.fail(
+                f"rank {rank} did not finish within {RUN_TIMEOUT}s. A stop that is "
+                f"not aligned across the group leaves the others in the next "
+                f"all-reduce. Output: {output}"
+            )
+        if code != 0:
+            pytest.fail(f"rank {rank} exited {code}. Output: {output}")
+    return out
+
+
+@pytest.mark.slow
+def test_a_watcher_stops_every_rank_not_just_its_own(observer_stop_run):
+    """Only rank 0 is watched, so rank 1 leaves solely because the group agreed."""
+    assert (observer_stop_run / "done_0.json").exists()
+    assert (observer_stop_run / "done_1.json").exists()
+
+
+@pytest.mark.slow
+def test_only_rank_zero_writes_the_interrupted_checkpoint(observer_stop_run):
+    """Same weights on every rank, so the others would only race it to the file."""
+    assert (observer_stop_run / "checkpoints_0" / INTERRUPTED_CHECKPOINT).is_file()
+    assert not (observer_stop_run / "checkpoints_1" / INTERRUPTED_CHECKPOINT).exists()
+
+
+@pytest.mark.slow
+def test_the_stop_lands_before_the_run_is_over(observer_stop_run):
+    """A run that simply finished its two epochs would pass the two above."""
+    records = [
+        json.loads(line)
+        for line in (observer_stop_run / "runs_0" / METRICS_FILENAME).read_text().splitlines()
+        if line
+    ]
+
+    # The partial epoch is still flushed, and nothing after it ever ran.
+    assert [record["step"] for record in records] == [0]
 
 
 # ---------------------------------------------------------------------------

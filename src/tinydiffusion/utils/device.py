@@ -1,9 +1,13 @@
 """Device selection, with a CPU fallback when no GPU is visible."""
 
+from collections.abc import Callable
+
 import torch
 
 
-def resolve_device(requested: str | None = None, *, verbose: bool = True) -> str:
+def resolve_device(
+    requested: str | None = None, *, say: Callable[[str], None] | None = print
+) -> str:
     """Pick a device, degrading to the CPU rather than failing.
 
     A CUDA request on a machine without a visible GPU would otherwise die deep
@@ -13,7 +17,11 @@ def resolve_device(requested: str | None = None, *, verbose: bool = True) -> str
     Args:
         requested: device string such as ``"cuda"``, ``"cuda:1"`` or ``"cpu"``.
             None picks CUDA when it is available.
-        verbose: print a line when a CUDA request is downgraded.
+        say: where the downgrade notice goes, or None to keep it to itself. A
+            sink rather than a flag because the caller is not always something
+            with a terminal to print to: a run under
+            :mod:`tinydiffusion.tui` owns the screen, and a line written
+            straight to stdout is drawn into the middle of its widgets.
 
     Returns:
         A device string that is safe to allocate on.
@@ -32,8 +40,8 @@ def resolve_device(requested: str | None = None, *, verbose: bool = True) -> str
         raise ValueError(f"unknown device {requested!r}: {exc}") from exc
 
     if device.type == "cuda" and not torch.cuda.is_available():
-        if verbose:
-            print(f"no CUDA device visible, falling back to CPU (requested {requested!r})")
+        if say is not None:
+            say(f"no CUDA device visible, falling back to CPU (requested {requested!r})")
         return "cpu"
     return requested
 

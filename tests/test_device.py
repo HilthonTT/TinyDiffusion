@@ -27,7 +27,7 @@ def test_cuda_falls_back_when_unavailable(monkeypatch, capsys):
 
 def test_fallback_can_be_quiet(monkeypatch, capsys):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert resolve_device("cuda", verbose=False) == "cpu"
+    assert resolve_device("cuda", say=None) == "cpu"
     assert capsys.readouterr().out == ""
 
 

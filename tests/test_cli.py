@@ -187,7 +187,7 @@ def test_fid_runs_and_prints_a_report(capsys, monkeypatch, tmp_path):
 
 def test_main_reports_a_missing_fid_checkpoint(capsys, tmp_path):
     assert main(["fid", "--checkpoint", str(tmp_path / "nope.pt"), "--num-images", "4"]) == 1
-    assert "error:" in capsys.readouterr().out
+    assert "error:" in capsys.readouterr().err
 
 
 def test_serve_defaults():
@@ -250,7 +250,7 @@ def test_serve_builds_a_config_and_runs(capsys, monkeypatch, tmp_path):
 
 def test_serve_reports_a_missing_checkpoint_before_binding(capsys, tmp_path):
     assert main(["serve", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
-    assert "no such checkpoint" in capsys.readouterr().out
+    assert "no such checkpoint" in capsys.readouterr().err
 
 
 @pytest.fixture
@@ -312,17 +312,17 @@ def test_a_resume_without_provenance_asks_for_a_config(capsys, tmp_path):
     torch.save({"epoch": 0}, path)
 
     assert main(["train", "--resume", str(path)]) == 1
-    assert "--config" in capsys.readouterr().out
+    assert "--config" in capsys.readouterr().err
 
 
 def test_main_reports_a_missing_config(capsys, tmp_path):
     assert main(["train", "--config", str(tmp_path / "nope.toml")]) == 1
-    assert "error:" in capsys.readouterr().out
+    assert "error:" in capsys.readouterr().err
 
 
 def test_main_reports_a_missing_checkpoint(capsys, tmp_path):
     assert main(["sample", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
-    assert "error:" in capsys.readouterr().out
+    assert "error:" in capsys.readouterr().err
 
 
 # --- --set config overrides -------------------------------------------------
@@ -417,14 +417,14 @@ def test_set_leaves_the_rest_of_the_config_alone(trained):
 
 def test_set_reports_an_unknown_field(capsys, trained):
     assert main(["train", "--set", "batch_sizes=64"]) == 1
-    out = capsys.readouterr().out
-    assert "unknown config field" in out
-    assert "batch_sizes" in out
+    err = capsys.readouterr().err
+    assert "unknown config field" in err
+    assert "batch_sizes" in err
 
 
 def test_set_still_validates_the_result(capsys, trained):
     assert main(["train", "--set", "batch_size=0"]) == 1
-    assert "batch_size must be positive" in capsys.readouterr().out
+    assert "batch_size must be positive" in capsys.readouterr().err
 
 
 def test_no_set_leaves_the_config_untouched(tmp_path, trained):
@@ -550,7 +550,7 @@ def test_main_reports_a_run_with_no_metrics(pyplot, capsys, tmp_path):
     # Takes `pyplot` because plot_runs checks for matplotlib before it looks at
     # the run: without the extra this would pass on the wrong error.
     assert main(["plot", str(tmp_path / "nowhere"), "--out", str(tmp_path / "f.png")]) == 1
-    assert "error:" in capsys.readouterr().out
+    assert "error:" in capsys.readouterr().err
 
 
 def test_main_reports_a_missing_plots_extra(capsys, tmp_path, monkeypatch):
@@ -570,7 +570,7 @@ def test_main_reports_a_missing_plots_extra(capsys, tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", refuse_matplotlib)
     assert main(["plot", str(tmp_path), "--out", str(tmp_path / "f.png")]) == 1
-    assert "plots" in capsys.readouterr().out
+    assert "plots" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["sample", "fid", "interpolate", "serve"])
@@ -672,7 +672,7 @@ def test_main_reports_a_missing_tui_extra(capsys, monkeypatch):
     monkeypatch.delitem(sys.modules, "tinydiffusion.tui.app", raising=False)
     monkeypatch.setattr(builtins, "__import__", refuse_textual)
     assert main(["tui"]) == 1
-    assert "tui" in capsys.readouterr().out
+    assert "tui" in capsys.readouterr().err
 
 
 def test_the_dashboard_silences_the_console_backend(monkeypatch):
@@ -752,7 +752,7 @@ def test_interpolate_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_pa
 
 def test_main_reports_a_missing_interpolate_checkpoint(capsys, tmp_path):
     assert main(["interpolate", "--checkpoint", str(tmp_path / "nope.pt")]) == 1
-    assert "error:" in capsys.readouterr().out
+    assert "error:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["sample", "fid", "interpolate"])

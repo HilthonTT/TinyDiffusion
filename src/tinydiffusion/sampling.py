@@ -39,12 +39,17 @@ def load_for_sampling(
         trained.
 
     Raises:
-        KeyError: if the checkpoint predates config provenance.
+        ValueError: if the checkpoint predates config provenance. A ValueError
+            rather than a KeyError, matching
+            :func:`~tinydiffusion.training.checkpoints.config_from_checkpoint`,
+            which reports the same missing key on the training side: it is a
+            statement about the file the user named, and the CLI turns those
+            into a message rather than a traceback.
     """
     resolved = resolve_device(device)
     ckpt = read_checkpoint(checkpoint, device=resolved)
     if "config" not in ckpt:
-        raise KeyError(f"{checkpoint} stores no config; cannot infer the architecture")
+        raise ValueError(f"{checkpoint} stores no config; cannot infer the architecture")
 
     cfg = TrainConfig.from_mapping({**ckpt["config"], "device": resolved})
     # Gradient checkpointing is a backward-pass trade, and nothing that loads a

@@ -1322,21 +1322,38 @@ def _run_epoch(
             # asked again: the prompt below has nobody to answer it when a
             # display owns the terminal. Stopping and saving is what an
             # unattended Ctrl+C already resolves to.
-            if observer is not None and observer.stop_requested():
-                _save_and_report(
-                    cfg,
-                    epoch=epoch - 1,
-                    diffusion=run.diffusion,
-                    ema=run.ema,
-                    optim=run.optim,
-                    scaler=run.scaler,
-                    best_val=best_val,
-                    sched=run.sched,
-                    model_state=_model_state(run.diffusion, run.master_params),
-                    say=run.say,
-                )
-                cancelled = True
-                break
+            if observer is not None:
+                stopping = observer.stop_requested()
+                if run.group.enabled:
+                    # Aligned across the group exactly as the signal below is,
+                    # and for the same reason: a watcher decides per process, so
+                    # a rank that left the loop on its own would strand the
+                    # others at the next gradient all-reduce. Asked at a batch
+                    # index every rank agrees on, because the collective has to
+                    # be reached by all of them or by none.
+                    stopping = (
+                        any_rank(stopping, run.group, device=cfg.device)
+                        if batch % DRAIN_EVERY == 0
+                        else False
+                    )
+                if stopping:
+                    # Rank 0 alone writes it: every rank holds the same weights,
+                    # so the others would only race it to the same path.
+                    if run.group.is_main:
+                        _save_and_report(
+                            cfg,
+                            epoch=epoch - 1,
+                            diffusion=run.diffusion,
+                            ema=run.ema,
+                            optim=run.optim,
+                            scaler=run.scaler,
+                            best_val=best_val,
+                            sched=run.sched,
+                            model_state=_model_state(run.diffusion, run.master_params),
+                            say=run.say,
+                        )
+                    cancelled = True
+                    break
 
             # Under a group the flag is not this rank's to act on. The launcher
             # delivers the signal to each process independently, so rank 0 can
@@ -1609,20 +1626,25 @@ def train(
             model than `cfg` describes.
     """
     cfg = cfg or TrainConfig()
+    # Every message below goes through this rather than to stdout directly, so
+    # a watcher can take them without the loop caring where they end up — and
+    # so the non-main ranks of a distributed run say nothing at all, rather
+    # than printing the same plan line once per GPU.
+    #
+    # Settled in two steps because the group decides the second half of it and
+    # the setup that builds the group has a message of its own: a CUDA request
+    # on a machine with no visible GPU falls back to the CPU and says so.
+    # Handing it `say` is what keeps that line off stdout — and so out of the
+    # middle of a display's widgets — like every line after it.
+    say: Callable[[str], None] = observer.on_message if observer is not None else print
     # Joins the process group when a launcher started one, and is a no-op that
     # resolves the device exactly as before when it did not. Everything below
     # reads `group` rather than asking whether it is distributed: on a single
     # process it is rank 0 of 1, every `is_main` guard is true, and every
     # collective returns its argument untouched.
-    group, device = distributed_setup(cfg.device)
-    # Every message below goes through this rather than to stdout directly, so
-    # a watcher can take them without the loop caring where they end up — and
-    # so the non-main ranks of a distributed run say nothing at all, rather
-    # than printing the same plan line once per GPU.
-    if observer is not None:
-        say: Callable[[str], None] = observer.on_message
-    else:
-        say = print if group.is_main else _silent
+    group, device = distributed_setup(cfg.device, say=say)
+    if observer is None and not group.is_main:
+        say = _silent
     cfg = replace(cfg, device=device)
     spec = cfg.dataset_spec()
     seed_everything(cfg.seed, deterministic=cfg.deterministic)

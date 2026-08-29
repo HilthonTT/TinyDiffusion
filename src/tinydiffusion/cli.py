@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import sys
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -915,13 +916,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     handler = handlers[args.command]
     try:
         return handler(args)
-    except (OSError, ValueError, KeyError, ImportError) as exc:
+    except (OSError, ValueError, ImportError) as exc:
         # Bad paths, bad configs and a missing optional extra are user errors,
-        # not something to hand back as a traceback.
-        print(f"error: {exc}")
+        # not something to hand back as a traceback. KeyError is deliberately
+        # not in that list: nothing raises one to describe a request — the
+        # registries turn theirs into ValueError, and so does the checkpoint
+        # that stores no config — so catching it here could only dress a
+        # genuine bug up as a user error, and report it as a bare key name.
+        #
+        # On stderr, so that redirecting a command's output to a file does not
+        # swallow the reason it produced none.
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("interrupted")
+        print("interrupted", file=sys.stderr)
         return 130
 
 

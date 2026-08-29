@@ -251,3 +251,14 @@ def test_a_loaded_model_never_gradient_checkpoints(make_checkpoint):
     assert not any(block.use_checkpoint for block in blocks)
     # The config still reports what the run was trained with.
     assert cfg.grad_checkpoint is True
+
+
+def test_a_checkpoint_without_a_config_is_a_user_error(tmp_path):
+    # A ValueError rather than a KeyError, so the CLI reports it as a message
+    # rather than letting it through as a traceback -- and so the message reads
+    # as a sentence instead of a quoted key.
+    path = tmp_path / "old.pt"
+    torch.save({"epoch": 0}, path)
+
+    with pytest.raises(ValueError, match="stores no config"):
+        load_for_sampling(path, "cpu")

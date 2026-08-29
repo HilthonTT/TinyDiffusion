@@ -120,6 +120,33 @@ def test_without_an_observer_the_run_still_prints(tiny_cfg, fake_loader, capsys)
     assert "parameters" in capsys.readouterr().out
 
 
+def test_the_device_fallback_notice_is_delivered_rather_than_printed(
+    tiny_cfg, fake_loader, capsys, monkeypatch
+):
+    # The notice comes from `resolve_device`, which the group setup calls before
+    # the loop has said anything -- so it is the one line that could still reach
+    # stdout behind a display's back, and be drawn into the middle of it.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    cfg = dataclasses.replace(tiny_cfg, device="cuda")
+    observer = Recorder()
+
+    train_module.train(cfg, observer=observer)
+
+    assert capsys.readouterr().out == ""
+    assert any("falling back to CPU" in message for message in observer.messages)
+
+
+def test_without_an_observer_the_device_notice_is_still_printed(
+    tiny_cfg, fake_loader, capsys, monkeypatch
+):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    cfg = dataclasses.replace(tiny_cfg, device="cuda")
+
+    train_module.train(cfg)
+
+    assert "falling back to CPU" in capsys.readouterr().out
+
+
 def test_batch_progress_advances_through_the_epoch(tiny_cfg, fake_loader):
     observer = Recorder()
     train_module.train(tiny_cfg, observer=observer)
