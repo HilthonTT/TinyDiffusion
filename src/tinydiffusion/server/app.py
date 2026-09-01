@@ -13,6 +13,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+import anyio
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Path as PathParam
 from fastapi.concurrency import run_in_threadpool
@@ -91,6 +92,18 @@ def create_app(config: ServerConfig) -> FastAPI:
         yield
         app.state.service = None
 
+    # Admission control for /api/sample. The service renders one request at a
+    # time whatever arrives, so what this bounds is the queue behind it: a slot
+    # is held for as long as a caller is waiting *or* being served, and a
+    # caller who cannot get one is told so immediately.
+    #
+    # Two things go wrong without it. The wait is unbounded — twenty callers
+    # for a two-minute render means the last of them waits forty minutes on a
+    # connection nobody is going to keep open — and each one of those waits
+    # holds a thread from the pool that every other blocking route shares, so a
+    # burst of sampling requests takes the rest of the API down with it.
+    inflight = anyio.Semaphore(config.max_inflight)
+
     app = FastAPI(
         title="TinyDiffusion",
         version=__version__,
@@ -138,13 +151,15 @@ def create_app(config: ServerConfig) -> FastAPI:
         """Generate a grid of images.
 
         Raises:
-            HTTPException: 400 if the request does not fit the checkpoint.
+            HTTPException: 400 if the request does not fit the checkpoint, or
+                503 if too many callers are already waiting to be served.
         """
         try:
-            # Sampling is a long blocking CUDA/CPU call; on the event loop it
-            # would stall every other request, including /api/status.
-            path = await run_in_threadpool(
-                service.sample,
+            # Checked here rather than inside the threadpool call below: it is
+            # microseconds of arithmetic, and doing it first means a request
+            # that was never going to work costs neither a thread nor one of
+            # the slots a caller who *could* be served is waiting for.
+            plan = service.plan(
                 num_images=request.num_images,
                 labels=request.labels,
                 guidance=request.guidance,
@@ -157,6 +172,26 @@ def create_app(config: ServerConfig) -> FastAPI:
             # Every ValueError out of the service is a statement about the
             # request, not about the server.
             raise HTTPException(400, str(exc)) from exc
+
+        try:
+            inflight.acquire_nowait()
+        except anyio.WouldBlock:
+            # 503 with Retry-After rather than a queue: the caller is the one
+            # who knows whether waiting is worth it, and telling them now is
+            # more useful than a connection that goes quiet for an hour.
+            raise HTTPException(
+                503,
+                "the server is already sampling as many requests as it accepts at once; "
+                "retry shortly",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        try:
+            # Sampling is a long blocking CUDA/CPU call; on the event loop it
+            # would stall every other request, including /api/status.
+            path = await run_in_threadpool(service.render, plan)
+        finally:
+            inflight.release()
 
         return SampleResponse(
             url=f"/images/{path.name}", filename=path.name, num_images=request.num_images

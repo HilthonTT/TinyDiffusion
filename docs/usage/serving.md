@@ -58,12 +58,21 @@ A request that does not fit the checkpoint comes back as a 400 with the reason
 (`labels` against an unconditional model, a class that does not exist, more
 images than the ceiling); a malformed one is a 422 from the schema.
 
+The server draws one request at a time — they share one network on one device —
+so `--max-inflight` bounds how many callers may be waiting on that. Past the
+limit the answer is a 503 with a `Retry-After` header rather than a place in the
+queue: the wait is otherwise unbounded, and a caller who knows the server is
+busy can decide what to do about it. A request that does not fit the checkpoint
+is still answered with its 400 while the server is busy, since checking one
+costs nothing.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--checkpoint` | required | Checkpoint to serve |
 | `--host` | `127.0.0.1` | Interface to bind |
 | `--port` | 8000 | Port to bind |
 | `--max-images` | 64 | Ceiling on `num_images` per request |
+| `--max-inflight` | 4 | Sampling requests accepted at once; the rest get a 503 |
 | `--image-dir` | a temp dir | Where PNGs are written |
 | `--image-ttl` | 3600 | Seconds a PNG is kept before it is swept. 0 keeps them forever |
 | `--keep-images` | 256 | PNGs retained regardless of age, newest first. 0 for no cap |

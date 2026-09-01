@@ -1196,3 +1196,60 @@ def test_a_partial_final_run_still_reaches_the_log(tmp_path, many_batches, monke
     )
     train_module.train(cfg)
     assert seen == [8, 8, 4]
+
+
+# --- leaving the process group ----------------------------------------------
+
+
+@pytest.fixture
+def teardown_calls(monkeypatch):
+    """Record the order `train` waits at the barrier and leaves the group in."""
+    calls: list[str] = []
+    monkeypatch.setattr(train_module, "barrier", lambda group: calls.append("barrier"))
+    monkeypatch.setattr(train_module, "distributed_shutdown", lambda: calls.append("shutdown"))
+    return calls
+
+
+def test_a_clean_run_waits_at_the_barrier_then_leaves_the_group(
+    tiny_cfg, fake_loader, teardown_calls
+):
+    train_module.train(tiny_cfg)
+
+    assert teardown_calls == ["barrier", "shutdown"]
+
+
+def test_the_group_is_left_even_when_the_loop_raises(
+    tiny_cfg, fake_loader, teardown_calls, monkeypatch
+):
+    """The failure that reads as a hang: an abandoned communicator.
+
+    A rank that raises without leaving the group holds its GPU memory until the
+    process is reaped, and every other rank sits in a collective this one will
+    now never reach.
+    """
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(train_module, "_run_epoch", explode)
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        train_module.train(tiny_cfg)
+
+    assert teardown_calls == ["shutdown"]
+
+
+def test_a_failing_rank_does_not_wait_at_the_barrier(
+    tiny_cfg, fake_loader, teardown_calls, monkeypatch
+):
+    """Waiting for a rank that raised is the hang the teardown exists to avoid."""
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(train_module, "_run_epoch", explode)
+
+    with pytest.raises(RuntimeError):
+        train_module.train(tiny_cfg)
+
+    assert "barrier" not in teardown_calls

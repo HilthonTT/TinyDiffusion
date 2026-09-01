@@ -29,6 +29,7 @@ from tinydiffusion.server.config import (
     DEFAULT_IMAGE_TTL,
     DEFAULT_KEEP_IMAGES,
     DEFAULT_MAX_IMAGES,
+    DEFAULT_MAX_INFLIGHT,
     DEFAULT_PORT,
     ServerConfig,
 )
@@ -403,6 +404,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_IMAGES,
         help="Largest num_images a single request may ask for.",
+    )
+    serve.add_argument(
+        "--max-inflight",
+        type=int,
+        default=DEFAULT_MAX_INFLIGHT,
+        metavar="N",
+        help="Sampling requests accepted at once, being drawn or waiting. "
+        "Further ones are refused with a 503 rather than queued.",
     )
     serve.add_argument(
         "--image-dir", type=Path, help="Where to write PNGs. Defaults to a temp dir."
@@ -848,6 +857,7 @@ def _serve(args: argparse.Namespace) -> int:
         device=args.device,
         use_ema=args.use_ema,
         max_images=args.max_images,
+        max_inflight=args.max_inflight,
         image_dir=args.image_dir,
         cors_origins=tuple(args.cors_origins or ()),
         image_ttl=args.image_ttl,

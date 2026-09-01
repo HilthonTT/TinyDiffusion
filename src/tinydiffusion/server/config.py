@@ -13,6 +13,14 @@ DEFAULT_PORT = 8000
 DEFAULT_MAX_IMAGES = 64
 """Ceiling on ``num_images`` per request, so one caller cannot pin the GPU."""
 
+DEFAULT_MAX_INFLIGHT = 4
+"""Sampling requests accepted at once; the rest are refused with a 503.
+
+One more than a handful, because the requests are serialised on the device
+anyway: the extra slots are callers waiting their turn, and a queue a few deep
+is what keeps the GPU busy between them.
+"""
+
 DEFAULT_IMAGE_TTL = 3600.0
 """Seconds a rendered PNG is kept. Long enough for a caller to fetch it."""
 
@@ -40,6 +48,14 @@ class ServerConfig:
             speed/accuracy trade is the operator's to make, and a per-request
             choice would make two identical requests return different images.
         max_images: largest ``num_images`` a single request may ask for.
+        max_inflight: sampling requests accepted at once, counting the one
+            being drawn and the ones waiting behind it. Rendering is minutes of
+            blocking work on a device that takes one request at a time, so
+            without a bound a burst of callers simply queues: every one of them
+            occupies a server thread and waits, and the caller who arrives last
+            waits for all of the others. Refusing past this point turns that
+            into an answer — a 503 a client can retry or report, rather than a
+            connection that eventually times out.
         image_dir: where rendered PNGs are written, or None for a directory
             under the system temp folder.
         cors_origins: origins allowed to call the API from a browser. Empty
@@ -60,6 +76,7 @@ class ServerConfig:
     use_ema: bool = True
     precision: str = DEFAULT_PRECISION
     max_images: int = DEFAULT_MAX_IMAGES
+    max_inflight: int = DEFAULT_MAX_INFLIGHT
     image_dir: Path | None = None
     cors_origins: tuple[str, ...] = field(default_factory=tuple)
     image_ttl: float = DEFAULT_IMAGE_TTL
@@ -69,8 +86,8 @@ class ServerConfig:
         """Reject settings that would only fail once a request arrives.
 
         Raises:
-            ValueError: if the port, the image ceiling, either retention
-                setting, or the precision is out of range.
+            ValueError: if the port, either request ceiling, either
+                retention setting, or the precision is out of range.
         """
         if self.precision not in PRECISIONS:
             raise ValueError(
@@ -80,6 +97,8 @@ class ServerConfig:
             raise ValueError(f"port must lie in [1, 65535], got {self.port}")
         if self.max_images < 1:
             raise ValueError(f"max_images must be positive, got {self.max_images}")
+        if self.max_inflight < 1:
+            raise ValueError(f"max_inflight must be positive, got {self.max_inflight}")
         if self.image_ttl < 0:
             raise ValueError(f"image_ttl must not be negative, got {self.image_ttl}")
         if self.keep_images < 0:

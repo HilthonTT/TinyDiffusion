@@ -1807,69 +1807,82 @@ def train(
         say=say,
     )
 
-    with logger, interrupt_guard() as interrupts:
-        for epoch in range(start_epoch, cfg.num_epochs):
-            loader_rng.manual_seed(epoch_seed(cfg.seed, epoch))
-            # The sharded loader's own version of the line above: its sampler
-            # shuffles from (seed, epoch) and has to be told the epoch changed,
-            # or every rank re-draws the shard it saw last time. A no-op when
-            # the loader is not sharded.
-            set_loader_epoch(loader, epoch)
+    # Everything from here is inside the group's lifetime, so the teardown
+    # below has to run whether the loop finishes or raises.
+    try:
+        with logger, interrupt_guard() as interrupts:
+            for epoch in range(start_epoch, cfg.num_epochs):
+                loader_rng.manual_seed(epoch_seed(cfg.seed, epoch))
+                # The sharded loader's own version of the line above: its sampler
+                # shuffles from (seed, epoch) and has to be told the epoch changed,
+                # or every rank re-draws the shard it saw last time. A no-op when
+                # the loader is not sharded.
+                set_loader_epoch(loader, epoch)
 
-            outcome = _run_epoch(
-                run,
-                loader,
-                logger,
-                epoch=epoch,
-                interrupts=interrupts,
-                observer=observer,
-                best_val=best_val,
-            )
-            _log_epoch(
-                run,
-                logger,
-                quartile_sums=outcome.quartile_sums,
-                quartile_counts=outcome.quartile_counts,
-                elapsed=outcome.elapsed,
-                images=outcome.images,
-            )
-            new_best: float | None = None
-            if held_out and not outcome.cancelled and (epoch + 1) % cfg.val_every == 0:
-                best_val, new_best = _score_epoch(run, logger, held_out, best_val=best_val)
+                outcome = _run_epoch(
+                    run,
+                    loader,
+                    logger,
+                    epoch=epoch,
+                    interrupts=interrupts,
+                    observer=observer,
+                    best_val=best_val,
+                )
+                _log_epoch(
+                    run,
+                    logger,
+                    quartile_sums=outcome.quartile_sums,
+                    quartile_counts=outcome.quartile_counts,
+                    elapsed=outcome.elapsed,
+                    images=outcome.images,
+                )
+                new_best: float | None = None
+                if held_out and not outcome.cancelled and (epoch + 1) % cfg.val_every == 0:
+                    best_val, new_best = _score_epoch(run, logger, held_out, best_val=best_val)
 
-            # Flushed even for the partial epoch a Ctrl+C ends on: those batches
-            # were still work, and the record explains where the run stopped.
-            logger.flush(step=epoch)
+                # Flushed even for the partial epoch a Ctrl+C ends on: those batches
+                # were still work, and the record explains where the run stopped.
+                logger.flush(step=epoch)
 
-            if outcome.cancelled:
-                break
+                if outcome.cancelled:
+                    break
 
-            _finish_epoch(
-                run,
-                epoch=epoch,
-                best_val=best_val,
-                new_best=new_best,
-                reference=reference,
-                reference_labels=reference_labels,
-                sample_noise=sample_noise,
-                observer=observer,
-            )
+                _finish_epoch(
+                    run,
+                    epoch=epoch,
+                    best_val=best_val,
+                    new_best=new_best,
+                    reference=reference,
+                    reference_labels=reference_labels,
+                    sample_noise=sample_noise,
+                    observer=observer,
+                )
 
-    if master_params is not None:
-        # Back to an ordinary float32 network before it leaves this function.
-        # Nothing downstream — the samplers, FID, the server — knows about the
-        # master copy, and the EMA weights loaded in below are float32 anyway.
-        cast(UNet, diffusion.net).convert_to_fp32()
+        if master_params is not None:
+            # Back to an ordinary float32 network before it leaves this function.
+            # Nothing downstream — the samplers, FID, the server — knows about the
+            # master copy, and the EMA weights loaded in below are float32 anyway.
+            cast(UNet, diffusion.net).convert_to_fp32()
 
-    # Ship the EMA weights: they are what the sample grids were drawn from.
-    diffusion.net.load_state_dict(ema.module.state_dict())
-    # The barrier is what makes the teardown orderly: rank 0 is still writing
-    # the final checkpoint and sample grid while the others are already here,
-    # and tearing a NCCL communicator down underneath a rank that has not
-    # reached it is how a clean run ends in a warning about an aborted
-    # communicator.
-    barrier(group)
-    distributed_shutdown()
+        # Ship the EMA weights: they are what the sample grids were drawn from.
+        diffusion.net.load_state_dict(ema.module.state_dict())
+        # The barrier is what makes the teardown orderly: rank 0 is still writing
+        # the final checkpoint and sample grid while the others are already here,
+        # and tearing a NCCL communicator down underneath a rank that has not
+        # reached it is how a clean run ends in a warning about an aborted
+        # communicator.
+        #
+        # On the clean path only, and deliberately not in the `finally` below: a
+        # rank that raised is a rank that will never arrive, so waiting for it
+        # here is the hang this teardown exists to prevent.
+        barrier(group)
+    finally:
+        # Run even when the loop raises. An abandoned communicator holds its
+        # GPU memory until the process is reaped, and the other ranks — parked
+        # in a collective this one will now never reach — only learn the run is
+        # over when this process leaves the group. Without it, a crash on one
+        # rank reads as a hang on every other.
+        distributed_shutdown()
     return diffusion
 
 

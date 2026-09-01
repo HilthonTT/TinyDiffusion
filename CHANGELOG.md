@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `serve --max-inflight`, bounding how many sampling requests the server
+  accepts at once. Rendering is serialised on one device, so anything past the
+  limit is refused with a 503 and a `Retry-After` header rather than queued:
+  the wait behind an unbounded queue grows without limit — twenty callers for a
+  two-minute render leaves the last of them waiting forty minutes — and every
+  one of those waits holds a thread from the pool that the rest of the API
+  shares, so a burst of `/api/sample` calls used to take `/api/status` down
+  with it. `/api/status` reports the limit, and defaults to 4.
+
 - Two more samplers, `heun` and `plms`, joining `ddim` and `dpmpp` in the
   registry and so available to `--sampler`, the `sampler` config field, the
   per-epoch grids, `fid`, `interpolate` and the server alike. Both are
@@ -523,6 +532,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the shape of a run, a module map, the forward process, the backbone, the
   parameterisation choices, conditioning, sampling, EMA, DDP, and the
   metrics, plus an order to read the source in.
+
+### Fixed
+
+- A training run that raises now leaves its process group before it unwinds.
+  The `barrier` and `destroy_process_group` at the end of `train` sat on the
+  success path, so any exception in the loop — a CUDA OOM being the likely one
+  — skipped both. That leaks exactly what the teardown exists to prevent: an
+  abandoned NCCL communicator holds its GPU memory until the process is reaped,
+  and the other ranks stay parked in a collective the failed rank will now
+  never reach, so a crash on one GPU presents as a hang on every other. The
+  teardown is a `finally` now. The barrier deliberately is not — waiting for a
+  rank that raised is the hang being fixed.
+
+- A request the server cannot serve is answered before it is dispatched.
+  Validation used to run inside the threadpool call, so a request naming a
+  class that does not exist still cost a worker thread to reject; it is checked
+  on the event loop now, which is also what lets a 400 come back while the
+  server is busy rather than a 503.
 
 ### Changed
 

@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -20,6 +21,40 @@ from tinydiffusion.utils.precision import apply_precision, resolve_precision
 
 _FILENAME = re.compile(r"\A[0-9a-f]{32}\.png\Z")
 """What :meth:`SamplerService.image_path` will accept. See its docstring."""
+
+
+@dataclass(frozen=True, slots=True)
+class SamplePlan:
+    """A request that has been checked against the checkpoint, ready to render.
+
+    Splitting the checking from the rendering is what lets the server answer a
+    bad request without spending anything on it. :meth:`SamplerService.plan`
+    is pure arithmetic over the checkpoint's own numbers — microseconds, safe
+    to run on the event loop — while :meth:`SamplerService.render` is the
+    minutes-long GPU call that has to be dispatched to a thread and admitted
+    through the server's concurrency limit. A request that was never going to
+    work is therefore rejected before it occupies either.
+
+    Attributes:
+        num_images: how many images to generate.
+        labels: the classes the caller asked for, kept as given because the
+            grid layout depends on whether they were named or defaulted.
+        y: one label per image, or None for an unconditional checkpoint.
+        num_steps: denoising steps, with the checkpoint's default resolved in.
+        eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
+        scale: classifier-free guidance scale, resolved.
+        rescale: guidance rescale factor, resolved.
+        generator: the request's own RNG, or None to draw from the global one.
+    """
+
+    num_images: int
+    labels: tuple[int, ...] | None
+    y: torch.Tensor | None
+    num_steps: int
+    eta: float
+    scale: float
+    rescale: float
+    generator: torch.Generator | None
 
 
 class SamplerService:
@@ -119,7 +154,11 @@ class SamplerService:
         eta: float = 0.0,
         seed: int | None = None,
     ) -> Path:
-        """Generate a grid of images and write it as a PNG.
+        """Check a request and render it, in one call.
+
+        What a caller that is doing nothing else wants. The server splits the
+        two halves apart — see :meth:`plan` — because it has to answer a bad
+        request without dispatching it to a thread.
 
         Args:
             num_images: how many images to generate.
@@ -139,6 +178,55 @@ class SamplerService:
 
         Returns:
             The path of the written PNG.
+
+        Raises:
+            ValueError: if the request does not fit the checkpoint. See
+                :meth:`plan`.
+        """
+        return self.render(
+            self.plan(
+                num_images=num_images,
+                labels=labels,
+                guidance=guidance,
+                guidance_rescale=guidance_rescale,
+                steps=steps,
+                eta=eta,
+                seed=seed,
+            )
+        )
+
+    def plan(
+        self,
+        *,
+        num_images: int,
+        labels: Sequence[int] | None = None,
+        guidance: float | None = None,
+        guidance_rescale: float | None = None,
+        steps: int | None = None,
+        eta: float = 0.0,
+        seed: int | None = None,
+    ) -> SamplePlan:
+        """Check a request against the checkpoint and resolve its defaults.
+
+        Cheap enough to run anywhere: it compares numbers, and the largest
+        thing it allocates is one label per image. Nothing here touches the
+        network. See :meth:`render` for the half that does.
+
+        Args:
+            num_images: how many images to generate.
+            labels: classes to generate, cycled over the grid. Conditional
+                checkpoints only.
+            guidance: classifier-free guidance scale, or None for the
+                checkpoint's.
+            guidance_rescale: guidance rescale factor in [0, 1], or None for
+                the checkpoint's.
+            steps: denoising steps, or None for the checkpoint's.
+            eta: 0.0 is deterministic DDIM; 1.0 reproduces ancestral DDPM.
+            seed: seed for this request's own generator, or None to draw from
+                the global RNG.
+
+        Returns:
+            The checked request.
 
         Raises:
             ValueError: if the request does not fit the checkpoint — too many
@@ -165,8 +253,6 @@ class SamplerService:
             num_classes=self._cfg.num_classes,
             device=self._cfg.device,
         )
-        scale = self._cfg.guidance if guidance is None else guidance
-        rescale = self._cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
 
         # A request-local generator rather than seed_everything: reseeding the
         # process from a request would make one caller's `seed` reach into
@@ -176,22 +262,48 @@ class SamplerService:
             torch.Generator(device=self._cfg.device).manual_seed(seed) if seed is not None else None
         )
 
+        return SamplePlan(
+            num_images=num_images,
+            labels=None if labels is None else tuple(labels),
+            y=y,
+            num_steps=num_steps,
+            eta=eta,
+            scale=self._cfg.guidance if guidance is None else guidance,
+            rescale=self._cfg.guidance_rescale if guidance_rescale is None else guidance_rescale,
+            generator=generator,
+        )
+
+    def render(self, plan: SamplePlan) -> Path:
+        """Draw a checked request and write it as a PNG.
+
+        The expensive half: a full denoising chain per image, serialised behind
+        a lock because the requests share one network on one device. Minutes,
+        for a large request on a slow device — which is why the server runs
+        this off the event loop, and why it bounds how many callers may be
+        waiting on the lock at once.
+
+        Args:
+            plan: a request from :meth:`plan`.
+
+        Returns:
+            The path of the written PNG.
+        """
         with self._lock:
             images = get_sampler(self._cfg.sampler)(
                 self._diffusion,
-                num_images,
+                plan.num_images,
                 (self._spec.channels, self._cfg.image_size, self._cfg.image_size),
                 self._cfg.device,
-                num_steps=num_steps,
-                eta=eta,
+                num_steps=plan.num_steps,
+                eta=plan.eta,
                 model=conditioned(
                     self._net,
-                    y,
+                    plan.y,
                     num_classes=self._cfg.num_classes,
-                    scale=scale,
-                    rescale=rescale,
+                    scale=plan.scale,
+                    rescale=plan.rescale,
                 ),
-                generator=generator,
+                generator=plan.generator,
                 spacing=self._cfg.sample_spacing,
             )
 
@@ -199,7 +311,7 @@ class SamplerService:
         save_image(
             denormalize(images),
             path,
-            nrow=grid_width(num_images, self._cfg.num_classes, labels),
+            nrow=grid_width(plan.num_images, self._cfg.num_classes, plan.labels),
         )
         self.prune_images()
         return path
@@ -279,6 +391,7 @@ class SamplerService:
             "default_guidance": self.default_guidance,
             "default_guidance_rescale": self.default_guidance_rescale,
             "max_images": self.config.max_images,
+            "max_inflight": self.config.max_inflight,
             "image_ttl": self.config.image_ttl,
             "keep_images": self.config.keep_images,
             "memory": memory,

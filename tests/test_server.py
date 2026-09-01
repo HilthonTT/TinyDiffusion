@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import threading
 import time
 
 import pytest
@@ -362,3 +363,135 @@ def test_a_seeded_request_does_not_disturb_the_global_rng(make_config):
 
     torch.manual_seed(1234)
     assert torch.equal(before, torch.randn(3))
+
+
+# --- admission control ------------------------------------------------------
+
+
+@pytest.fixture
+def blocked_render(monkeypatch):
+    """Hold every render open until the test lets it finish.
+
+    Standing in for the real thing, which is minutes of GPU work: what the
+    limit is about is what the server does while one of these is running.
+    """
+    real = SamplerService.render
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking(self, plan):
+        started.set()
+        assert release.wait(timeout=30)
+        return real(self, plan)
+
+    monkeypatch.setattr(SamplerService, "render", blocking)
+    yield started, release
+    release.set()
+
+
+@pytest.fixture
+def busy_client(make_config, blocked_render):
+    """A one-slot server with its slot held by a request that will not finish."""
+    started, release = blocked_render
+    with TestClient(create_app(make_config(max_inflight=1))) as client:
+        done: list = []
+        holder = threading.Thread(
+            target=lambda: done.append(
+                client.post("/api/sample", json={"num_images": 2, "steps": 2})
+            )
+        )
+        holder.start()
+        assert started.wait(timeout=30), "the first request never reached the renderer"
+        try:
+            yield client, done
+        finally:
+            release.set()
+            holder.join(timeout=60)
+
+
+def test_the_default_inflight_limit_is_positive():
+    assert ServerConfig(checkpoint="m.pt").max_inflight >= 1
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_a_bad_inflight_limit_is_rejected(limit):
+    with pytest.raises(ValueError, match="max_inflight"):
+        ServerConfig(checkpoint="m.pt", max_inflight=limit)
+
+
+def test_status_reports_the_inflight_limit(make_config):
+    with TestClient(create_app(make_config(max_inflight=3))) as c:
+        assert c.get("/api/status").json()["max_inflight"] == 3
+
+
+def test_a_request_past_the_limit_is_refused_rather_than_queued(busy_client):
+    """The failure this replaces is a caller waiting behind every other caller.
+
+    Rendering is serialised on one device, so an unbounded queue means the last
+    arrival waits for all of the ones ahead of it — on a connection that holds
+    a server thread the whole time.
+    """
+    client, _ = busy_client
+
+    r = client.post("/api/sample", json={"num_images": 2, "steps": 2})
+
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "5"
+
+
+def test_the_refused_request_did_not_disturb_the_one_being_served(make_config, blocked_render):
+    """Guard the guard: the 503 above is a bounded queue, not a broken server."""
+    started, release = blocked_render
+    served: list = []
+
+    with TestClient(create_app(make_config(max_inflight=1))) as client:
+        holder = threading.Thread(
+            target=lambda: served.append(
+                client.post("/api/sample", json={"num_images": 2, "steps": 2})
+            )
+        )
+        holder.start()
+        assert started.wait(timeout=30)
+        refused = client.post("/api/sample", json={"num_images": 2, "steps": 2})
+        release.set()
+        holder.join(timeout=60)
+
+    assert refused.status_code == 503
+    assert served[0].status_code == 200
+    assert served[0].json()["num_images"] == 2
+
+
+def test_a_bad_request_is_answered_while_the_server_is_busy(busy_client):
+    """Checking a request costs nothing, so it happens before the slot is taken.
+
+    A request that cannot be served should not be told to come back later, and
+    should not be able to take a slot from a caller who could have been served.
+    """
+    client, _ = busy_client
+
+    r = client.post("/api/sample", json={"num_images": 2, "steps": TINY.num_timesteps + 1})
+
+    assert r.status_code == 400
+    assert "steps" in r.json()["detail"]
+
+
+def test_a_slot_is_released_when_a_render_fails(make_config, monkeypatch):
+    """A failed render that kept its slot would shrink the server on every error."""
+    real = SamplerService.render
+    calls = []
+
+    def flaky(self, plan):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the device fell over")
+        return real(self, plan)
+
+    monkeypatch.setattr(SamplerService, "render", flaky)
+    app = create_app(make_config(max_inflight=1))
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        first = c.post("/api/sample", json={"num_images": 2, "steps": 2})
+        second = c.post("/api/sample", json={"num_images": 2, "steps": 2})
+
+    assert first.status_code == 500
+    assert second.status_code == 200
