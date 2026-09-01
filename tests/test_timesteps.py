@@ -35,7 +35,6 @@ def test_the_proposal_is_uniform_until_every_timestep_has_a_history():
     assert not sampler.warm
     assert torch.allclose(sampler.weights(), torch.full((T,), 1 / T, dtype=torch.float64))
 
-    # One timestep short of warm is still not warm.
     for _ in range(2):
         sampler.update(torch.arange(T - 1), torch.ones(T - 1))
     assert not sampler.warm
@@ -64,7 +63,6 @@ def test_the_weights_undo_the_proposal():
     t, weights = sampler.sample(256, "cpu")
     probs = sampler.weights()
     assert torch.allclose(weights.double(), 1.0 / (T * probs[t]))
-    # The oversampled timestep is the one counted down the most.
     assert weights[t == 0].max() < 1.0
 
 
@@ -80,7 +78,6 @@ def test_the_history_is_a_window_not_a_running_total():
     for _ in range(2):
         sampler.update(torch.arange(T), torch.ones(T))
 
-    # The 100s have been pushed out, so every timestep is back to level.
     assert torch.allclose(sampler.weights(), torch.full((T,), 1 / T, dtype=torch.float64))
 
 
@@ -125,7 +122,6 @@ def test_the_process_draws_from_its_sampler_and_feeds_it_back():
 
     terms = process.loss_terms(torch.randn(16, 1, 8, 8))
     assert terms.timesteps.min() >= 0 and terms.timesteps.max() < T
-    # Every timestep the draw touched now has a recorded loss.
     assert sum(resampler._counts.tolist()) > 0
 
 

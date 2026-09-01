@@ -59,15 +59,12 @@ def test_a_run_that_logged_only_one_panels_metrics_still_plots(pyplot, tmp_path)
 
 
 def test_a_resumed_run_is_plotted_as_it_now_stands(pyplot, tmp_path):
-    # Two sessions over the same steps: the figure follows read_metrics and
-    # draws the newer one, rather than a line that doubles back.
     directory = write_run(tmp_path / "resumed", [{"train/loss": 1.0}, {"train/loss": 0.9}])
     write_run(directory, [{"train/loss": 0.5}, {"train/loss": 0.4}])
     assert plot_runs([directory], tmp_path / "resumed.png").is_file()
 
 
 def test_a_metric_missing_from_some_epochs_is_skipped_not_zeroed(pyplot, run, tmp_path):
-    # val/loss is written every val_every epochs; the gap is not a value.
     records = [json.loads(line) for line in (run / METRICS_FILENAME).read_text().splitlines()]
     assert sum("val/loss" in record for record in records) == 2
     assert plot_runs([run], tmp_path / "gap.png").is_file()

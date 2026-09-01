@@ -29,8 +29,6 @@ class InterruptChoice:
     save: bool = False
 
 
-# Stopping and saving is the safe default whenever we cannot ask: an
-# unattended run should not lose an epoch of work to a scripted kill.
 _UNATTENDED = InterruptChoice(stop=True, save=True)
 
 
@@ -118,7 +116,7 @@ def _default_sigint() -> Generator[None]:
     """Restore Python's default SIGINT behaviour for the duration of a block."""
     try:
         previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    except ValueError:  # pragma: no cover - only outside the main thread
+    except ValueError:  # pragma: no cover
         yield
         return
     try:
@@ -144,7 +142,7 @@ def interrupt_guard() -> Generator[InterruptGuard]:
 
     try:
         previous = signal.signal(signal.SIGINT, handler)
-    except ValueError:  # pragma: no cover - only outside the main thread
+    except ValueError:  # pragma: no cover
         yield guard
         return
     try:

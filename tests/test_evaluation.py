@@ -36,8 +36,6 @@ def make_checkpoint(tmp_path, monkeypatch, wake):
     def build(cfg=TINY, labels=None, trained=False):
         diffusion = build_model(cfg)
         if trained:
-            # Stand in for training: an all-zero output conv makes the loss
-            # independent of everything, conditioning included.
             wake(diffusion.net)
         ema = EMA(diffusion.net, decay=0.9, warmup=0)
         optim = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
@@ -105,7 +103,6 @@ def test_each_batch_draws_its_own_noise(checkpoint, monkeypatch):
 
     monkeypatch.setattr(evaluation, "seed_everything", record)
     evaluation.evaluate_checkpoint(checkpoint, num_steps=2, seed=7, progress=False)
-    # Six images at three a batch, so two batches, on consecutive seeds.
     assert seeds == [7, 8]
 
 
@@ -134,9 +131,6 @@ def test_format_reports_the_headline_and_table(checkpoint):
 
 
 def test_a_conditional_checkpoint_is_scored_on_its_labels(make_checkpoint):
-    # The label reaches the network, so scoring the same images under
-    # different labels has to give a different loss. Were the labels dropped
-    # on the floor, the two would be identical.
     ones = make_checkpoint(CONDITIONAL, labels=torch.ones(6, dtype=torch.long), trained=True)
     with_ones = evaluation.evaluate_checkpoint(ones, num_steps=2, progress=False)
 
@@ -150,8 +144,6 @@ def test_default_step_count_is_sane():
     assert 1 <= DEFAULT_EVAL_STEPS <= 1000
 
 
-# The variational bound needs the generalised process, which the config picks
-# by asking for anything the plain DDPM path does not implement.
 IMPROVED = dataclasses.replace(TINY, variance="learned_range", objective="rescaled_mse")
 
 
@@ -172,8 +164,6 @@ def test_the_bound_is_reported_in_bits_per_dimension(make_checkpoint):
     assert result.bpd is not None
     assert result.prior_bpd is not None
     assert torch.isfinite(torch.tensor([result.bpd, result.prior_bpd])).all()
-    # The prior term is one summand of the total, and every other term is a KL
-    # or a negative log-likelihood, so it can only be the smaller of the two.
     assert result.prior_bpd <= result.bpd
     assert result.num_bpd_images == 3
     assert "bpd" in result.format()
@@ -185,8 +175,6 @@ def test_the_bound_stops_once_it_has_the_images_it_was_asked_for(make_checkpoint
     result = evaluation.evaluate_checkpoint(
         path, num_steps=3, progress=False, bpd=True, bpd_images=3
     )
-    # Six images in the stand-in loader, in batches of three: the loss covers
-    # all of them and the bound stops after the first batch.
     assert result.num_images == 6
     assert result.num_bpd_images == 3
 

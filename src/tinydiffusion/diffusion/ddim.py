@@ -57,10 +57,6 @@ def uniform_timesteps(
         num_timesteps - 1. Ends at 0 whenever more than one step is taken.
     """
     _check_num_steps(num_timesteps, num_steps)
-    # Built descending rather than ascending-then-flipped: a one-step schedule
-    # has to be [T-1], the timestep matching the pure noise the chain starts
-    # from. Ascending would collapse it to [0] and denoise as if x_T were
-    # already a clean image. The two agree for every longer schedule.
     return torch.linspace(num_timesteps - 1, 0, num_steps).round().long()
 
 
@@ -80,8 +76,6 @@ def quadratic_timesteps(
         Long tensor of descending, de-duplicated timesteps.
     """
     _check_num_steps(num_timesteps, num_steps)
-    # Descending for the same reason as `uniform_timesteps`; squaring a
-    # descending ramp gives the same set, still denser near t=0.
     steps = (torch.linspace((num_timesteps - 1) ** 0.5, 0, num_steps) ** 2).round().long()
     return torch.unique(steps).flip(0)
 
@@ -178,13 +172,7 @@ def karras_timesteps(
             f"alphabar has {alphabar.numel()} entries, expected num_timesteps={num_timesteps}"
         )
 
-    # On the host, whatever device the schedule lives on: the other spacings
-    # are pure index arithmetic and hand back a CPU tensor, and a subsequence
-    # of 20 integers is not worth a device round trip to disagree about.
     sigmas = schedule_sigmas(alphabar.detach().cpu()).double()
-    # A zero terminal SNR puts an infinity at the top of the schedule. The ramp
-    # is anchored to the largest sigma that is a number, and the first timestep
-    # is restored below, so the chain still starts from the pure-noise step.
     finite = sigmas.isfinite()
     sigma_min = sigmas[finite].min().clamp_min(torch.finfo(torch.float64).tiny)
     sigma_max = sigmas[finite].max()
@@ -193,8 +181,6 @@ def karras_timesteps(
     low, high = sigma_min ** (1 / rho), sigma_max ** (1 / rho)
     targets = (high + ramp * (low - high)) ** rho
 
-    # Interpolated in log-sigma, where the schedule is close to linear in t and
-    # so the inverse is well conditioned across four decades of noise.
     log_sigmas = sigmas[finite].log()
     index = torch.arange(num_timesteps, dtype=torch.float64)[finite]
     slot = torch.searchsorted(log_sigmas, targets.log()).clamp(1, log_sigmas.numel() - 1)
@@ -203,8 +189,6 @@ def karras_timesteps(
     weight = ((targets.log() - log_sigmas[before]) / span).clamp(0, 1)
     steps = (index[before] + weight * (index[after] - index[before])).round().long()
 
-    # The chain starts from pure noise whatever the ramp's top sigma rounded
-    # to, which is the invariant the other two spacings hold by construction.
     steps[0] = num_timesteps - 1
     return torch.unique(steps.clamp(0, num_timesteps - 1)).flip(0)
 
@@ -330,8 +314,6 @@ def ddim_sample(
             diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
         )
     ts = timesteps.to(device)
-    # Pair each t with its predecessor; the last step lands on the t=-1 sentinel,
-    # for which alphabar is defined as 1 (a noise-free x_0).
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])
 
     alphabar = diffusion.alphabar_t
@@ -346,20 +328,15 @@ def ddim_sample(
 
             t_batch = t_cur.repeat(num_samples)
 
-            # DDIM's own variance is used whatever the process says: a learned
-            # reverse variance describes the full-chain step, not this strided
-            # one.
             x0, eps = predict_xstart_eps(
                 diffusion, x, t_batch, model=net, clip_denoised=clip_denoised
             )
 
-            # sigma_t from DDIM Eq. 16.
             sigma = eta * (((1 - ab_prev) / (1 - ab_t)) * (1 - ab_t / ab_prev)).sqrt()
             direction = (1 - ab_prev - sigma**2).clamp(min=0.0).sqrt()
 
             x = ab_prev.sqrt() * x0 + direction * eps
             if eta > 0 and t_prev >= 0:
-                # randn_like takes no generator, so the shape is spelled out.
                 step_noise = torch.randn(
                     x.shape, device=x.device, dtype=x.dtype, generator=generator
                 )

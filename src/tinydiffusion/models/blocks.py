@@ -38,7 +38,6 @@ def _checkpointed(
         Whatever `body` returns.
     """
     if use_checkpoint and torch.is_grad_enabled():
-        # torch.utils.checkpoint is annotated as returning Any.
         return cast(torch.Tensor, checkpoint(body, *args, use_reentrant=False))
     return body(*args)
 
@@ -160,10 +159,6 @@ class ResBlock(nn.Module):
         """The block's body, split out so it can be recomputed on demand."""
         h = self.conv1(F.silu(self.norm1(x)))
 
-        # The FiLM projection is a Linear, so it keeps float32 weights even
-        # when the convolutions around it do not. Cast its output down rather
-        # than letting the multiply promote `h`: the result feeds conv2, which
-        # would then be a float16 kernel handed a float32 input.
         projection = self.time_proj(F.silu(time_emb)).to(h.dtype)
         scale, shift = projection[:, :, None, None].chunk(2, dim=1)
         h = self.norm2(h) * (1 + scale) + shift
@@ -213,7 +208,7 @@ class SelfAttention(nn.Module):
         b, c, h, w = x.shape
         qkv = self.qkv(self.norm(x))
         qkv = qkv.reshape(b, 3, self.num_heads, c // self.num_heads, h * w)
-        q, k, v = (t.transpose(-2, -1) for t in qkv.unbind(1))  # b, heads, hw, d
+        q, k, v = (t.transpose(-2, -1) for t in qkv.unbind(1))
         out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(-2, -1).reshape(b, c, h, w)
         return x + self.proj(out)
@@ -246,7 +241,6 @@ class Upsample(nn.Module):
 class TimestepSequential(nn.Sequential):
     """Sequential that forwards the time embedding to ResBlocks only."""
 
-    # Deliberately widens Sequential.forward: children that need conditioning get it.
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         """Run each child layer, passing `time_emb` to the ones that accept it."""
         for layer in self:

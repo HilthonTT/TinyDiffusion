@@ -58,17 +58,11 @@ def slerp(start: torch.Tensor, end: torch.Tensor, weight: torch.Tensor) -> torch
     flat_start, flat_end = start.flatten().double(), end.flatten().double()
     unit_start = flat_start / flat_start.norm().clamp_min(1e-12)
     unit_end = flat_end / flat_end.norm().clamp_min(1e-12)
-    # Clamped because a dot product of two unit vectors can leave [-1, 1] by an
-    # ulp, and acos answers NaN rather than 0 when it does.
     omega = (unit_start * unit_end).sum().clamp(-1.0, 1.0).acos()
 
     steps = weight.double().to(flat_start.device)
     sin_omega = omega.sin()
     if sin_omega.abs() < 1e-7:
-        # Parallel or antiparallel: the great circle through them is not
-        # unique, and the spherical formula is 0/0. A straight line is the
-        # limit of slerp as the angle closes, so it is the right answer here
-        # rather than a fallback.
         path = torch.outer(1.0 - steps, flat_start) + torch.outer(steps, flat_end)
     else:
         path = torch.outer(((1.0 - steps) * omega).sin() / sin_omega, flat_start) + torch.outer(
@@ -108,8 +102,6 @@ def latent_walk(
     if steps < 2:
         raise ValueError(f"a walk needs at least its two ends, got steps={steps}")
 
-    # Drawn on the CPU whichever device they will be used on, so a seed names
-    # the same latent on a GPU machine and a CPU one.
     ends = [
         torch.randn(size, generator=torch.Generator().manual_seed(seed))
         for seed in (seed_start, seed_end)
@@ -183,8 +175,6 @@ def interpolate_from_checkpoint(
 
     y = None
     if cfg.num_classes is not None:
-        # One label per point, holding the class fixed so the strip has exactly
-        # one thing moving along it.
         asked = torch.tensor(labels or [0], dtype=torch.long, device=cfg.device)
         out_of_range = sorted({int(v) for v in asked if not 0 <= v < cfg.num_classes})
         if out_of_range:
@@ -198,8 +188,6 @@ def interpolate_from_checkpoint(
     rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
     net = apply_precision(ema.module, resolve_precision(precision, cfg.device), cfg.device)
 
-    # The global RNG still decides anything the sampler draws for itself; at
-    # eta=0 nothing does, but a sampler asked for eta > 0 elsewhere would.
     seed_everything(seed_start)
     images = get_sampler(cfg.sampler if sampler is None else sampler)(
         diffusion,
@@ -214,7 +202,5 @@ def interpolate_from_checkpoint(
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    # One row: the walk is a sequence, and wrapping it would put the two ends
-    # of a jump in different corners of the image.
     save_image(denormalize(images), out, nrow=steps)
     return out

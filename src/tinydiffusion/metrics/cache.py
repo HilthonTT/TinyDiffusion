@@ -208,14 +208,6 @@ def _load_payload(path: Path) -> dict[str, Any] | None:
     try:
         payload: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=True)
     except Exception:
-        # Deliberately everything. A partial write, a file from another torch,
-        # or something that is not a checkpoint at all each come back as a
-        # different type — torch.load documents no exception contract for
-        # malformed input, so enumerating them is guesswork that goes stale.
-        # None of them is worth failing a scoring run over, and the only cost
-        # of being wrong is recomputing what was already going to be computed
-        # before this cache existed. BaseException still propagates, so a
-        # Ctrl+C during the read is not swallowed with it.
         return None
     if not isinstance(payload, dict) or payload.get("format") != _FORMAT:
         return None
@@ -249,8 +241,6 @@ def load_reference_stats(
     except ValueError:
         return None
     if stats.dim != dim or stats.n < 2:
-        # Fewer than two vectors leaves the covariance undefined, so an entry
-        # that small is no more useful than no entry at all.
         return None
     return stats
 
@@ -274,13 +264,8 @@ def _save_atomically(path: Path, payload: dict[str, Any]) -> None:
         torch.save(payload, tmp)
         tmp.replace(path)
     except OSError:
-        # A read-only or full dataset directory is not a reason to fail a score
-        # that has already been computed; the next run simply recomputes.
         tmp.unlink(missing_ok=True)
     except BaseException:
-        # Anything else is a bug rather than a full disk, so it propagates —
-        # but not while leaving a half-written temporary behind. Ctrl+C during
-        # the write lands here too, which is exactly when the cleanup matters.
         tmp.unlink(missing_ok=True)
         raise
 
@@ -319,8 +304,6 @@ def load_reference_features(
     except ValueError:
         return None
     if bank.dim != dim or bank.n < 2:
-        # Fewer than two vectors is below what every metric here needs, so an
-        # entry that small is no more useful than no entry at all.
         return None
     return bank
 

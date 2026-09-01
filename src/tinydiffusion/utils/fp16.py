@@ -64,8 +64,6 @@ def convert_module_to_f16(module: nn.Module) -> None:
     """
     if isinstance(module, nn.Conv1d | nn.Conv2d | nn.Conv3d):
         module.weight.data = module.weight.data.half()
-        # `bias=False` is ordinary inside a normalised stack, and there is no
-        # bias tensor to convert when it is set.
         if module.bias is not None:
             module.bias.data = module.bias.data.half()
 
@@ -134,10 +132,6 @@ def model_grads_to_master_grads(
         master_params: the list :func:`make_master_params` returned.
     """
     grads = [
-        # A parameter the loss never reached has no gradient at all, and a
-        # missing one has to become a zero rather than a hole: the flat copy is
-        # positional, so skipping it would shift every later parameter's
-        # gradient onto the wrong weights.
         param.grad.detach().float()
         if param.grad is not None
         else torch.zeros_like(param, dtype=torch.float32)
@@ -158,8 +152,6 @@ def master_params_to_model_params(
             rounded back down to whatever dtype each one holds.
         master_params: the list :func:`make_master_params` returned.
     """
-    # Without copying to a list, if a generator is passed, this will
-    # silently not copy any parameters.
     model_params = list(model_params)
 
     for param, master_param in zip(
@@ -237,9 +229,6 @@ def master_params_to_state_dict(
     for (name, _), value in zip(
         model.named_parameters(), unflatten_master_params(params, master_params), strict=True
     ):
-        # Cloned rather than stored as the view unflattening returns:
-        # torch.save writes a view's whole underlying storage, so saving the
-        # views would write the entire flattened network once per parameter.
         state[name] = value.clone()
     return state
 
@@ -255,7 +244,6 @@ def zero_grad(model_params: Iterable[torch.Tensor]) -> None:
         model_params: the network's parameters.
     """
     for param in model_params:
-        # Taken from torch.optim.Optimizer.add_param_group.
         if param.grad is not None:
             param.grad.detach_()
             param.grad.zero_()

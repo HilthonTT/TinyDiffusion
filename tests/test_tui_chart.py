@@ -15,8 +15,6 @@ from tinydiffusion.tui.chart import (
     tick_values,
 )
 
-# --- the axis --------------------------------------------------------------
-
 
 def test_the_axis_covers_the_data_with_a_little_room():
     low, high = nice_bounds([0.2, 1.0])
@@ -25,8 +23,6 @@ def test_the_axis_covers_the_data_with_a_little_room():
 
 
 def test_the_axis_does_not_go_below_zero_for_a_loss():
-    # A loss cannot be negative, and an axis that says it can is a worse lie
-    # than a curve sitting slightly high in its panel.
     low, _ = nice_bounds([0.0, 1.0])
     assert low == 0.0
 
@@ -76,16 +72,12 @@ def test_ticks_are_formatted_to_be_read_not_to_be_precise(value, expected):
 
 
 def test_the_very_small_and_the_very_large_go_to_exponents():
-    # Which is where a loss curve spends its later epochs.
     assert "e" in format_tick(1e-5)
     assert "e" in format_tick(1e9)
 
 
 def test_a_non_finite_tick_is_a_dash_not_a_crash():
     assert format_tick(float("nan")) == "-"
-
-
-# --- the plot --------------------------------------------------------------
 
 
 def rendered(cells):
@@ -107,15 +99,12 @@ def test_a_box_with_no_room_draws_nothing():
 def test_a_rising_series_ends_higher_than_it_starts():
     cells = braille_cells([[0.0, 1.0]], width=12, height=4, low=0.0, high=1.0)
     lines = rendered(cells)
-    # The top row is drawn on at the right-hand end and not at the left.
     assert lines[0][0] == BLANK
     assert lines[0][-1] != BLANK
     assert lines[-1][0] != BLANK
 
 
 def test_the_line_is_continuous_across_a_steep_step():
-    # Two epochs whose losses halve should read as a fall, not as two dots with
-    # a gap between them.
     cells = braille_cells([[1.0, 0.0]], width=8, height=4, low=0.0, high=1.0)
     assert all(any(character != BLANK for character in row) for row in rendered(cells))
 
@@ -127,7 +116,6 @@ def test_every_column_is_drawn_when_there_are_fewer_points_than_columns():
 
 
 def test_a_spike_survives_being_scaled_down():
-    # More points than dot columns: the spike must not be sampled away.
     values = [0.0] * 200
     values[100] = 1.0
     cells = braille_cells([values], width=8, height=4, low=0.0, high=1.0)
@@ -135,7 +123,6 @@ def test_a_spike_survives_being_scaled_down():
 
 
 def test_a_single_point_draws_a_flat_line():
-    # One measurement is a flat line, not a lone dot lost in a blank chart.
     cells = braille_cells([[0.5]], width=10, height=3, low=0.0, high=1.0)
     drawn = [index for index, row in enumerate(rendered(cells)) if row.strip(BLANK)]
     assert drawn == [1]
@@ -153,15 +140,12 @@ def test_each_cell_says_which_series_drew_it():
 
 
 def test_the_later_series_is_the_one_drawn_on_top():
-    # Identical series share every cell; validation sitting on top of training
-    # is what makes it legible where the two coincide.
     cells = braille_cells([[0.5, 0.5], [0.5, 0.5]], width=6, height=3, low=0.0, high=1.0)
     owners = {owner for row in cells for _, owner in row if owner is not None}
     assert owners == {1}
 
 
 def test_a_value_outside_an_explicit_axis_is_pinned_to_its_edge():
-    # Rather than drawn off the chart, or off the end of the dot grid.
     cells = braille_cells([[5.0, -5.0]], width=6, height=3, low=0.0, high=1.0)
     lines = rendered(cells)
     assert lines[0].strip(BLANK)

@@ -43,7 +43,6 @@ def test_a_sweep_with_no_axes_is_one_run():
 def test_every_combination_gets_a_point(tmp_path):
     points = sweep_points(BASE, [("lr", [1e-4, 2e-4]), ("batch_size", [32, 64, 128])], tmp_path)
     assert len(points) == 6
-    # The first axis varies slowest, so a directory listing groups by it.
     assert [p.overrides["lr"] for p in points] == [1e-4] * 3 + [2e-4] * 3
 
 
@@ -160,7 +159,6 @@ def test_skip_existing_leaves_a_finished_point_alone(tmp_path):
     runs = list(run_sweep(points, train=trained.append, skip_existing=True, say=lambda _: None))
 
     assert [cfg.lr for cfg in trained] == [2e-4]
-    # And the skipped point's existing numbers are read rather than discarded.
     assert runs[0].best_val_loss == pytest.approx(0.25)
 
 

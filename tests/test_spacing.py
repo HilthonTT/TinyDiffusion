@@ -50,8 +50,6 @@ def test_an_unknown_spacing_names_the_alternatives():
 
 
 def test_quadratic_is_denser_near_zero_than_uniform():
-    # The whole point of the option: at a low step count the quadratic grid
-    # spends its steps where the chain has least room to correct itself.
     even = uniform_timesteps(T, 10)
     packed = quadratic_timesteps(T, 10)
     assert (packed < T // 2).sum() > (even < T // 2).sum()
@@ -123,8 +121,6 @@ def test_the_spacing_changes_the_samples(recorder):
 
 
 def test_every_registered_sampler_accepts_the_spacing_keyword(recorder):
-    # The Sampler protocol promises it, so a sampler added later that quietly
-    # drops the argument should fail here rather than in a scoring run.
     diffusion, _ = recorder
     for draw in SAMPLERS.values():
         out = draw(diffusion, 1, (1, 4, 4), "cpu", num_steps=4, eta=0.0, spacing="quadratic")
@@ -160,8 +156,6 @@ def linear_alphabar(num_timesteps=T):
 
 
 def test_the_index_spacings_ignore_the_schedule_they_are_handed():
-    # They are defined on the index, so the same subsequence whatever the
-    # noise levels turn out to be.
     for spacing in (uniform_timesteps, quadratic_timesteps):
         assert torch.equal(spacing(T, 10), spacing(T, 10, alphabar=cosine_alphabar()))
 
@@ -182,15 +176,12 @@ def test_a_single_karras_step_is_the_noisiest_one():
 
 
 def test_karras_spaces_by_noise_rather_than_by_index():
-    # The point of it: the sigmas it visits are near-evenly spaced under the
-    # rho-ramp, which the index-based spacings have no reason to be.
     alphabar = linear_alphabar(1000)
     sigmas = schedule_sigmas(alphabar)
     rho = KARRAS_RHO
 
     def ramp_error(steps):
         visited = sigmas[steps].double()
-        # Where each visited sigma falls on the ramp's own straight line.
         warped = visited ** (1 / rho)
         return float(warped.diff().std() / warped.diff().abs().mean())
 
@@ -210,8 +201,6 @@ def test_a_schedule_of_the_wrong_length_is_refused():
 
 
 def test_karras_survives_a_zero_terminal_snr_schedule():
-    # enforce_zero_terminal_snr drives the last abar to ~0, so the last sigma
-    # is an infinity the ramp cannot be anchored to.
     betas = enforce_zero_terminal_snr(cosine_beta_schedule(T))
     alphabar = ddpm_schedules(betas)["alphabar_t"]
     steps = karras_timesteps(T, 10, alphabar=alphabar)
@@ -221,11 +210,6 @@ def test_karras_survives_a_zero_terminal_snr_schedule():
 
 
 def test_a_cosine_schedule_cannot_honour_the_step_count():
-    # Documented rather than fixed: cosine's terminal sigma is four orders of
-    # magnitude above the one the ramp was designed around, so part of the
-    # ramp lands in a handful of timesteps and rounding collapses them. The
-    # steps that survive are good ones — karras beats uniform at equal cost on
-    # the shipped model — but a caller asking for 20 gets 12.
     cosine = karras_timesteps(1000, 20, alphabar=cosine_alphabar(1000))
     linear = karras_timesteps(1000, 20, alphabar=linear_alphabar(1000))
     assert len(cosine) < 20
@@ -233,8 +217,6 @@ def test_a_cosine_schedule_cannot_honour_the_step_count():
 
 
 def test_karras_returns_timesteps_on_the_host_like_the_others():
-    # The samplers index device buffers with whatever comes back, and the
-    # index-based spacings have always answered on the CPU.
     alphabar = linear_alphabar()
     assert karras_timesteps(T, 5, alphabar=alphabar).device == uniform_timesteps(T, 5).device
 

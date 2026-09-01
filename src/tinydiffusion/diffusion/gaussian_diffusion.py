@@ -5,10 +5,11 @@ treat as free: the network predicts epsilon, the reverse variance is the fixed
 posterior beta-tilde, and the loss is plain MSE. That combination is the DDPM
 baseline (Ho et al. 2020) and is all most runs need.
 
-This module makes those three choices explicit as :class:`ModelMeanType`,
-:class:`ModelVarType` and :class:`LossType`, and adds the variational bound
-they are measured against. Learning the reverse variance and training on the
-hybrid objective is the main contribution of Nichol & Dhariwal 2021
+This module takes those three choices as arguments — see
+:mod:`~tinydiffusion.diffusion.parameterization` for the vocabulary they are
+named in — and adds the variational bound they are measured against.
+Learning the reverse variance and training on the hybrid objective is the
+main contribution of Nichol & Dhariwal 2021
 (https://arxiv.org/abs/2102.09672); it is what lets a model sample well in far
 fewer steps.
 
@@ -16,7 +17,6 @@ Adapted from openai/improved-diffusion, rewritten to be torch-native, to keep
 its schedule in registered buffers, and to take integer timesteps.
 """
 
-from enum import StrEnum
 from typing import Self
 
 import torch
@@ -27,6 +27,12 @@ from tinydiffusion.diffusion.losses import (
     discretized_gaussian_log_likelihood,
     mean_flat,
     normal_kl,
+)
+from tinydiffusion.diffusion.parameterization import (
+    LossType,
+    LossWeighting,
+    ModelMeanType,
+    ModelVarType,
 )
 from tinydiffusion.diffusion.schedules import ddpm_schedules, linear_beta_schedule
 from tinydiffusion.diffusion.timesteps import TimestepSampler, UniformSampler
@@ -43,106 +49,6 @@ __all__ = [
 
 _LOG_2 = 0.6931471805599453
 """Nats per bit, for reporting the bound in bits-per-dimension."""
-
-
-class ModelMeanType(StrEnum):
-    """What the network's output is interpreted as.
-
-    Attributes:
-        EPSILON: the noise added to x_0. The DDPM default, and the easiest to
-            train because the target has unit variance at every timestep.
-        START_X: the clean image x_0 directly.
-        V: the velocity ``v = sqrt(abar) * eps - sqrt(1 - abar) * x_0``
-            (Salimans & Ho 2022, https://arxiv.org/abs/2202.00512). It
-            interpolates between the two above — epsilon at high noise, x_0 at
-            low — so no timestep is left with a target the network cannot see
-            the signal in. This is what makes a zero-terminal-SNR schedule and
-            short sampling chains work: at t=T, epsilon prediction says nothing
-            about x_0, and v prediction still does.
-        PREVIOUS_X: the previous latent x_{t-1}. Present for completeness;
-            it trains poorly and no current model uses it.
-    """
-
-    EPSILON = "epsilon"
-    START_X = "start_x"
-    V = "v"
-    PREVIOUS_X = "previous_x"
-
-
-class ModelVarType(StrEnum):
-    """How the reverse-process variance is obtained.
-
-    Attributes:
-        FIXED_SMALL: the true posterior variance beta-tilde. Optimal when x_0
-            is known; slightly over-confident when it is not.
-        FIXED_LARGE: beta_t, the upper bound. DDPM found both usable.
-        LEARNED: the network emits the log-variance directly. Unstable, since
-            nothing bounds it.
-        LEARNED_RANGE: the network emits a value in [-1, 1] that interpolates
-            between the two fixed choices. This is the Nichol & Dhariwal
-            formulation and the one to use.
-    """
-
-    FIXED_SMALL = "fixed_small"
-    FIXED_LARGE = "fixed_large"
-    LEARNED = "learned"
-    LEARNED_RANGE = "learned_range"
-
-    @property
-    def is_learned(self) -> bool:
-        """Whether this option needs the network to emit 2C channels.
-
-        Returns:
-            True for the two learned variants.
-        """
-        return self in (ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE)
-
-
-class LossType(StrEnum):
-    """Which objective to train against.
-
-    Attributes:
-        MSE: the simplified L_simple objective from DDPM.
-        RESCALED_MSE: L_simple plus a down-weighted variational term, used to
-            train a learned variance without letting it disturb the mean. This
-            is the hybrid objective.
-        KL: the full variational bound, in bits per dimension.
-        RESCALED_KL: the bound rescaled by num_timesteps, which makes its
-            gradient magnitude comparable to MSE.
-    """
-
-    MSE = "mse"
-    RESCALED_MSE = "rescaled_mse"
-    KL = "kl"
-    RESCALED_KL = "rescaled_kl"
-
-    @property
-    def is_variational(self) -> bool:
-        """Whether this objective is the bound itself rather than MSE.
-
-        Returns:
-            True for the two KL variants.
-        """
-        return self in (LossType.KL, LossType.RESCALED_KL)
-
-
-class LossWeighting(StrEnum):
-    """How the per-timestep MSE terms are weighted against each other.
-
-    Attributes:
-        UNIFORM: every timestep counts the same, which is what L_simple does.
-        MIN_SNR: weight each timestep by ``min(SNR(t), gamma)``, expressed in
-            whatever space the network predicts in (Hang et al. 2023,
-            https://arxiv.org/abs/2303.09556). Uniform weighting of an
-            epsilon-space MSE is implicitly ``1/SNR`` weighting in x_0 space,
-            so the low-noise timesteps — where the model is already nearly
-            right — dominate the gradient and fight the high-noise ones.
-            Clamping the weight at gamma stops that, and typically reaches a
-            given loss in a fraction of the steps.
-    """
-
-    UNIFORM = "uniform"
-    MIN_SNR = "min_snr"
 
 
 class GaussianDiffusion(nn.Module):
@@ -215,8 +121,6 @@ class GaussianDiffusion(nn.Module):
         self.loss_weighting = loss_weighting
         self.min_snr_gamma = min_snr_gamma
         self.clip_denoised = clip_denoised
-        # Held as a plain attribute rather than a submodule: it owns sampling
-        # state, not parameters, and nothing about it belongs in a state dict.
         self.timestep_sampler: TimestepSampler = (
             UniformSampler(num_timesteps) if timestep_sampler is None else timestep_sampler
         )
@@ -230,15 +134,11 @@ class GaussianDiffusion(nn.Module):
             raise ValueError(f"min_snr_gamma must be positive, got {min_snr_gamma}")
         if loss_weighting is LossWeighting.MIN_SNR:
             if loss_type.is_variational:
-                # A KL objective has no MSE term to weight, and reweighting the
-                # bound would stop it being one.
                 raise ValueError(
                     "MIN_SNR weights the MSE term, which a variational objective does not "
                     f"have; loss_type is {loss_type}"
                 )
             if model_mean_type is ModelMeanType.PREVIOUS_X:
-                # The weight is derived per parameterisation from how the
-                # target relates to x_0; x_{t-1} has no such closed form here.
                 raise ValueError("MIN_SNR is not defined for PREVIOUS_X prediction")
 
         if isinstance(betas, torch.Tensor):
@@ -253,17 +153,10 @@ class GaussianDiffusion(nn.Module):
         for name, buffer in ddpm_schedules(beta_t).items():
             self.register_buffer(name, buffer, persistent=False)
 
-        # The shared schedule clamps the posterior log-variance at 1e-20 before
-        # taking a log, which is fine for sampling because t=0 draws no noise.
-        # The bound's decoder term uses it as a log-scale, though, where
-        # exp(23) makes the 1/255 discretisation window span ~4e7 sigma and the
-        # CDF difference underflows. Substituting t=1's value keeps it finite.
         posterior_var = self.posterior_var
         clipped = torch.cat([posterior_var[1:2], posterior_var[1:]])
         self.register_buffer("posterior_logvar_clipped", clipped.log(), persistent=False)
         self.register_buffer("log_betas", beta_t.log(), persistent=False)
-        # FIXED_LARGE uses beta_t everywhere except t=0, where beta_0 would give
-        # a worse decoder likelihood than the posterior variance at t=1.
         fixed_large = torch.cat([posterior_var[1:2], beta_t[1:]])
         self.register_buffer("fixed_large_logvar", fixed_large.log(), persistent=False)
 
@@ -284,10 +177,6 @@ class GaussianDiffusion(nn.Module):
             2 when the variance is learned, 1 otherwise.
         """
         return 2 if self.model_var_type.is_learned else 1
-
-    # ------------------------------------------------------------------
-    # forward process q
-    # ------------------------------------------------------------------
 
     def q_sample(
         self,
@@ -336,10 +225,6 @@ class GaussianDiffusion(nn.Module):
         log_var = _expand(self.posterior_logvar_clipped, t, x_t)
         return mean, var, log_var
 
-    # ------------------------------------------------------------------
-    # reverse process p
-    # ------------------------------------------------------------------
-
     def p_mean_variance(
         self,
         x: torch.Tensor,
@@ -374,8 +259,6 @@ class GaussianDiffusion(nn.Module):
             if self.model_var_type is ModelVarType.LEARNED:
                 log_var = var_values
             else:
-                # var_values in [-1, 1] interpolates in log space between the
-                # two fixed choices, which bounds what the network can ask for.
                 min_log = _expand(self.posterior_logvar_clipped, t, x)
                 max_log = _expand(self.log_betas, t, x)
                 frac = (var_values + 1.0) / 2.0
@@ -402,9 +285,6 @@ class GaussianDiffusion(nn.Module):
             pred_xstart = pred_xstart.clamp(-1.0, 1.0) if clip else pred_xstart
             mean, _, _ = self.q_posterior_mean_variance(pred_xstart, x, t)
 
-        # The decoder term needs a per-pixel log-scale, and the learned
-        # branches already produce one; broadcast the fixed ones to match so
-        # both paths hand back the same shape.
         return mean, var.expand_as(x), log_var.expand_as(x), pred_xstart
 
     def _predict_xstart_from_eps(
@@ -480,10 +360,6 @@ class GaussianDiffusion(nn.Module):
         return (_expand(self.sqrt_recip_ab, t, x_t) * x_t - pred_xstart) / _expand(
             self.sqrt_recipm1_ab, t, x_t
         )
-
-    # ------------------------------------------------------------------
-    # objectives
-    # ------------------------------------------------------------------
 
     def vb_terms_bpd(
         self,
@@ -566,20 +442,14 @@ class GaussianDiffusion(nn.Module):
         if self.model_var_type.is_learned:
             channels = x_start.shape[1]
             mean_out, var_values = torch.split(model_output, channels, dim=1)
-            # Detach the mean so the bound trains only the variance head. Left
-            # attached, the KL term degrades the mean that L_simple is fitting.
             frozen = torch.cat([mean_out.detach(), var_values], dim=1)
             vb, _ = self.vb_terms_bpd(x_start, x_t, t, model_output=frozen)
             if self.loss_type is LossType.RESCALED_MSE:
-                # The 1/1000 keeps the term's scale independent of the schedule
-                # length, matching the reference implementation.
                 vb = vb * self.num_timesteps / 1000.0
             terms["vb"] = vb
             model_output = mean_out
 
         target = self._loss_target(x_start, x_t, t, eps)
-        # Kept unweighted: this is the term the per-timestep logging buckets,
-        # and a weight would make the buckets incomparable with each other.
         terms["mse"] = mean_flat((target - model_output) ** 2)
         loss = terms["mse"] * self.loss_weights(t)
         terms["loss"] = loss + terms["vb"] if "vb" in terms else loss
@@ -610,7 +480,6 @@ class GaussianDiffusion(nn.Module):
             case ModelMeanType.V:
                 return clamped / (snr + 1.0)
             case _:
-                # EPSILON. PREVIOUS_X is rejected in the constructor.
                 return clamped / snr
 
     def _loss_target(
@@ -678,9 +547,6 @@ class GaussianDiffusion(nn.Module):
         """
         t, weights = self.timestep_sampler.sample(x.shape[0], x.device)
         terms = self.training_losses(x, t, model=model)
-        # Updated with the unweighted loss: the proposal is meant to track how
-        # large each timestep's term actually is, and feeding it the
-        # importance-corrected value would have it chase its own correction.
         self.timestep_sampler.update(t, terms["loss"])
         per_sample = terms.get("mse", terms["loss"])
         return LossTerms(
@@ -714,10 +580,6 @@ class GaussianDiffusion(nn.Module):
         """
         return self.training_losses(x, t, noise=noise, model=model)["loss"].mean()
 
-    # ------------------------------------------------------------------
-    # sampling and evaluation
-    # ------------------------------------------------------------------
-
     @torch.no_grad()
     def sample(
         self,
@@ -748,7 +610,6 @@ class GaussianDiffusion(nn.Module):
             for step in reversed(range(self.num_timesteps)):
                 t = torch.full((num_samples,), step, device=device, dtype=torch.long)
                 mean, _, log_var, _ = self.p_mean_variance(x, t, model=net)
-                # No noise on the final step: x_0 is the mean itself.
                 noise = torch.randn_like(x) if step > 0 else torch.zeros_like(x)
                 x = mean + (0.5 * log_var).exp() * noise
                 if return_trajectory:

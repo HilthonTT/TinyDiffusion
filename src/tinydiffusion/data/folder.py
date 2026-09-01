@@ -235,9 +235,6 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
 
     classes = _class_dirs(scan_root)
     loose = sorted(
-        # Filtered exactly as `_images_under` filters, or a dot-entry that
-        # nothing would ever train on — a macOS `._img.jpg` sidecar, most
-        # often — reads as a loose image and makes a class layout look mixed.
         (path for path in scan_root.glob("*") if _is_image(path) and _visible(path, scan_root)),
         key=lambda path: path.as_posix(),
     )
@@ -268,8 +265,6 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
         )
 
     if explicit is None:
-        # One hash per image decides its split, so both calls see the same
-        # partition without either having to know about the other.
         wanted = [
             (path, label)
             for path, label in zip(paths, labels, strict=True)
@@ -349,8 +344,6 @@ class ImageFolderDataset(Dataset[tuple[torch.Tensor, int]]):
         """
         path = self.paths[index]
         with Image.open(path) as handle:
-            # Phone cameras store the rotation in EXIF rather than in the
-            # pixels, so without this a portrait photo trains as a landscape one.
             image = ImageOps.exif_transpose(handle)
             image = (image if image is not None else handle).convert(self._mode)
         return self.transform(image), self.labels[index]

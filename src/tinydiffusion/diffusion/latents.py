@@ -34,17 +34,12 @@ def initial_latent(
             another device.
     """
     if generator is not None and generator.device.type != torch.device(device).type:
-        # torch raises deep inside the first draw with a message that does not
-        # mention the generator; say it here instead.
         raise ValueError(
             f"generator is on {generator.device.type}, but sampling runs on "
             f"{torch.device(device).type}"
         )
     if noise is not None:
         if noise.shape != (num_samples, *size):
-            # Checked here rather than left to broadcast: a mismatch would
-            # otherwise surface several steps into the chain, as a shape error
-            # against a timestep buffer that has nothing to do with the cause.
             raise ValueError(
                 f"noise must be shaped {(num_samples, *size)}, got {tuple(noise.shape)}"
             )

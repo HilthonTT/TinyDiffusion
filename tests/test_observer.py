@@ -82,9 +82,6 @@ def fake_loader(monkeypatch):
 
 
 def test_a_recorder_satisfies_the_protocol():
-    # runtime_checkable, so this is a shape check rather than a subclass one --
-    # which is the point of the protocol: a watcher owes six methods, not a
-    # base class.
     assert isinstance(Recorder(), TrainObserver)
 
 
@@ -102,7 +99,6 @@ def test_the_plan_describes_the_run(tiny_cfg, fake_loader):
     assert plan.steps_per_epoch == 20
     assert plan.parameters > 0
     assert plan.device == "cpu"
-    # val_every is off in this config, so there is nothing held out.
     assert plan.validation_images == 0
 
 
@@ -110,7 +106,6 @@ def test_the_plan_line_is_delivered_rather_than_printed(tiny_cfg, fake_loader, c
     observer = Recorder()
     train_module.train(tiny_cfg, observer=observer)
 
-    # stdout belongs to whatever is watching; nothing may be written behind it.
     assert capsys.readouterr().out == ""
     assert any("parameters" in message for message in observer.messages)
 
@@ -123,9 +118,6 @@ def test_without_an_observer_the_run_still_prints(tiny_cfg, fake_loader, capsys)
 def test_the_device_fallback_notice_is_delivered_rather_than_printed(
     tiny_cfg, fake_loader, capsys, monkeypatch
 ):
-    # The notice comes from `resolve_device`, which the group setup calls before
-    # the loop has said anything -- so it is the one line that could still reach
-    # stdout behind a display's back, and be drawn into the middle of it.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     cfg = dataclasses.replace(tiny_cfg, device="cuda")
     observer = Recorder()
@@ -156,9 +148,7 @@ def test_batch_progress_advances_through_the_epoch(tiny_cfg, fake_loader):
     assert first.num_batches == 20
     assert first.num_epochs == 2
     assert 0.0 < first.epoch_fraction <= 1.0
-    # Reported once per DRAIN_EVERY batches, not once per batch.
     assert len(observer.batches) < 20 * 2
-    # Within an epoch the batch index only ever grows.
     per_epoch: dict[int, list[int]] = {}
     for progress in observer.batches:
         per_epoch.setdefault(progress.epoch, []).append(progress.batch)
@@ -193,8 +183,6 @@ def test_the_watcher_gets_each_sample_grid_as_it_is_written(tiny_cfg, fake_loade
 
 
 def test_save_samples_hands_back_the_path_it_wrote(tiny_cfg, fake_loader):
-    # The return value is what lets a watcher pick the grid up without
-    # reconstructing the filename from the epoch index.
     cfg = dataclasses.replace(tiny_cfg, sample_every=1)
     observer = Recorder()
     train_module.train(cfg, observer=observer)
@@ -202,12 +190,9 @@ def test_save_samples_hands_back_the_path_it_wrote(tiny_cfg, fake_loader):
 
 
 def test_a_watcher_can_stop_the_run(tiny_cfg, fake_loader):
-    # Stopping mid-epoch, and without the Ctrl+C prompt -- which has nobody to
-    # answer it when a display owns the terminal.
     observer = Recorder(stop_after=1)
     train_module.train(tiny_cfg, observer=observer)
 
-    # It stopped inside the first epoch, so the second never ran.
     assert [step for step, _ in observer.epochs] == [0]
     assert observer.batches[-1].epoch == 0
 
@@ -216,8 +201,6 @@ def test_stopping_leaves_a_resumable_checkpoint(tiny_cfg, fake_loader):
     observer = Recorder(stop_after=1)
     train_module.train(tiny_cfg, observer=observer)
 
-    # The same file a Ctrl+C would have written, so `--resume` picks it up the
-    # same way, and last.pt still means the newest complete epoch.
     interrupted = tiny_cfg.ckpt_dir / INTERRUPTED_CHECKPOINT
     assert interrupted.is_file()
     assert any("resume with" in message for message in observer.messages)

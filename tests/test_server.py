@@ -6,9 +6,6 @@ import time
 import pytest
 import torch
 
-# The whole module drives the app, which is FastAPI's; without the extra there
-# is nothing here to test. The message a missing FastAPI produces is covered in
-# test_cli.py, where it has to keep working on an install that lacks it.
 pytest.importorskip("fastapi", reason="needs the 'server' extra")
 
 from fastapi.testclient import TestClient
@@ -71,9 +68,6 @@ def conditional_client(make_config):
         yield c
 
 
-# --- config ---------------------------------------------------------------
-
-
 def test_the_default_bind_is_loopback():
     cfg = ServerConfig(checkpoint="m.pt")
     assert cfg.host == "127.0.0.1"
@@ -96,18 +90,11 @@ def test_the_default_precision_is_float32():
 
 
 def test_a_bad_precision_is_rejected_at_construction():
-    # Caught here rather than at the first request: the checkpoint load is the
-    # expensive part of startup, and a typo should not survive it.
     with pytest.raises(ValueError, match="unknown precision"):
         ServerConfig(checkpoint="m.pt", precision="float8")
 
 
-# --- status ---------------------------------------------------------------
-
-
 def test_status_reports_the_resolved_precision(make_config):
-    # Asked for half precision on a CPU, which cannot run it. The endpoint has
-    # to report what the samples are actually drawn at, not what was requested.
     with TestClient(create_app(make_config(precision="fp16"))) as c:
         assert c.get("/api/status").json()["precision"] == "fp32"
 
@@ -126,12 +113,8 @@ def test_status_reports_the_class_count_of_a_conditional_checkpoint(conditional_
 
 
 def test_requests_before_startup_are_refused(make_config):
-    # No context manager, so lifespan never runs and nothing is loaded.
     app = create_app(make_config())
     assert TestClient(app).get("/api/status").status_code == 503
-
-
-# --- sampling -------------------------------------------------------------
 
 
 def test_sampling_returns_a_fetchable_png(client):
@@ -210,19 +193,16 @@ def test_too_many_steps_are_refused(client):
 @pytest.mark.parametrize(
     "payload",
     [
-        {"num_images": 0},  # below the schema minimum
-        {"eta": 1.5},  # outside [0, 1]
-        {"steps": 0},  # below the schema minimum
-        {"guidance": -1.0},  # negative
-        {"guidance_rescale": 1.5},  # outside [0, 1]
-        {"guidance_rescale": -0.5},  # likewise
+        {"num_images": 0},
+        {"eta": 1.5},
+        {"steps": 0},
+        {"guidance": -1.0},
+        {"guidance_rescale": 1.5},
+        {"guidance_rescale": -0.5},
     ],
 )
 def test_the_schema_rejects_impossible_requests(client, payload):
     assert client.post("/api/sample", json=payload).status_code == 422
-
-
-# --- image serving --------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -236,7 +216,6 @@ def test_the_schema_rejects_impossible_requests(client, payload):
     ],
 )
 def test_only_names_this_server_issued_are_served(client, name):
-    # A decoded traversal must not escape the image directory.
     assert client.get(f"/images/{name}").status_code == 404
 
 
@@ -257,9 +236,6 @@ def test_the_service_resolves_its_own_filenames(make_config):
     assert path.parent == service.image_dir
 
 
-# --- cors -----------------------------------------------------------------
-
-
 def test_cors_is_off_by_default(client):
     r = client.get("/api/status", headers={"Origin": "http://evil.test"})
     assert "access-control-allow-origin" not in r.headers
@@ -269,13 +245,9 @@ def test_cors_allows_only_the_configured_origin(make_config):
     with TestClient(create_app(make_config(cors_origins=("http://ui.test",)))) as c:
         allowed = c.get("/api/status", headers={"Origin": "http://ui.test"})
         assert allowed.headers["access-control-allow-origin"] == "http://ui.test"
-        # Credentials are never allowed, so a browser cannot attach cookies.
         assert "access-control-allow-credentials" not in allowed.headers
         other = c.get("/api/status", headers={"Origin": "http://evil.test"})
         assert "access-control-allow-origin" not in other.headers
-
-
-# --- retention ------------------------------------------------------------
 
 
 def _stale(path, age):
@@ -303,8 +275,6 @@ def test_expired_images_are_swept(make_config):
 
 def test_the_image_count_is_capped(make_config):
     service = SamplerService(make_config(image_ttl=0, keep_images=2))
-    # Written directly rather than sampled: `sample` sweeps as it goes, and
-    # same-second mtimes would leave "oldest" ambiguous.
     written = [service.image_dir / f"{index:032x}.png" for index in range(4)]
     for age, path in enumerate(reversed(written)):
         path.write_bytes(b"")
@@ -350,9 +320,6 @@ def test_status_reports_the_retention_policy(client):
     assert body["keep_images"] > 0
 
 
-# --- seeding --------------------------------------------------------------
-
-
 def test_a_seeded_request_does_not_disturb_the_global_rng(make_config):
     """A client's seed must not reseed the process it is talking to."""
     service = SamplerService(make_config())
@@ -363,9 +330,6 @@ def test_a_seeded_request_does_not_disturb_the_global_rng(make_config):
 
     torch.manual_seed(1234)
     assert torch.equal(before, torch.randn(3))
-
-
-# --- admission control ------------------------------------------------------
 
 
 @pytest.fixture

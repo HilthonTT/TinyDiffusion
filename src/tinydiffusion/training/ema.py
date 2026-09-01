@@ -26,10 +26,6 @@ class EMA:
         self.module = copy.deepcopy(model).eval()
         for p in self.module.parameters():
             p.requires_grad_(False)
-        # Held rather than re-walked per update: the fused kernels below take
-        # lists, and this runs once per optimiser step for the whole run.
-        # Typed as plain tensors: Parameter is a Tensor, but `list` is
-        # invariant, and the fused kernels below are annotated over tensors.
         self._params: list[torch.Tensor] = list(self.module.parameters())
         self._buffers: list[torch.Tensor] = list(self.module.buffers())
 
@@ -88,10 +84,6 @@ class EMA:
         pairs = enumerate(zip(self._params, live, strict=True))
         mismatched = next((i for i, (held, new) in pairs if held.dtype != new.dtype), None)
         if mismatched is not None:
-            # torch._foreach_lerp_ rejects a mixed-dtype pair outright, several
-            # frames down and without naming the tensor. Saying which one, and
-            # that a reduced-precision model wants the `params` argument, is
-            # the difference between a two-minute fix and an afternoon.
             raise ValueError(
                 f"parameter {mismatched} is {live[mismatched].dtype} but this EMA holds "
                 f"{self._params[mismatched].dtype}; pass full-precision weights as `params` "
@@ -99,7 +91,5 @@ class EMA:
             )
         torch._foreach_lerp_(self._params, live, 1.0 - decay)
 
-        # Left as a loop: buffers are few, are not necessarily floating point,
-        # and are copied rather than averaged.
         for ema_b, b in zip(self._buffers, model.buffers(), strict=True):
             ema_b.copy_(b)

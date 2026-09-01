@@ -67,8 +67,6 @@ def test_the_spread_is_reported_across_splits():
     result = inception_score_from_probs(probs, splits=4)
     assert result.splits == 4
     assert result.split_size == 8
-    # Every chunk is the same shape, so there is nothing for the splits to
-    # disagree about.
     assert result.std == pytest.approx(0.0, abs=1e-6)
 
 

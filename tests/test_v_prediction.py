@@ -65,8 +65,6 @@ def test_the_velocity_target_is_bounded_where_epsilon_is_not():
     x_t = process.q_sample(x0, last, noise=eps)
 
     v = process._loss_target(x0, x_t, last, eps)
-    # At zero SNR the velocity is -x_0, which is as informative as a target
-    # gets; epsilon prediction there would be regressing on pure noise.
     assert torch.allclose(v, -x0, atol=1e-3)
     assert torch.isfinite(process._predict_xstart_from_v(x_t, last, v)).all()
 

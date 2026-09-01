@@ -68,9 +68,6 @@ def stats_over(n, dim=6, seed=0):
     return stats
 
 
-# --- FeatureStats serialisation --------------------------------------------
-
-
 def test_state_dict_round_trips_exactly():
     original = stats_over(20)
     restored = FeatureStats.from_state_dict(original.state_dict())
@@ -83,7 +80,6 @@ def test_state_dict_round_trips_exactly():
 
 
 def test_a_restored_accumulator_can_still_be_extended():
-    # The raw moments are what is stored, so a restored set is not a dead end.
     straight = stats_over(10, seed=1)
     straight.update(torch.ones(4, 6))
     restored = FeatureStats.from_state_dict(stats_over(10, seed=1).state_dict())
@@ -104,9 +100,6 @@ def test_a_state_dict_with_the_wrong_shapes_is_rejected():
     state["sum"] = torch.zeros(3)
     with pytest.raises(ValueError, match="must hold"):
         FeatureStats.from_state_dict(state)
-
-
-# --- the cache key ----------------------------------------------------------
 
 
 def test_the_path_lives_under_the_dataset_root(tmp_path):
@@ -146,9 +139,6 @@ def test_every_input_that_moves_the_statistics_moves_the_key(tmp_path, changed):
 
 def test_the_extractor_id_separates_classes_of_the_same_width():
     assert extractor_id(StubExtractor()) != extractor_id(OtherExtractor())
-
-
-# --- reading and writing ----------------------------------------------------
 
 
 def test_a_saved_entry_reads_back(tmp_path):
@@ -202,17 +192,12 @@ def test_saving_leaves_no_temporary_files_behind(tmp_path):
 
 
 def test_an_unwritable_destination_is_not_fatal(tmp_path, monkeypatch):
-    # The score has already been computed by this point; failing to memoise it
-    # is not a reason to throw it away.
     def refuse(*args, **kwargs):
         raise OSError("read-only file system")
 
     monkeypatch.setattr(torch, "save", refuse)
     save_reference_stats(tmp_path / "entry.pt", stats_over(20))
     assert not (tmp_path / "entry.pt").exists()
-
-
-# --- the cache inside a scoring run ----------------------------------------
 
 
 @pytest.fixture
@@ -251,7 +236,6 @@ def test_the_second_score_does_not_re_read_the_real_images(checkpoint):
     first = score(checkpoint, extractor)
     after_first = extractor.seen
     second = score(checkpoint, extractor)
-    # 8 real + 8 generated the first time; only the 8 generated the second.
     assert after_first == 16
     assert extractor.seen - after_first == 8
     assert first.fid == pytest.approx(second.fid)
@@ -284,7 +268,6 @@ def test_a_different_image_count_does_not_reuse_the_entry(checkpoint):
     fid_for_checkpoint(checkpoint, num_images=8, num_steps=2, extractor=extractor, progress=False)
     after_first = extractor.seen
     fid_for_checkpoint(checkpoint, num_images=6, num_steps=2, extractor=extractor, progress=False)
-    # A different reference set, so its features are computed rather than read.
     assert extractor.seen - after_first == 12
 
 
@@ -317,7 +300,6 @@ def test_the_second_scored_run_reuses_the_cached_features(checkpoint):
     after_first = extractor.seen
     second = score(checkpoint, extractor, **kwargs)
 
-    # 8 real + 8 generated the first time; only the 8 generated the second.
     assert after_first == 16
     assert extractor.seen - after_first == 8
     assert first.fid == pytest.approx(second.fid)
@@ -325,8 +307,6 @@ def test_the_second_scored_run_reuses_the_cached_features(checkpoint):
 
 
 def test_a_moments_entry_cannot_stand_in_for_a_feature_one(checkpoint):
-    # The moments hold no vectors, so KID has to re-read the real images even
-    # though a FID-shaped entry for this exact set is already on disk.
     extractor = StubExtractor()
     score(checkpoint, extractor)
     after_fid_only = extractor.seen
@@ -374,7 +354,4 @@ def test_the_two_kinds_of_entry_key_the_same_way(tmp_path):
     assert features.parent == stats.parent == spatial.parent
     assert features.name == f"{stats.stem}_features.pt"
     assert spatial.name == f"{stats.stem}_spatial.pt"
-    # Three distinct files: the moments, the vectors, and the spatial moments
-    # sFID is taken in. One overwriting another would silently score a set of
-    # images in the wrong feature space.
     assert len({stats, features, spatial}) == 3

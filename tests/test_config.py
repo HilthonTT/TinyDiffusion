@@ -20,8 +20,6 @@ def test_shipped_config_matches_the_defaults():
 
 
 def test_the_shipped_configs_train_conditionally():
-    # Conditioning is the one place mnist.toml departs from the defaults, and
-    # smoke.toml carries it too so the smoke run covers the conditional path.
     for name in ("mnist", "smoke"):
         cfg = load_config(Path(f"configs/{name}.toml"))
         assert cfg.num_classes == 10
@@ -87,23 +85,16 @@ def test_invalid_values_are_rejected():
     ],
 )
 def test_out_of_range_sizes_and_rates_are_rejected(field, value):
-    # These used to be accepted and fail somewhere downstream — or, for
-    # ema_decay, not fail at all while quietly extrapolating the average away
-    # from the weights it follows.
     with pytest.raises(ValueError, match=field):
         TrainConfig(**{field: value})
 
 
 def test_the_step_counts_are_reported_against_a_usable_schedule():
-    # num_timesteps is checked first: bounded by it, sample_steps would
-    # otherwise blame itself for a schedule that has no steps to index.
     with pytest.raises(ValueError, match="num_timesteps"):
         TrainConfig(num_timesteps=0, sample_steps=1)
 
 
 def test_the_disabling_zeroes_are_still_accepted():
-    # 0 means "off" for each of these, and the new range checks must not have
-    # turned any of them into an error.
     assert TrainConfig(grad_clip=0.0).grad_clip == 0.0
     assert TrainConfig(ema_warmup=0).ema_warmup == 0
     assert TrainConfig(num_epochs=0).num_epochs == 0
@@ -126,16 +117,12 @@ def test_guidance_needs_a_conditional_model():
 
 
 def test_guidance_needs_a_trained_null_token():
-    # class_dropout=0 never shows the network the null token, so guidance would
-    # extrapolate away from an untrained embedding.
     with pytest.raises(ValueError, match="class_dropout"):
         TrainConfig(num_classes=10, class_dropout=0.0, guidance=2.0)
-    # Plain conditional sampling is fine without it.
     assert TrainConfig(num_classes=10, class_dropout=0.0).guidance == 1.0
 
 
 def test_from_mapping_round_trips_a_checkpoint_config():
-    # save_checkpoint stringifies Paths; from_mapping must undo that.
     cfg = TrainConfig(out_dir=Path("runs/two"), channel_mult=(1, 2))
     stored = {"out_dir": "runs/two", "channel_mult": (1, 2), "device": "cpu"}
     restored = TrainConfig.from_mapping(stored)
@@ -154,8 +141,6 @@ def test_an_unregistered_dataset_is_refused_up_front():
 
 
 def test_the_class_count_has_to_match_the_datasets_label_space():
-    # The labels come from the dataset, so a smaller count indexes past the
-    # embedding table the moment a batch carries a higher one.
     with pytest.raises(ValueError, match="does not match mnist"):
         TrainConfig(dataset="mnist", num_classes=4)
 
@@ -186,8 +171,6 @@ def test_bad_optimisation_settings_are_refused_when_the_config_is_read(kwargs, m
 
 
 def test_betas_survive_the_toml_round_trip(tmp_path):
-    # TOML has no tuple, so an uncoerced list would reach AdamW as a list and
-    # compare unequal to the checkpoint's provenance on resume.
     path = tmp_path / "c.toml"
     path.write_text("""
     [optimisation]
@@ -197,7 +180,6 @@ def test_betas_survive_the_toml_round_trip(tmp_path):
 
 
 def test_the_performance_settings_default_to_the_conservative_choice():
-    # Each is a behaviour or throughput change the user should opt into.
     cfg = TrainConfig()
     assert (cfg.compile, cfg.channels_last, cfg.grad_accum) == (False, False, 1)
     assert (cfg.amp_dtype, cfg.lr_schedule, cfg.weight_decay) == ("fp16", "constant", 0.0)

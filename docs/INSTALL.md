@@ -51,7 +51,7 @@ Training also names the device on its first line:
 
 ## Run something
 
-This is a `src/` layout, so `python src/tinydiffusion/cli.py` does **not**
+This is a `src/` layout, so `python src/tinydiffusion/cli/commands.py` does **not**
 work — it puts that file's own directory on `sys.path` rather than `src/`. Use
 the wrappers, which find the environment the package is installed in and hand
 off to it:
@@ -155,7 +155,7 @@ uv sync --all-extras --dev
 
 ### `ModuleNotFoundError: No module named 'tinydiffusion'`
 
-You ran `python src/tinydiffusion/cli.py`. Use `./scripts/run.sh` or `.\scripts\run.ps1`, or
+You ran `python src/tinydiffusion/cli/commands.py`. Use `./scripts/run.sh` or `.\scripts\run.ps1`, or
 `uv run --no-sync tinydiffusion ...`.
 
 ### `run.ps1: tinydiffusion is not installed in ...`

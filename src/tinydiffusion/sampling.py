@@ -52,13 +52,6 @@ def load_for_sampling(
         raise ValueError(f"{checkpoint} stores no config; cannot infer the architecture")
 
     cfg = TrainConfig.from_mapping({**ckpt["config"], "device": resolved})
-    # Gradient checkpointing is a backward-pass trade, and nothing that loads a
-    # checkpoint for sampling runs one. The blocks would fall through to the
-    # plain call anyway — see
-    # :func:`~tinydiffusion.models.blocks._checkpointed` — so this changes no
-    # result; it just stops a run trained with it on building wrappers that can
-    # never fire. The returned config is left alone, so it still reports what
-    # the checkpoint was trained with.
     diffusion = build_model(replace(cfg, grad_checkpoint=False)).to(resolved)
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
     restore_checkpoint(ckpt, diffusion=diffusion, ema=ema)
@@ -207,17 +200,11 @@ def sample_from_checkpoint(
     )
     scale = cfg.guidance if guidance is None else guidance
     rescale = cfg.guidance_rescale if guidance_rescale is None else guidance_rescale
-    # Under the conditioning wrapper, not over it: guidance extrapolates and
-    # rescales in float32 whatever the network itself runs in.
     net = apply_precision(ema.module, resolve_precision(precision, cfg.device), cfg.device)
 
     shape = (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size)
     draw = get_sampler(cfg.sampler if sampler is None else sampler)
     batch = num_images if batch_size is None else min(batch_size, num_images)
-    # Every image's starting latent, drawn before the loop rather than by each
-    # batch as it starts. This is the same draw the sampler would make for an
-    # unbatched run — same shape, same device, same generator, and still the
-    # first draw of the chain — so splitting the work leaves the images alone.
     noise = torch.randn(num_images, *shape, device=cfg.device)
 
     chunks = []
@@ -233,8 +220,6 @@ def sample_from_checkpoint(
                 eta=eta,
                 model=conditioned(
                     net,
-                    # Sliced with the batch, so image i keeps the label it
-                    # would have had whatever the split.
                     None if y is None else y[start:stop],
                     num_classes=cfg.num_classes,
                     scale=scale,
@@ -242,10 +227,7 @@ def sample_from_checkpoint(
                 ),
                 noise=noise[start:stop],
                 spacing=cfg.sample_spacing if spacing is None else spacing,
-            )
-            # Off the device as each batch finishes: holding every batch in
-            # VRAM would put back the ceiling the batching just removed.
-            .cpu()
+            ).cpu()
         )
     images = torch.cat(chunks)
 

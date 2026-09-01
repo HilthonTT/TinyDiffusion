@@ -83,25 +83,12 @@ def create_app(config: ServerConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
-        # Loading here rather than in this factory keeps the cost inside the
-        # server's own startup, where uvicorn reports it, and lets tests build
-        # an app without touching a checkpoint.
         logger.info("loading %s", config.checkpoint)
         app.state.service = await run_in_threadpool(SamplerService, config)
         logger.info("ready on %s", app.state.service.device)
         yield
         app.state.service = None
 
-    # Admission control for /api/sample. The service renders one request at a
-    # time whatever arrives, so what this bounds is the queue behind it: a slot
-    # is held for as long as a caller is waiting *or* being served, and a
-    # caller who cannot get one is told so immediately.
-    #
-    # Two things go wrong without it. The wait is unbounded — twenty callers
-    # for a two-minute render means the last of them waits forty minutes on a
-    # connection nobody is going to keep open — and each one of those waits
-    # holds a thread from the pool that every other blocking route shares, so a
-    # burst of sampling requests takes the rest of the API down with it.
     inflight = anyio.Semaphore(config.max_inflight)
 
     app = FastAPI(
@@ -117,8 +104,6 @@ def create_app(config: ServerConfig) -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(config.cors_origins),
-            # No credentials: the API has no session to protect, and pairing
-            # credentials with a wildcard origin is rejected by browsers anyway.
             allow_credentials=False,
             allow_methods=["GET", "POST"],
             allow_headers=["*"],
@@ -155,10 +140,6 @@ def create_app(config: ServerConfig) -> FastAPI:
                 503 if too many callers are already waiting to be served.
         """
         try:
-            # Checked here rather than inside the threadpool call below: it is
-            # microseconds of arithmetic, and doing it first means a request
-            # that was never going to work costs neither a thread nor one of
-            # the slots a caller who *could* be served is waiting for.
             plan = service.plan(
                 num_images=request.num_images,
                 labels=request.labels,
@@ -169,16 +150,11 @@ def create_app(config: ServerConfig) -> FastAPI:
                 seed=request.seed,
             )
         except ValueError as exc:
-            # Every ValueError out of the service is a statement about the
-            # request, not about the server.
             raise HTTPException(400, str(exc)) from exc
 
         try:
             inflight.acquire_nowait()
         except anyio.WouldBlock:
-            # 503 with Retry-After rather than a queue: the caller is the one
-            # who knows whether waiting is worth it, and telling them now is
-            # more useful than a connection that goes quiet for an hour.
             raise HTTPException(
                 503,
                 "the server is already sampling as many requests as it accepts at once; "
@@ -187,8 +163,6 @@ def create_app(config: ServerConfig) -> FastAPI:
             ) from None
 
         try:
-            # Sampling is a long blocking CUDA/CPU call; on the event loop it
-            # would stall every other request, including /api/status.
             path = await run_in_threadpool(service.render, plan)
         finally:
             inflight.release()
@@ -211,9 +185,6 @@ def create_app(config: ServerConfig) -> FastAPI:
         try:
             path = service.image_path(filename)
         except ValueError as exc:
-            # 404 rather than 400: a rejected name and a missing file are the
-            # same thing to a caller, and saying which is which would confirm
-            # what does exist on disk.
             raise HTTPException(404, "image not found") from exc
         if not path.is_file():
             raise HTTPException(404, "image not found")
@@ -233,7 +204,7 @@ def serve(config: ServerConfig) -> None:
     """
     try:
         import uvicorn
-    except ImportError as exc:  # pragma: no cover - exercised by the extra
+    except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "the server needs the 'server' extra: pip install 'tinydiffusion[server]'"
         ) from exc

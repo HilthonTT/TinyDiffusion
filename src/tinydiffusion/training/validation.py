@@ -94,13 +94,6 @@ def validation_loss(
             scored = Conditioned(model, y.to(device)) if num_classes is not None else model
             for step in steps:
                 t = step.expand(x.shape[0])
-                # Drawn per timestep, not once per batch. One draw reused down
-                # the grid makes the terms share a noise realisation, so the
-                # average is an estimate of the loss under that one draw rather
-                # than under the objective — and a draw that happens to sit far
-                # from the mean biases every timestep the same way. Drawn on
-                # the CPU and moved, so the same seed gives the same noise
-                # whether the run is on a GPU or not.
                 noise = torch.randn(x.shape, generator=generator).to(device)
                 total += float(diffusion.loss_at(x, t, noise=noise, model=scored)) * x.shape[0]
             num_images += x.shape[0]

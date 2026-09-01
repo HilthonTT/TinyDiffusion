@@ -39,8 +39,6 @@ class DDPM(nn.Module):
             both workable; beta_tilde is the true posterior variance.
     """
 
-    # Registered from `ddpm_schedules` in __init__; declared here so the schedule
-    # surface is visible on the class and typed as tensors rather than modules.
     betas: torch.Tensor
     alpha_t: torch.Tensor
     alphabar_t: torch.Tensor
@@ -197,7 +195,6 @@ class DDPM(nn.Module):
                 eps = net(x, t)
 
                 if self.clip_denoised:
-                    # Recover x_0, clamp it, then rebuild the posterior mean.
                     x0 = (
                         self._extract(self.sqrt_recip_ab, t, x) * x
                         - self._extract(self.sqrt_recipm1_ab, t, x) * eps
@@ -215,7 +212,7 @@ class DDPM(nn.Module):
                     var = self.posterior_var if self.variance == "small" else self.betas
                     x = mean + self._extract(var, t, x).sqrt() * torch.randn_like(x)
                 else:
-                    x = mean  # no noise on the final step
+                    x = mean
 
                 if return_trajectory:
                     traj.append(x)

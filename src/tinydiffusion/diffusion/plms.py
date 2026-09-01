@@ -124,7 +124,6 @@ def plms_sample(
             diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
         )
     ts = timesteps.to(device)
-    # As in DDIM, the last step lands on a t=-1 sentinel whose alphabar is 1.
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])
 
     alphabar = diffusion.alphabar_t
@@ -132,7 +131,6 @@ def plms_sample(
 
     with eval_mode(net):
         x = initial_latent(num_samples, size, device, noise=noise, generator=generator)
-        # Newest first, so the coefficient tuples index straight into it.
         history: list[torch.Tensor] = []
 
         for t_cur, t_prev in zip(ts, ts_prev, strict=True):
@@ -148,14 +146,9 @@ def plms_sample(
             for weight, past in zip(weights[1:], history, strict=True):
                 eps_hat = eps_hat + weight * past
 
-            # DDIM's transfer, taken along the extrapolated noise rather than
-            # the measured one. Both ends use the same estimate, which is what
-            # keeps the implied x_0 and the direction term consistent.
             x0 = (x - (1 - ab_t).sqrt() * eps_hat) / ab_t.sqrt()
             x = ab_prev.sqrt() * x0 + (1 - ab_prev).sqrt() * eps_hat
 
-            # The *measured* estimate is what the next step extrapolates from;
-            # storing the extrapolated one would compound its own error.
             history.insert(0, eps)
             del history[_MAX_HISTORY:]
 

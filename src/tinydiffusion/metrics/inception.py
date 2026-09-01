@@ -102,8 +102,6 @@ class InceptionFeatures(nn.Module):
         dim: feature width, always :data:`INCEPTION_DIM`.
     """
 
-    # Declared so the registered buffers type as tensors rather than as the
-    # Tensor | Module union `nn.Module.__getattr__` is annotated with.
     mean: torch.Tensor
     std: torch.Tensor
 
@@ -121,17 +119,10 @@ class InceptionFeatures(nn.Module):
         super().__init__()
         try:
             from torchvision.models import inception_v3
-        except ImportError as exc:  # pragma: no cover - torchvision is a hard dep
+        except ImportError as exc:  # pragma: no cover
             raise ImportError("computing FID needs torchvision installed") from exc
 
-        # transform_input applies the original TF-graph rescaling on top of
-        # ImageNet normalisation; we normalise ourselves, so it stays off.
         net = inception_v3(weights=weights, transform_input=False, init_weights=False)
-        # The 1000-way classifier is the part FID explicitly does not want: the
-        # score is over the 2048-d pooled features feeding it. Moved aside
-        # rather than thrown away, because the Inception Score is exactly the
-        # part that does want it, and re-loading the weights to get it back
-        # would be a second copy of a 100 MB network.
         self.classifier = net.fc
         net.fc = nn.Identity()
         net.eval()
@@ -140,8 +131,6 @@ class InceptionFeatures(nn.Module):
 
         mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
         std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
-        # Buffers rather than plain tensors so `.to(device)` moves them with the
-        # rest of the module.
         self.register_buffer("mean", mean, persistent=False)
         self.register_buffer("std", std, persistent=False)
 
@@ -165,12 +154,8 @@ class InceptionFeatures(nn.Module):
 
         x = denormalize(images.to(self.mean.dtype))
         if channels == 1:
-            # Inception has no greyscale input; replicating is what every FID
-            # implementation does for single-channel data.
             x = x.expand(-1, 3, -1, -1)
         if x.shape[-2:] != (INCEPTION_SIZE, INCEPTION_SIZE):
-            # antialias matters here: MNIST at 32px is being upsampled ~9x, and
-            # the two resize paths otherwise disagree enough to move the score.
             x = F.interpolate(
                 x,
                 size=(INCEPTION_SIZE, INCEPTION_SIZE),
@@ -214,13 +199,8 @@ class InceptionFeatures(nn.Module):
         try:
             pool = self.net(self.preprocess(images.to(self.mean.device)))
         finally:
-            # Removed however the pass ended: a hook left behind would append
-            # to a dead list on the next call and hold the tensors alive.
             handle.remove()
 
         spatial = captured[0][:, :SFID_CHANNELS].flatten(1)
-        # softmax rather than log-softmax: the IS reads both p(y|x) and its
-        # mean over the batch, and the mean has to be taken in probability
-        # space.
         probs = self.classifier(pool).softmax(dim=-1)
         return InceptionOutputs(pool=pool, spatial=spatial, probs=probs)

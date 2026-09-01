@@ -133,8 +133,6 @@ def from_environment() -> Distributed:
     return Distributed(
         enabled=True,
         rank=int(os.environ.get("RANK", "0")),
-        # Falls back to RANK for launchers that set only the global index,
-        # which is the same number on the single-node runs those are used for.
         local_rank=int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))),
         world_size=world_size,
     )
@@ -167,21 +165,11 @@ def setup(
     """
     group = from_environment()
     if not group.enabled:
-        # The single-process answer, unchanged: whatever the config asked for,
-        # with the CPU fallback resolve_device applies when CUDA was requested
-        # and none is visible.
         return group, resolve_device(requested_device, say=say)
 
-    # The backend follows the hardware, not the request: NCCL is the only one
-    # that moves gradients between GPUs at a useful rate, and it does not touch
-    # CPU tensors at all. gloo covers the CPU case, which is what the tests and
-    # a machine without a second GPU exercise.
     wants_cpu = requested_device is not None and torch.device(requested_device).type == "cpu"
     cuda = torch.cuda.is_available() and not wants_cpu
     if cuda:
-        # Before init_process_group: NCCL binds its communicator to the current
-        # device, and every rank leaving that at cuda:0 is the classic way to
-        # get a hang on the first all-reduce.
         torch.cuda.set_device(group.local_rank)
         device = f"cuda:{group.local_rank}"
     else:
@@ -317,8 +305,6 @@ def any_rank(flag: bool, group: Distributed, *, device: str = "cpu") -> bool:
     """
     if not group.enabled or not dist.is_initialized():
         return flag
-    # A one-element sum is the portable spelling: ReduceOp.BOR is unsupported
-    # on NCCL, and any non-zero total means at least one rank set the flag.
     total = torch.tensor([1.0 if flag else 0.0], device=device)
     dist.all_reduce(total, op=dist.ReduceOp.SUM)
     return bool(total.item() > 0)

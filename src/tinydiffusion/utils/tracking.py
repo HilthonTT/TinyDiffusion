@@ -144,8 +144,6 @@ def read_metrics(path: Path) -> list[dict[str, Any]]:
         if not isinstance(step, int):
             continue
         previous = latest.get(step)
-        # Ordered by session rather than by position: a file written before
-        # sessions existed has none, and then file order is all there is.
         if previous is None or record.get("session", 0) >= previous.get("session", 0):
             latest[step] = record
     return [latest[step] for step in sorted(latest)]
@@ -268,10 +266,7 @@ class JsonlBackend:
             "time": time.time(),
             "session": self._session,
         }
-        # allow_nan=False so anything that slipped past _jsonable raises here
-        # rather than writing a token no strict parser will read back.
         self._handle.write(json.dumps(record, allow_nan=False) + "\n")
-        # Flushed per step so a killed run keeps everything up to the last epoch.
         self._handle.flush()
 
     def close(self) -> None:
@@ -459,9 +454,6 @@ class RunLogger:
                     WandbBackend(
                         log_dir,
                         project=wandb_project,
-                        # The run directory is what distinguishes one run from
-                        # the next locally, so it is the name that makes a W&B
-                        # dashboard line up with the checkpoints on disk.
                         name=log_dir.name,
                         config=wandb_config,
                     )
@@ -616,9 +608,6 @@ def timestep_quartile_totals(
             f"timestep shape {tuple(timesteps.shape)}"
         )
 
-    # Integer arithmetic rather than a scale-and-truncate through float: with
-    # t and num_timesteps both integers this is exact for the whole range,
-    # where t * (4 / T) can land a boundary timestep on either side of it.
     quartile = (timesteps * 4 // num_timesteps).clamp(0, 3)
     empty = torch.zeros(4, dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     sums = empty.scatter_add(0, quartile, per_sample_loss)

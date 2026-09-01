@@ -28,8 +28,6 @@ def test_samples_from_the_same_distribution_score_high_on_both(real):
 
 
 def test_a_collapsed_model_keeps_its_precision_and_loses_its_recall(real):
-    # Everything it draws is plausible; it just draws the same small region
-    # every time. A single number cannot tell this from the case below.
     result = compute_precision_recall(draw(400, scale=0.05, seed=1), real)
     assert result.precision > 0.9
     assert result.recall < 0.1
@@ -56,7 +54,6 @@ def test_a_bigger_neighbourhood_never_shrinks_the_manifold(real):
     fake = draw(300, scale=1.6, seed=1)
     tight = compute_precision_recall(fake, real, neighbours=1)
     loose = compute_precision_recall(fake, real, neighbours=9)
-    # Wider balls can only swallow more of the other set.
     assert loose.precision >= tight.precision
 
 

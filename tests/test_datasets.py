@@ -23,8 +23,6 @@ def _fake_digit(size=MNIST.native_size):
 
 def test_every_registered_spec_is_keyed_under_its_own_name():
     assert all(name == spec.name for name, spec in DATASETS.items())
-    # Every registry entry is offerable, plus "folder", which is a name a
-    # config may give but has no fixed spec to register.
     assert set(dataset_names()) == set(DATASETS) | {FOLDER_DATASET}
     assert dataset_names() == tuple(sorted(dataset_names()))
 
@@ -55,14 +53,12 @@ def test_transform_maps_pixels_into_the_model_range():
 
 
 def test_a_flip_is_only_added_when_asked_for():
-    # The flip draws from the global RNG, so a scored split must never get one.
     plain = image_transform(3, 32)
     flipped = image_transform(3, 32, hflip=True)
     assert len(flipped.transforms) == len(plain.transforms) + 1
 
 
 def test_the_digit_sets_opt_out_of_horizontal_flips():
-    # A mirrored 2 is not a 2, so the augmentation would teach the wrong label.
     assert not dataset_spec("mnist").hflip
     assert dataset_spec("cifar10").hflip
 
@@ -84,8 +80,6 @@ def test_the_training_split_shuffles_and_drops_the_ragged_batch(fake_dataset):
 
 
 def test_scoring_can_keep_every_image_in_order(fake_dataset):
-    # What evaluation needs: dropping the last batch would omit images from
-    # the average, and shuffling would make the batching order RNG-dependent.
     loader = datasets_module.image_dataloader(
         MNIST, train=True, batch_size=4, num_workers=0, shuffle=False, drop_last=False
     )

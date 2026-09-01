@@ -31,7 +31,6 @@ class WideLabelEcho(LabelEcho):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         mean = super().forward(x, t, y)
-        # Distinguishable from any label so a leaked variance is obvious.
         return torch.cat([mean, torch.full_like(mean, -7.0)], dim=1)
 
 
@@ -53,7 +52,6 @@ def test_guidance_extrapolates_away_from_the_null_prediction(batch):
     x, t, y = batch
     scale = 3.0
     out = ClassifierFreeGuidance(LabelEcho(), y, scale, NUM_CLASSES)(x, t)
-    # null + scale * (label - null), with the echo net making both terms exact.
     expected = NULL + scale * (y.float() - NULL)
     assert torch.allclose(out[:, 0, 0, 0], expected)
 
@@ -67,8 +65,6 @@ def test_the_guidance_endpoints_are_the_two_predictions(batch, scale, expected):
 
 
 def test_guidance_leaves_a_learned_variance_alone(batch):
-    # Extrapolating a log-variance has no interpretation and readily leaves the
-    # schedule's bracket, so only the mean channels are guided.
     x, t, y = batch
     out = ClassifierFreeGuidance(WideLabelEcho(), y, 5.0, NUM_CLASSES)(x, t)
 
@@ -78,9 +74,6 @@ def test_guidance_leaves_a_learned_variance_alone(batch):
 
 
 def test_the_wrappers_adopt_the_networks_eval_mode(batch):
-    # eval_mode() restores whatever mode it found on the module it was handed,
-    # so a wrapper stuck at nn.Module's default would put an eval net back into
-    # training after sampling.
     _, _, y = batch
     net = LabelEcho().eval()
     assert not Conditioned(net, y).training
@@ -94,8 +87,6 @@ def test_conditioned_returns_an_unconditional_net_untouched():
 
 
 def test_scale_of_one_skips_the_doubled_batch(batch):
-    # Guidance at 1.0 multiplies the unconditional pass out of the result, so
-    # paying for it would be pure waste.
     _, _, y = batch
     assert isinstance(conditioned(LabelEcho(), y, num_classes=NUM_CLASSES), Conditioned)
     assert isinstance(

@@ -1,27 +1,15 @@
 """The training dashboard: a Textual app wrapped round :func:`train`.
 
-Training is a blocking loop that wants a thread of its own, and a Textual app
-is an asyncio event loop that must never be blocked. The two are joined at
-exactly two points, and everything else here follows from them:
-
-* :class:`TuiObserver` implements
-  :class:`~tinydiffusion.training.observer.TrainObserver` and is called from
-  the training thread. It touches no widget; it hands each event to the app
-  with ``call_from_thread`` and lets the event loop apply it.
-* Stopping is a :class:`threading.Event`. It is the one thing the training
-  thread reads rather than writes, so it needs no marshalling at all — and it
-  is why a run can be ended from a keypress without the Ctrl+C prompt, which
-  has nobody to answer it while a display owns the terminal.
-
-The screen itself is assembled from :mod:`tinydiffusion.tui.widgets`, which
-knows how to draw and nothing else. What is worth showing, and when, is decided
-here.
+:class:`TinyDiffusionApp` decides what is worth showing and when. Everything
+else is next door: :mod:`~tinydiffusion.tui.observer` carries the run's events
+across the thread boundary, :mod:`~tinydiffusion.tui.layout` says where things
+sit, :mod:`~tinydiffusion.tui.format` turns numbers into the strings on screen,
+and :mod:`~tinydiffusion.tui.widgets` knows how to draw and nothing else.
 """
 
 from __future__ import annotations
 
 import contextlib
-import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -33,13 +21,15 @@ from textual import on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, ProgressBar, RichLog, Static
 
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.observer import BatchProgress, TrainPlan
 from tinydiffusion.training.train import train
+from tinydiffusion.tui.format import duration, epoch_summary, run_eta, two_columns
+from tinydiffusion.tui.layout import APP_CSS, NARROW, VERY_NARROW, Panel
+from tinydiffusion.tui.observer import TrainingEnded, TuiObserver
 from tinydiffusion.tui.screens import HelpScreen, ThemeScreen
 from tinydiffusion.tui.themes import (
     CUSTOM_THEMES,
@@ -61,6 +51,9 @@ if TYPE_CHECKING:
     from textual.screen import Screen
 
 __all__ = [
+    "MAX_POINTS",
+    "NARROW",
+    "VERY_NARROW",
     "LossChart",
     "Panel",
     "QuartileBars",
@@ -71,39 +64,15 @@ __all__ = [
     "TinyDiffusionApp",
     "TrainingEnded",
     "TuiObserver",
+    "duration",
+    "epoch_summary",
+    "run_eta",
+    "two_columns",
 ]
 
-UI_INTERVAL = 0.05
-"""Seconds between UI updates driven from the training thread.
-
-``call_from_thread`` blocks the caller until the event loop has run the
-callback, so an unthrottled observer would have training wait on rendering. The
-batch callback already fires only once per
-:data:`~tinydiffusion.training.train.DRAIN_EVERY` batches; this bounds it again
-in time, for the small model whose batches go by faster than a screen refresh.
-"""
 
 MAX_POINTS = 240
 """Epochs kept per chart series. A chart cannot show more than its width."""
-
-NARROW = 100
-"""Columns below which the tiles are dropped and the sidebar tightened."""
-
-VERY_NARROW = 72
-"""Columns below which the sidebar goes entirely and the charts take the room."""
-
-
-class TrainingEnded(Message):
-    """Posted when the training worker leaves, however it left.
-
-    Args:
-        error: the exception that ended the run, or None if it ran to the last
-            epoch or stopped because it was asked to.
-    """
-
-    def __init__(self, error: BaseException | None) -> None:
-        super().__init__()
-        self.error = error
 
 
 @dataclass
@@ -127,118 +96,6 @@ class Series:
             del self.values[0]
 
 
-class TuiObserver:
-    """Carries training events from the worker thread to the app.
-
-    Every method here runs on the training thread. None of them touches a
-    widget: each hands the work to the event loop, which is the only place
-    Textual allows a UI to be changed from.
-
-    Args:
-        app: the app to deliver events to.
-    """
-
-    def __init__(self, app: TinyDiffusionApp) -> None:
-        self._app = app
-        self._stop = threading.Event()
-        self._last_ui = 0.0
-
-    def request_stop(self) -> None:
-        """Ask the run to end at the next batch boundary. Safe from any thread."""
-        self._stop.set()
-
-    def stop_requested(self) -> bool:
-        """Whether a stop has been asked for.
-
-        Returns:
-            True once :meth:`request_stop` has been called.
-        """
-        return self._stop.is_set()
-
-    def _deliver(self, name: str, *args: object) -> None:
-        """Run one of the app's handlers on the event loop.
-
-        Args:
-            name: the app method to call.
-            *args: its arguments.
-        """
-        # The app may be shutting down, its loop already gone. A run that
-        # outlives the display has nothing useful to tell it, and that is not a
-        # reason to take the training thread down too.
-        with contextlib.suppress(RuntimeError):
-            self._app.call_from_thread(getattr(self._app, name), *args)
-
-    def on_plan(self, plan: TrainPlan) -> None:
-        """Hand the resolved plan to the app.
-
-        Args:
-            plan: what the run settled on.
-        """
-        self._deliver("apply_plan", plan)
-
-    def on_message(self, text: str) -> None:
-        """Hand one of the run's lines to the log pane.
-
-        Args:
-            text: the message.
-        """
-        self._deliver("apply_message", text)
-
-    def on_batch(self, progress: BatchProgress) -> None:
-        """Hand batch progress over, at most every :data:`UI_INTERVAL`.
-
-        Args:
-            progress: where the run has got to.
-        """
-        now = time.monotonic()
-        if now - self._last_ui < UI_INTERVAL:
-            return
-        self._last_ui = now
-        self._deliver("apply_progress", progress)
-
-    def on_epoch(self, step: int, metrics: Mapping[str, float]) -> None:
-        """Hand an epoch's metrics over. Never throttled: there are few of them.
-
-        Args:
-            step: the epoch index.
-            metrics: metric name to value.
-        """
-        self._deliver("apply_epoch", step, dict(metrics))
-
-    def on_sample(self, path: Path) -> None:
-        """Hand over a freshly written sample grid.
-
-        Args:
-            path: the PNG just saved.
-        """
-        self._deliver("apply_sample", path)
-
-
-class Panel(Vertical):
-    """A bordered box with its heading drawn into the border itself.
-
-    A heading widget inside a box costs a row and repeats what the border is
-    already framing; a border title costs nothing and cannot drift away from
-    the thing it names.
-
-    Args:
-        *children: what goes inside.
-        title: the border title.
-        id: the widget id.
-        classes: any CSS classes.
-    """
-
-    def __init__(
-        self,
-        *children: object,
-        title: str,
-        id: str | None = None,  # noqa: A002 - Textual's own parameter name
-        classes: str | None = None,
-    ) -> None:
-        super().__init__(*children, id=id, classes=classes)  # type: ignore[arg-type]
-        self.border_title = title
-
-
 class TinyDiffusionApp(App[None]):
     """Train a diffusion model, and watch it happen.
 
@@ -251,61 +108,7 @@ class TinyDiffusionApp(App[None]):
 
     TITLE = "TinyDiffusion"
 
-    CSS = """
-    Screen { background: $background; }
-
-    #columns { height: 1fr; }
-
-    /* Scrollable rather than fixed: the panels are sized by their content, and
-       a narrow terminal or a long device name pushes the last of them past the
-       bottom. Clipping it silently is the one outcome worth ruling out. */
-    #sidebar { width: 38; height: 1fr; padding: 0 0 0 1; scrollbar-size: 1 1; }
-    #main { width: 1fr; height: 1fr; padding: 0 1 0 0; }
-
-    Panel {
-        border: round $primary 45%;
-        border-title-color: $text-accent;
-        border-title-style: bold;
-        padding: 0 1;
-        height: auto;
-        background: $surface;
-    }
-    Panel:focus-within { border: round $primary; }
-
-    #tiles { height: 3; margin-top: 1; }
-    StatTile { margin-right: 1; background: $surface; }
-    StatTile:last-of-type { margin-right: 0; }
-
-    /* Both 1fr, so whatever the terminal has left is split between the curve
-       and the pictures rather than one of them being clipped by a fixed size. */
-    #chart-panel { height: 1fr; min-height: 5; margin-top: 1; }
-    #lower { height: 1fr; min-height: 5; margin-top: 1; }
-    #quartile-panel { width: 1fr; height: 1fr; align-vertical: middle; }
-    #preview-panel { width: 45%; min-width: 20; height: 1fr; margin-left: 1; }
-
-    #sidebar > Panel { margin-top: 1; width: 1fr; }
-    #epoch-bar, #batch-bar { width: 1fr; margin-bottom: 1; }
-    #epoch-label, #batch-label { color: $text-muted; }
-
-    #log-panel { height: 10; }
-    #log { background: $surface; scrollbar-size: 1 1; }
-
-    .heading { text-style: bold; color: $text-accent; }
-
-    /* Below ~100 columns the tiles cannot hold five readable numbers side by
-       side, and the sidebar's stats panel already carries every one of them. */
-    Screen.-narrow #tiles { display: none; }
-    Screen.-narrow #sidebar { width: 30; }
-    Screen.-narrow #preview-panel { width: 50%; }
-    Screen.-narrow #log-panel { height: 8; }
-    Screen.-tiny #sidebar { display: none; }
-    Screen.-tiny #log-panel { height: 6; }
-
-    /* Focus mode: everything that is not a picture gets out of the way. */
-    Screen.-focus #sidebar { display: none; }
-    Screen.-focus #tiles { display: none; }
-    Screen.-focus #log-panel { display: none; }
-    """
+    CSS = APP_CSS
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("s", "start", "Start"),
@@ -343,8 +146,6 @@ class TinyDiffusionApp(App[None]):
         self._stats: dict[str, str] = {}
         self._started: float | None = None
         self._restart = False
-
-    # ---- layout --------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         """Build the widget tree.
@@ -393,7 +194,6 @@ class TinyDiffusionApp(App[None]):
         self.sub_title = f"{self.cfg.dataset} · {self.cfg.device}"
         self.query_one(StatusBar).detail = f"{self.cfg.dataset} · {self.cfg.device}"
         self.apply_width(self.size.width)
-        # Elapsed is the one number that moves without an event to move it.
         self.set_interval(1.0, self.tick)
 
         self.log_line(f"[dim]logs:[/dim] {self.cfg.log_dir}")
@@ -435,8 +235,6 @@ class TinyDiffusionApp(App[None]):
         yield SystemCommand("Toggle focus mode", "Charts only", self.action_toggle_focus)
         yield SystemCommand("Toggle log", "Show or hide the log", self.action_toggle_log)
         yield SystemCommand("Keys", "Everything the dashboard does", self.action_help)
-
-    # ---- actions -------------------------------------------------------
 
     def action_start(self) -> None:
         """Begin a training run, unless one is already going."""
@@ -547,8 +345,6 @@ class TinyDiffusionApp(App[None]):
             if callable(redraw):
                 redraw()
 
-    # ---- the worker ----------------------------------------------------
-
     @work(thread=True, exclusive=True)
     def train_worker(self) -> None:
         """Run the training loop off the event loop.
@@ -562,10 +358,8 @@ class TinyDiffusionApp(App[None]):
         try:
             train(self.cfg, self.resume, observer=self.observer)
         except Exception as exc:
-            # Caught rather than left to kill the worker quietly; re-reported
-            # to the UI below, which is the only place a user would see it.
             error = exc
-        with contextlib.suppress(RuntimeError):  # pragma: no cover - app closed first
+        with contextlib.suppress(RuntimeError):  # pragma: no cover
             self.call_from_thread(self.post_message, TrainingEnded(error))
 
     @on(TrainingEnded)
@@ -590,8 +384,6 @@ class TinyDiffusionApp(App[None]):
         if self._restart:
             self._restart = False
             self.action_start()
-
-    # ---- applied on the event loop, from TuiObserver -------------------
 
     def apply_plan(self, plan: TrainPlan) -> None:
         """Fill the run panel in from the resolved plan.
@@ -691,8 +483,6 @@ class TinyDiffusionApp(App[None]):
         self.query_one(SamplePreview).show(path)
         self.query_one("#preview-panel", Panel).border_title = f"samples · {path.name}"
 
-    # ---- rendering -----------------------------------------------------
-
     def tick(self) -> None:
         """Once a second: move the clock-driven numbers on."""
         if self._started is not None:
@@ -708,7 +498,7 @@ class TinyDiffusionApp(App[None]):
             tile_id: the tile's widget id.
             value: the formatted number to show.
         """
-        with contextlib.suppress(Exception):  # pragma: no cover - during teardown
+        with contextlib.suppress(Exception):  # pragma: no cover
             self.query_one(f"#{tile_id}", StatTile).value = value
 
     def refresh_chart(self) -> None:
@@ -781,89 +571,3 @@ class TinyDiffusionApp(App[None]):
             ),
         ]
         return two_columns(rows)
-
-
-def two_columns(rows: list[tuple[str, str]]) -> Text:
-    """Render label/value pairs as an aligned two-column block.
-
-    Args:
-        rows: the pairs, in the order they should appear.
-
-    Returns:
-        The block, labels dimmed and values plain.
-    """
-    if not rows:
-        return Text()
-    width = max(len(label) for label, _ in rows)
-    text = Text()
-    for index, (label, value) in enumerate(rows):
-        if index:
-            # Between rows rather than after each, so a panel does not carry
-            # a blank final line and stand a row taller than its content.
-            text.append("\n")
-        text.append(f"{label:<{width}}  ", style="dim")
-        text.append(value)
-    return text
-
-
-def epoch_summary(metrics: Mapping[str, float]) -> str:
-    """One line describing an epoch, for the log.
-
-    Args:
-        metrics: the epoch's metrics.
-
-    Returns:
-        A compact summary of the few that matter, or a note that there were
-        none.
-    """
-    parts = [
-        f"{label} {value:.4g}"
-        for key, label in (
-            ("train/loss", "loss"),
-            ("val/loss", "val"),
-            ("time/images_per_second", "img/s"),
-        )
-        if (value := metrics.get(key)) is not None
-    ]
-    return "  ".join(parts) or "no metrics"
-
-
-def duration(seconds: float) -> str:
-    """Render a number of seconds as ``1h02m``, ``3m20s`` or ``12s``.
-
-    Args:
-        seconds: the duration. Negatives read as zero.
-
-    Returns:
-        A compact string, coarsening as it grows so the width stays steady.
-    """
-    whole = max(int(seconds), 0)
-    hours, rest = divmod(whole, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours}h{minutes:02d}m"
-    if minutes:
-        return f"{minutes}m{secs:02d}s"
-    return f"{secs}s"
-
-
-def run_eta(progress: BatchProgress) -> float | None:
-    """Estimate the seconds left in the whole run.
-
-    Extrapolated from the current epoch's rate alone, which is the only rate a
-    run that has not finished an epoch yet has. It is therefore optimistic on
-    the first epoch of a run that also validates and samples at the end of one.
-
-    Args:
-        progress: the latest batch report.
-
-    Returns:
-        Seconds remaining, or None before there is anything to extrapolate
-        from.
-    """
-    done = progress.epoch_fraction
-    if done <= 0 or progress.seconds <= 0:
-        return None
-    per_epoch = progress.seconds / done
-    remaining = (progress.num_epochs - progress.epoch) - done
-    return max(per_epoch * remaining, 0.0)

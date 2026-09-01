@@ -21,10 +21,6 @@ def test_a_bank_keeps_every_vector_in_order():
 
 
 def test_the_moments_match_what_the_streaming_accumulator_would_have_made():
-    # The whole reason a bank can stand in for FeatureStats: a run that retains
-    # features still reports the same FID as one that only ever kept moments.
-    # Not to the last bit — the bank sums over its own chunks rather than over
-    # the batches the images arrived in — but to far beyond what a score prints.
     bank, stats = FeatureBank(6), FeatureStats(6)
     for start in range(0, 40, 7):
         batch = features(40)[start : start + 7]

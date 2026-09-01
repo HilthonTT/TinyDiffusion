@@ -15,14 +15,8 @@ def _matrix_sqrt_psd(matrix: torch.Tensor) -> torch.Tensor:
     Returns:
         The symmetric PSD matrix ``s`` with ``s @ s == matrix``.
     """
-    # Symmetrise first: a covariance accumulated in floating point drifts a few
-    # ulps off symmetry, which is enough for `eigh` to complain about the input
-    # it is contractually given.
     matrix = 0.5 * (matrix + matrix.mT)
     eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
-    # A sample covariance is PSD in exact arithmetic; rounding can still push
-    # near-zero eigenvalues slightly negative. Clamping is the standard fix and
-    # only ever touches directions with no variance in them.
     roots = eigenvalues.clamp_min(0).sqrt()
     return (eigenvectors * roots) @ eigenvectors.mT
 
@@ -67,9 +61,6 @@ def compute_fid(
     if mu2.shape[0] != dim:
         raise ValueError(f"means disagree on dimension: {dim} and {mu2.shape[0]}")
 
-    # float64 throughout: the trace terms are sums of thousands of positive
-    # numbers that the mean-difference term is then subtracted from, so float32
-    # rounding shows up directly in the leading digits of the score.
     mu1, mu2 = mu1.double(), mu2.double()
     sigma1, sigma2 = sigma1.double(), sigma2.double()
 
@@ -80,8 +71,6 @@ def compute_fid(
     inner = 0.5 * (inner + inner.mT)
     c = torch.linalg.eigvalsh(inner).clamp_min(0).sqrt().sum()
 
-    # The true distance is non-negative; only rounding can take it below zero,
-    # and a small negative score is more confusing than a zero one.
     return ((a + b) - 2 * c).clamp_min(0)
 
 
@@ -112,9 +101,6 @@ class FeatureStats:
             raise ValueError(f"dim must be positive, got {dim}")
         self.dim = dim
         self.n = 0
-        # Accumulation is in float64: the second moment grows with the number of
-        # samples, and in float32 the covariance subtraction below loses most of
-        # its significant digits by a few tens of thousands of images.
         self.sum = torch.zeros(dim, dtype=torch.float64, device=device)
         self.outer = torch.zeros(dim, dim, dtype=torch.float64, device=device)
 
@@ -237,8 +223,6 @@ class FeatureStats:
             raise ValueError(f"need at least 2 samples for a covariance, got {self.n}")
         mu = self.sum / self.n
         cov = (self.outer - self.n * torch.outer(mu, mu)) / (self.n - 1)
-        # The subtraction is not symmetric to the last bit; downstream eigh
-        # wants a matrix that is.
         cov = 0.5 * (cov + cov.mT)
         return mu, cov
 

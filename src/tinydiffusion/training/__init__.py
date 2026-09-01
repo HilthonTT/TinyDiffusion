@@ -2,7 +2,16 @@
 
 The loop itself is :func:`tinydiffusion.training.train.train`, and it stays in
 its module rather than being re-exported here — binding the function on the
-package would shadow the module of the same name. Around it sit
+package would shadow the module of the same name. That function is assembly
+alone; the run it drives is split by when the work happens:
+:mod:`~tinydiffusion.training.setup` (every decision made before the first
+batch), :mod:`~tinydiffusion.training.plan` (the line announcing them),
+:mod:`~tinydiffusion.training.batches` (the batches fixed once and reused),
+:mod:`~tinydiffusion.training.loop` (a batch, an epoch, and the bookkeeping
+after one), :mod:`~tinydiffusion.training.artifacts` (what a run writes out)
+and :mod:`~tinydiffusion.training.reporting` (how its numbers get out).
+
+Around all of it sit the pieces a run is built from:
 :mod:`~tinydiffusion.training.model` (build the process a config describes),
 :mod:`~tinydiffusion.training.checkpoints` (save and resume it),
 :mod:`~tinydiffusion.training.lr` (the LR schedule),

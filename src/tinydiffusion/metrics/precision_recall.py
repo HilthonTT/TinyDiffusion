@@ -85,8 +85,6 @@ def _kth_neighbour_radius(features: torch.Tensor, k: int) -> torch.Tensor:
     radii = torch.empty(features.shape[0], dtype=features.dtype, device=features.device)
     for start in range(0, features.shape[0], _CHUNK):
         block = torch.cdist(features[start : start + _CHUNK], features)
-        # k + 1 because the row's own zero distance to itself is always the
-        # smallest entry, and it is not one of its own neighbours.
         radii[start : start + _CHUNK] = block.topk(k + 1, largest=False).values[:, -1]
     return radii
 
@@ -106,8 +104,6 @@ def _fraction_inside(query: torch.Tensor, manifold: torch.Tensor, radii: torch.T
     inside = 0
     for start in range(0, query.shape[0], _CHUNK):
         block = torch.cdist(query[start : start + _CHUNK], manifold)
-        # A point is covered if it is within *any* one ball, so the test is per
-        # row against the whole radius vector at once.
         inside += int((block <= radii).any(dim=1).sum())
     return inside / query.shape[0]
 

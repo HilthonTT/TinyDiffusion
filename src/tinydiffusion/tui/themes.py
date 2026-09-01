@@ -83,9 +83,6 @@ def _theme(
         error=error,
         dark=dark,
         variables={
-            # Textual draws the footer keys from these; naming them keeps the
-            # key hints legible on palettes whose accent is very light or very
-            # saturated, which the derived defaults do not always manage.
             "footer-key-foreground": accent,
             "footer-description-foreground": foreground,
             "block-cursor-background": primary,
@@ -318,6 +315,4 @@ def save_preferred_theme(name: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"theme": name}, indent=2) + "\n", encoding="utf-8")
     except OSError:
-        # A read-only home is a reason not to remember the theme, and not a
-        # reason to interrupt a training run about it.
         pass

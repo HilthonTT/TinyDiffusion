@@ -28,16 +28,12 @@ def test_preprocess_keeps_three_channel_input(untrained):
 
 
 def test_preprocess_normalises_to_imagenet_statistics(untrained):
-    # A [-1, 1] image of -1 is black, which ImageNet normalisation maps to
-    # -mean/std per channel.
     out = untrained.preprocess(torch.full((1, 1, 8, 8), -1.0))
     want = -untrained.mean / untrained.std
     assert torch.allclose(out[0, :, 0, 0], want.flatten(), atol=1e-6)
 
 
 def test_preprocess_clamps_out_of_range_input(untrained):
-    # The sampler can overshoot [-1, 1]; denormalize clamps, so a wild value
-    # lands on white rather than off the end of the scale.
     hot = untrained.preprocess(torch.full((1, 1, 8, 8), 5.0))
     white = untrained.preprocess(torch.ones(1, 1, 8, 8))
     assert torch.allclose(hot, white)
@@ -61,8 +57,6 @@ def test_it_satisfies_the_extractor_protocol(untrained):
 
 
 def test_it_stays_in_eval_mode(untrained):
-    # Dropout would make the features non-deterministic, which would show up as
-    # score noise rather than as an obvious failure.
     assert untrained.net.training is False
 
 

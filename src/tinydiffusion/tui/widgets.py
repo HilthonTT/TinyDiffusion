@@ -65,7 +65,7 @@ def theme_colour(widget: Static, name: str) -> str:
     """
     try:
         variables = widget.app.get_css_variables()
-    except Exception:  # pragma: no cover - only reachable without a running app
+    except Exception:  # pragma: no cover
         return _FALLBACK
     value = variables.get(name)
     if not value:
@@ -90,8 +90,6 @@ def resolve_colour(value: str, variables: Mapping[str, str]) -> str:
     if head == "auto":
         head, _ = _split(variables.get("foreground", ""))
     if (named := _ansi_name(head)) is not None:
-        # The terminal owns this colour, so there is nothing here to fade it
-        # against. Better a legible colour at full strength than an exception.
         return named
     if (colour := _colour(head)) is None:
         return _FALLBACK
@@ -118,7 +116,7 @@ def _split(value: str) -> tuple[str, float]:
         return (head, 1.0)
     try:
         return (head, max(0.0, min(1.0, float(rest[:-1]) / 100)))
-    except ValueError:  # pragma: no cover - Textual does not emit these
+    except ValueError:  # pragma: no cover
         return (head, 1.0)
 
 
@@ -220,8 +218,6 @@ class StatusBar(Static):
             text.append("   ")
             text.append(self.detail, style=theme_colour(self, "text-muted"))
         if self.note:
-            # Padded out rather than justified, so the note keeps its own
-            # styling and the left half is never re-wrapped underneath it.
             gap = self.size.width - len(text.plain) - len(self.note) - 2
             if gap > 1:
                 text.append(" " * gap)
@@ -314,9 +310,8 @@ class LossChart(Static):
             return
 
         width = self.size.width - self.LABEL_WIDTH - 2
-        height = self.size.height - 1  # one row for the legend
+        height = self.size.height - 1
         if width < 4 or height < 2:
-            # Too small to say anything true; the latest numbers still are.
             self.update(self._legend())
             return
 
@@ -399,8 +394,6 @@ class SamplePreview(Static):
         try:
             rows = half_block_rows(self._path, max_width=width, max_height=height)
         except OSError as exc:
-            # A grid that was half-written when we looked is not worth a crash:
-            # the next epoch writes another one.
             self.update(f"could not read {self._path.name}: {exc}")
             return
 
@@ -472,8 +465,6 @@ class QuartileBars(Static):
         present = [value for value in self._values if value is not None]
         if not present:
             return
-        # One scale across all four, so the bars compare with each other rather
-        # than each being normalised into saying nothing.
         top = max(present)
         label_width = max(len(label) for label in self.LABELS)
         width = max(self.size.width - label_width - 12, 4)

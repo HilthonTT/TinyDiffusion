@@ -80,7 +80,7 @@ class BatchProgress:
     """Where a run has got to, reported as it goes.
 
     Emitted at the same point the tqdm bar's postfix was updated — once per
-    :data:`~tinydiffusion.training.train.DRAIN_EVERY` batches, not once per
+    :data:`~tinydiffusion.training.reporting.DRAIN_EVERY` batches, not once per
     batch. That is not a limitation to work around: the metrics behind it live
     on the device until then, and reading them any sooner is the
     synchronisation the buffer exists to avoid.

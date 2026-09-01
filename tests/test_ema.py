@@ -13,13 +13,10 @@ def _net():
 
 
 def test_the_fused_update_matches_a_lerp_per_parameter():
-    # torch._foreach_lerp_ has to be the same arithmetic as the loop it
-    # replaced, not merely close: the average is folded in thousands of times.
     net = _net()
     ema = EMA(net, decay=0.9, warmup=0)
     before = [p.clone() for p in ema.module.parameters()]
 
-    # Move the live weights so the average has somewhere to travel.
     for p in net.parameters():
         nn.init.normal_(p, std=0.5)
     ema.update(net)

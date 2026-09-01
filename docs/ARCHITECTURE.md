@@ -43,13 +43,15 @@ same model and the same process without being told how.
 
 | Module | Holds |
 | --- | --- |
-| `cli.py` | Every subcommand's arguments and dispatch |
+| `cli/` | `parser.py` declares every subcommand's flags, `options.py` turns their text into values, `commands.py` runs them |
 | `training/config.py` | The config schema, its defaults, and validation |
-| `training/train.py` | The loop: epochs, AMP, checkpoints, per-epoch grids |
+| `training/train.py` | The assembly: resolve a run, build it, drive its epochs |
+| `training/{setup,plan,batches,loop,artifacts,reporting}.py` | The decisions before the first batch, the line announcing them, the batches fixed once, a batch and an epoch, the grids and checkpoints written, and how the numbers get out |
 | `training/{ema,lr,validation,checkpoints,distributed,observer}.py` | Weight averaging, the LR ramp, held-out scoring, save/resume, DDP, and the seam the TUI reports through |
 | `diffusion/schedules.py` | Beta schedules and every coefficient derived from them |
 | `diffusion/ddpm.py` | The baseline process: predict epsilon, fixed variance, MSE |
 | `diffusion/gaussian_diffusion.py` | The generalised process, and the variational bound |
+| `diffusion/parameterization.py` | The four choices it takes: mean type, variance type, objective, loss weighting |
 | `diffusion/{ddim,dpm_solver,heun,plms,samplers}.py` | The reverse chains, and the registry that names them |
 | `diffusion/{prediction,latents,timesteps,losses}.py` | Shared sampler arithmetic, x_T, timestep draws, likelihood terms |
 | `diffusion/guidance.py` | Classifier-free guidance, as a wrapper round the network |
@@ -81,9 +83,10 @@ spatial bottleneck.
 
 ## Parameterisation
 
-`diffusion/gaussian_diffusion.py` makes the three choices DDPM fixes — what the
-network predicts, where the reverse variance comes from, and what is optimised
-— explicit, and adds the variational bound they are measured against.
+`diffusion/parameterization.py` names the three choices DDPM fixes — what the
+network predicts, where the reverse variance comes from, and what is optimised.
+`diffusion/gaussian_diffusion.py` takes them as arguments, and adds the
+variational bound they are measured against.
 
 | Config | Effect |
 | --- | --- |
@@ -191,5 +194,6 @@ If you are reading the source for the first time:
 1. `training/config.py` — every knob, with the reasoning in its docstrings.
 2. `diffusion/ddpm.py` — the process, at its simplest.
 3. `models/unet.py` — the network being trained.
-4. `training/train.py` — how those three become a run.
+4. `training/train.py` — how those three become a run, then `training/loop.py`
+   for the batch and the epoch it drives.
 5. `diffusion/ddim.py`, then `diffusion/guidance.py` — how a run becomes images.

@@ -43,7 +43,7 @@ uv run --no-sync tinydiffusion train --config configs/mnist.toml
 
 Two invocations that do **not** work:
 
-- `python src/tinydiffusion/cli.py` — in a `src/` layout the package is
+- `python src/tinydiffusion/cli/commands.py` — in a `src/` layout the package is
   importable only from an environment it is installed into, and running a file
   by path puts *that file's* directory on `sys.path` rather than `src/`.
   Result: `ModuleNotFoundError: No module named 'tinydiffusion'`.

@@ -63,7 +63,6 @@ def test_the_clamp_is_what_bounds_the_low_noise_end():
     weights = process.loss_weights(torch.arange(T))
 
     assert weights.max() <= GAMMA
-    # t=0 is the highest-SNR step, and the one the clamp is there to hold back.
     assert process.snr[0] > GAMMA
     assert weights[0] == pytest.approx(GAMMA)
 

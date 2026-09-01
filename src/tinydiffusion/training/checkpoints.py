@@ -145,7 +145,6 @@ def save_checkpoint(
         },
         tmp,
     )
-    # Rename last so an interrupted save cannot corrupt a good checkpoint.
     tmp.replace(path)
 
 
@@ -153,7 +152,7 @@ def rng_state() -> dict[str, Any]:
     """Snapshot the global RNG, so a resume continues the same random stream.
 
     The loader's shuffle order is already a function of the epoch index alone
-    (see :func:`~tinydiffusion.training.train.epoch_seed`), but everything else
+    (see :func:`~tinydiffusion.training.batches.epoch_seed`), but everything else
     a step draws — the diffusion noise, the timesteps, dropout, and the label
     dropout that classifier-free guidance is trained on — comes from the global
     generator, which is seeded once at startup. Without this, epoch 5 of a
@@ -194,9 +193,6 @@ def restore_rng_state(ckpt: dict[str, Any]) -> bool:
         return False
     torch.set_rng_state(state["cpu"].cpu().to(torch.uint8))
     cuda = state.get("cuda")
-    # A run moved between machines can have a different device count, and
-    # set_rng_state_all raises on a mismatch. The CPU state is the one that
-    # matters for the data path either way, so a partial restore beats none.
     if cuda and torch.cuda.is_available() and len(cuda) == torch.cuda.device_count():
         torch.cuda.set_rng_state_all([s.cpu().to(torch.uint8) for s in cuda])
     return True
@@ -280,11 +276,6 @@ def restore_checkpoint(
     if optim is not None and "optim" in ckpt:
         optim.load_state_dict(ckpt["optim"])
     if scaler is not None and ckpt.get("scaler"):
-        # Truthiness rather than presence: a run whose scaler was disabled —
-        # bf16, CPU, amp off — stores an empty dict, and GradScaler refuses to
-        # load one rather than treating it as "nothing to restore". That would
-        # make an fp16 run unable to pick up a bf16 run's checkpoint even
-        # though its weights fit perfectly, so the scale simply starts fresh.
         scaler.load_state_dict(ckpt["scaler"])
     if sched is not None and ckpt.get("sched") is not None:
         sched.load_state_dict(ckpt["sched"])
@@ -341,12 +332,8 @@ def check_resume_compatible(
     """
     stored = ckpt.get("config")
     if stored is None:
-        # Predates config provenance. Nothing to compare, so let load_state_dict
-        # have its say rather than refusing a checkpoint that may well fit.
         return
 
-    # Round-tripped through the config so lists become tuples and strings
-    # become paths; comparing the raw dict would flag `[1, 2]` against `(1, 2)`.
     reference = TrainConfig.from_mapping({**stored, "device": cfg.device})
     changed = [
         (name, getattr(reference, name), getattr(cfg, name))

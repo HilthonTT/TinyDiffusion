@@ -26,8 +26,6 @@ from tinydiffusion.diffusion.samplers import DEFAULT_SAMPLER, get_sampler
 from tinydiffusion.diffusion.timesteps import timestep_sampler
 from tinydiffusion.utils.tracking import DEFAULT_WANDB_PROJECT
 
-# Fields whose declared type is not what TOML (or a checkpoint's provenance
-# dict, which stringifies Paths) hands back, so they need coercing on the way in.
 _PATH_FIELDS = frozenset({"data_root", "out_dir", "ckpt_dir", "log_dir"})
 _TUPLE_FIELDS = frozenset({"channel_mult", "attn_resolutions", "betas"})
 
@@ -188,32 +186,27 @@ class TrainConfig:
     sent.
     """
 
-    # data
     dataset: str = DEFAULT_DATASET
     data_root: Path = Path("data")
     image_size: int = 32
     batch_size: int = 128
     num_workers: int = 4
 
-    # folder datasets (dataset = "folder"); ignored by the packaged ones
     folder_channels: int = 3
     folder_hflip: bool = True
     folder_holdout: float = 0.1
 
-    # model
     base_channels: int = 64
     channel_mult: tuple[int, ...] = (1, 2, 2)
     num_res_blocks: int = 2
     attn_resolutions: tuple[int, ...] = (16,)
     dropout: float = 0.1
 
-    # conditioning
     num_classes: int | None = None
     class_dropout: float = 0.1
     guidance: float = 1.0
     guidance_rescale: float = 0.0
 
-    # diffusion
     num_timesteps: int = 1000
     schedule: Literal["cosine", "linear"] = "cosine"
     beta_start: float = 1e-4
@@ -226,29 +219,26 @@ class TrainConfig:
     min_snr_gamma: float = 5.0
     timestep_sampler: Literal["uniform", "loss_second_moment"] = "uniform"
 
-    # optimisation
     num_epochs: int = 30
     lr: float = 2e-4
-    lr_warmup: int = 500  # *applied* optimiser steps to ramp the LR over; 0 disables it
+    lr_warmup: int = 500
     lr_schedule: Literal["constant", "cosine"] = "constant"
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.0
-    grad_accum: int = 1  # micro-batches per optimiser step
+    grad_accum: int = 1
     grad_clip: float = 1.0
     ema_decay: float = 0.9999
     ema_warmup: int = 2000
 
-    # validation
     val_every: int = 1
     val_steps: int = 10
     val_batches: int = 4
 
-    # bookkeeping
     seed: int = 0
     deterministic: bool = False
     amp: bool = True
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
-    full_fp16: bool = False  # float16 weights with a float32 master copy, instead of autocast
+    full_fp16: bool = False
     compile: bool = False
     channels_last: bool = False
     grad_checkpoint: bool = False
@@ -263,7 +253,6 @@ class TrainConfig:
     keep_last: int = 0
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
 
-    # tracking
     log_dir: Path = Path("runs/mnist")
     log_console: bool = True
     log_jsonl: bool = True
@@ -287,13 +276,9 @@ class TrainConfig:
                 conditioning settings do not describe a trainable model.
         """
         if self.folder_channels not in (1, 3):
-            # Checked before the spec is built, since the spec is what carries
-            # it and a folder spec would otherwise hand a bad width to the U-Net.
             raise ValueError(f"folder_channels must be 1 or 3, got {self.folder_channels}")
         if not 0.0 <= self.folder_holdout < 1.0:
             raise ValueError(f"folder_holdout must lie in [0, 1), got {self.folder_holdout}")
-        # Raises on an unregistered name, and is what every downstream shape
-        # is read from, so it is checked before anything else can use it.
         spec = self.dataset_spec()
         if self.image_size < 1:
             raise ValueError(f"image_size must be positive, got {self.image_size}")
@@ -312,8 +297,6 @@ class TrainConfig:
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError(f"dropout must lie in [0, 1), got {self.dropout}")
         if self.num_timesteps < 1:
-            # Checked before the two step counts below, which are bounded by it
-            # and would otherwise report an empty range as the problem.
             raise ValueError(f"num_timesteps must be positive, got {self.num_timesteps}")
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
@@ -321,8 +304,6 @@ class TrainConfig:
             raise ValueError(
                 f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
             )
-        # Both raise on an unregistered name; checked here so a typo costs
-        # nothing rather than being found by the first per-epoch grid.
         get_sampler(self.sampler)
         get_spacing(self.sample_spacing)
         timestep_sampler(self.timestep_sampler, self.num_timesteps)
@@ -355,18 +336,12 @@ class TrainConfig:
         if len(self.betas) != 2 or not all(0.0 <= b < 1.0 for b in self.betas):
             raise ValueError(f"betas must be two values in [0, 1), got {self.betas}")
         if not 0.0 <= self.ema_decay <= 1.0:
-            # Outside [0, 1] the average extrapolates away from the weights it
-            # is meant to follow, and nothing downstream ever says so: the loss
-            # keeps falling while every sample, every best.pt comparison and
-            # every shipped checkpoint comes from weights that are diverging.
             raise ValueError(f"ema_decay must lie in [0, 1], got {self.ema_decay}")
         if self.ema_warmup < 0:
             raise ValueError(f"ema_warmup must not be negative, got {self.ema_warmup}")
         if self.amp_dtype not in ("fp16", "bf16"):
             raise ValueError(f"unknown amp_dtype {self.amp_dtype!r}, expected 'fp16' or 'bf16'")
         if self.full_fp16:
-            # Both of these would otherwise be silently ignored, and the run
-            # would report a precision it is not using.
             if not self.amp:
                 raise ValueError(
                     "full_fp16 is a mixed-precision mode and amp=False asks for float32; "
@@ -381,8 +356,6 @@ class TrainConfig:
         if self.keep_last < 0:
             raise ValueError(f"keep_last must not be negative, got {self.keep_last}")
         if self.wandb and not self.wandb_project.strip():
-            # wandb would otherwise invent a project called "uncategorized" and
-            # the run would be findable only by someone who knew that.
             raise ValueError("wandb needs a wandb_project to log into, got an empty one")
         self._check_conditioning(spec)
         self.diffusion_types()
@@ -401,9 +374,6 @@ class TrainConfig:
                 needs.
         """
         if self.num_classes is not None and self.num_classes != spec.num_classes:
-            # The labels come from the dataset, so a count that disagrees with
-            # it either indexes past the embedding table or leaves rows that
-            # nothing ever trains.
             raise ValueError(
                 f"num_classes={self.num_classes} does not match {spec.name}, which has "
                 f"{spec.num_classes} classes; use num_classes={spec.num_classes} or "
@@ -416,9 +386,6 @@ class TrainConfig:
         if not 0.0 <= self.guidance_rescale <= 1.0:
             raise ValueError(f"guidance_rescale must lie in [0, 1], got {self.guidance_rescale}")
         if self.guidance_rescale > 0.0 and self.guidance == 1.0:
-            # Silently a no-op rather than an error otherwise: at scale 1 the
-            # guided prediction is the conditional one, so the correction is
-            # the identity and the config promises something it cannot do.
             raise ValueError(
                 f"guidance_rescale={self.guidance_rescale} has nothing to correct at "
                 "guidance=1.0; raise guidance, or leave guidance_rescale at 0.0"
@@ -429,8 +396,6 @@ class TrainConfig:
                 "(10 for MNIST) or leave guidance at 1.0"
             )
         if self.guidance != 1.0 and self.class_dropout == 0.0:
-            # The null embedding would never be trained, so extrapolating away
-            # from it produces noise rather than a sharper digit.
             raise ValueError(
                 "guidance needs class_dropout > 0 so the null token gets trained; "
                 "use class_dropout=0.1, or guidance=1.0 for plain conditional sampling"
@@ -489,10 +454,6 @@ class TrainConfig:
             raise ValueError(f"bad diffusion parameterisation: {exc}") from exc
 
         if self.zero_snr and mean_type is ModelMeanType.EPSILON:
-            # At a zero terminal SNR, x_T holds no signal at all, so an epsilon
-            # prediction there says nothing about x_0 and the recovery divides
-            # by a vanishing sqrt(alphabar). v prediction is the pairing the
-            # rescaling was published with.
             raise ValueError(
                 "zero_snr leaves the last timestep with no signal, which epsilon "
                 "prediction cannot invert; use predict='v' (or 'start_x')"
@@ -507,8 +468,6 @@ class TrainConfig:
                 raise ValueError("loss_weighting='min_snr' is not defined for predict='previous_x'")
 
         if var_type.is_learned and loss_type is LossType.MSE:
-            # Nothing in L_simple touches the variance head, so it would keep
-            # its initialisation and be sampled from anyway.
             raise ValueError(
                 f"variance={self.variance!r} needs an objective that trains it; "
                 "use objective='rescaled_mse' (the hybrid loss) or a KL objective"

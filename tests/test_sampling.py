@@ -95,8 +95,6 @@ def test_a_conditional_checkpoint_samples_its_classes(make_checkpoint, tmp_path,
     )
     model = sampled_model["model"]
 
-    # guidance=2.0 comes from the checkpoint, so the sampler gets the guided
-    # wrapper rather than a plain conditional one.
     assert isinstance(model, ClassifierFreeGuidance)
     assert model.labels.tolist() == [2, 2, 2, 2]
     assert model.scale == 2.0
@@ -150,7 +148,6 @@ def test_a_batch_size_splits_the_draw_into_chunks(make_checkpoint, tmp_path, sam
         make_checkpoint(), tmp_path / "gen.png", num_images=10, batch_size=4, seed=0
     )
 
-    # The ragged last chunk is drawn at its own size, not padded up to 4.
     assert [call["num_samples"] for call in sampler_calls] == [4, 4, 2]
 
 
@@ -227,10 +224,10 @@ def test_individual_files_are_not_written_unless_asked(make_checkpoint, tmp_path
 @pytest.mark.parametrize(
     ("num_images", "num_classes", "labels", "expected"),
     [
-        (16, None, None, 8),  # unconditional: the usual eight per row
-        (16, 4, None, 4),  # a default class cycle: one class per column
-        (16, 4, [1], 8),  # labels asked for: no column meaning to preserve
-        (2, 4, None, 2),  # never wider than the grid itself
+        (16, None, None, 8),
+        (16, 4, None, 4),
+        (16, 4, [1], 8),
+        (2, 4, None, 2),
     ],
 )
 def test_grid_width(num_images, num_classes, labels, expected):
@@ -238,8 +235,6 @@ def test_grid_width(num_images, num_classes, labels, expected):
 
 
 def test_a_loaded_model_never_gradient_checkpoints(make_checkpoint):
-    # The trade only pays for a backward pass, and nothing that loads a
-    # checkpoint for sampling runs one.
     checkpoint = make_checkpoint(dataclasses.replace(TINY, grad_checkpoint=True))
 
     diffusion, _, cfg = load_for_sampling(checkpoint, "cpu")
@@ -249,14 +244,10 @@ def test_a_loaded_model_never_gradient_checkpoints(make_checkpoint):
     ]
     assert blocks
     assert not any(block.use_checkpoint for block in blocks)
-    # The config still reports what the run was trained with.
     assert cfg.grad_checkpoint is True
 
 
 def test_a_checkpoint_without_a_config_is_a_user_error(tmp_path):
-    # A ValueError rather than a KeyError, so the CLI reports it as a message
-    # rather than letting it through as a traceback -- and so the message reads
-    # as a sentence instead of a quoted key.
     path = tmp_path / "old.pt"
     torch.save({"epoch": 0}, path)
 

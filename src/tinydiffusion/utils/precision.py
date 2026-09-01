@@ -102,18 +102,11 @@ def resolve_precision(precision: str, device: torch.device | str, *, verbose: bo
         return precision
 
     if torch.device(device).type != "cuda":
-        # Half precision on a CPU is emulated rather than accelerated, so it is
-        # slower than the float32 it would be chosen over, and TF32 is a
-        # property of a GPU's matmul units that a CPU has no equivalent of.
         if verbose:
             print(f"{precision} needs a CUDA device; sampling in float32 instead")
         return DEFAULT_PRECISION
 
     if precision == "bf16" and not bf16_supported():
-        # Pre-Ampere. The same fallback the training loop makes, and for the
-        # same reason: torch reports the emulation path as supported, and
-        # emulated bfloat16 is several times slower than either dtype it would
-        # have been chosen over.
         if verbose:
             print("this GPU emulates bfloat16 rather than running it, falling back to fp16")
         return "fp16"
@@ -147,13 +140,9 @@ class Autocast(nn.Module):
 
     def __init__(self, net: nn.Module, device_type: str, dtype: torch.dtype) -> None:
         super().__init__()
-        # `memory_format` is absent from the shipped `Module.to` overloads.
         self.net = net.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
         self.device_type = device_type
         self.dtype = dtype
-        # Adopt the wrapped network's mode, for the reason _LabelBound does:
-        # nn.Module defaults to training=True, and a wrapper left there would
-        # put a network that was handed over in eval mode back into training.
         self.train(net.training)
 
     def forward(self, x: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:

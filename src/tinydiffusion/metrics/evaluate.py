@@ -248,17 +248,11 @@ class FidResult:
             f"fid {self.fid:.3f}",
         ]
         if self.kid is not None:
-            # The spread is the point of reporting KID at all: it says whether
-            # the gap between two checkpoints is bigger than the noise in
-            # either measurement.
             lines.append(
                 f"kid {self.kid.mean:.5f} +- {self.kid.std:.5f} "
                 f"({self.kid.subsets} subsets of {self.kid.subset_size})"
             )
         if self.sfid is not None:
-            # Printed under the FID rather than beside it: it is the same
-            # distance in a different space, and the pair is only ever read
-            # together — a good FID with a bad sFID is the finding.
             lines.append(f"sfid {self.sfid:.3f}")
         if self.precision_recall is not None:
             lines.append(
@@ -283,10 +277,6 @@ class FidResult:
                 if self.guidance is not None and self.guidance_rescale > 0
                 else ""
             )
-            # Only when it is not float32: a line that appeared on every report
-            # would say nothing on almost all of them, and the point of
-            # printing it is that this score is not comparable with one drawn
-            # at a different precision.
             + (f" | {self.sample_precision}" if self.sample_precision != DEFAULT_PRECISION else ""),
         ]
         if self.undersampled:
@@ -380,12 +370,6 @@ def generate_images(
     produced = 0
     while produced < num_images:
         batch = min(batch_size, num_images - produced)
-        # Cycled labels rather than random ones, so the class mix is fixed
-        # instead of being one more source of noise in the score. The cycle
-        # continues across batch boundaries rather than restarting: at 10k
-        # images in batches of 128, restarting leaves classes 8 and 9 with 937
-        # samples against 1016 for class 0, an 8% skew the score would read as
-        # the model's own.
         y = (
             None
             if cfg.num_classes is None
@@ -532,8 +516,6 @@ def fid_for_checkpoint(
             ``inception_score`` is asked of an extractor that does not expose
             Inception's other heads.
     """
-    # Both of the opt-in metrics read pairwise structure, so both need the
-    # vectors kept rather than folded into moments as they go by.
     retain = kid or precision_recall
     if num_images < 2:
         raise ValueError(f"num_images must be at least 2 for a covariance, got {num_images}")
@@ -552,24 +534,13 @@ def fid_for_checkpoint(
     batch = batch_size if batch_size is not None else cfg.batch_size
 
     if extractor is None:
-        # Imported here so the module stays importable, and the rest of the CLI
-        # keeps working, on a machine that cannot reach the weights.
         from tinydiffusion.metrics.inception import InceptionFeatures
 
         extractor = InceptionFeatures().to(cfg.device)
     elif isinstance(extractor, nn.Module):
-        # A supplied extractor was built without knowing where this would run —
-        # `device=None` resolves to CUDA when there is a GPU, whatever device
-        # the checkpoint was trained on. Left alone it fails several layers
-        # down, as a matmul complaining about mat2 rather than about a device.
-        # Only for a Module: FeatureExtractor promises `dim` and a call, so
-        # anything else is the caller's to place.
         extractor = extractor.to(cfg.device)
 
     root = data_root if data_root is not None else cfg.data_root
-    # Every input the reference statistics depend on is in the path, so a hit
-    # is the same set of images through the same network — and a change to any
-    # of them is a miss rather than a stale read.
     cache_path = reference_stats_path(
         root,
         dataset=cfg.dataset,
@@ -600,18 +571,12 @@ def fid_for_checkpoint(
     real_spatial: FeatureStats | None = None
     if cache:
         if retain:
-            # A bank answers everything a stats entry does and more, so it is
-            # the one to look for; the moments entry cannot stand in for it.
             real_bank = load_reference_features(features_path, dim=extractor.dim)
             real = real_bank.stats if real_bank is not None else None
         else:
             real = load_reference_stats(cache_path, dim=extractor.dim)
         if sfid:
             real_spatial = load_reference_stats(spatial_path, dim=SFID_DIM)
-    # A hit on the pooled entry and a miss on the spatial one still needs the
-    # pass, since the spatial features cannot be derived from the moments the
-    # first entry holds. Both are then recomputed together, which costs the
-    # pooled half a second time and keeps the branch to one condition.
     if real is None or (sfid and real_spatial is None):
         loader = image_dataloader(
             cfg.dataset_spec(),
@@ -620,9 +585,6 @@ def fid_for_checkpoint(
             train=split == "train",
             image_size=cfg.image_size,
             num_workers=cfg.num_workers,
-            # Fixed order and no dropped tail, so the reference side of the
-            # score depends only on the split and the image count — which is
-            # also what makes it safe to cache.
             shuffle=False,
             drop_last=False,
         )
@@ -646,9 +608,6 @@ def fid_for_checkpoint(
         real_bank = real_sink if isinstance(real_sink, FeatureBank) else None
         real = real_sink.stats if isinstance(real_sink, FeatureBank) else real_sink
         if cache:
-            # Both entries when the features were computed: the moments are a
-            # free by-product of a pass that has already happened, and writing
-            # them means a later FID-only sweep need not read the larger file.
             save_reference_stats(cache_path, real)
             if real_bank is not None:
                 save_reference_features(features_path, real_bank)
@@ -657,8 +616,6 @@ def fid_for_checkpoint(
 
     seed_everything(seed)
     generated: FeatureSink = FeatureBank(extractor.dim) if retain else FeatureStats(extractor.dim)
-    # The samples are produced lazily and not kept, so anything read from them
-    # has to be read on the one pass there is.
     generated_spatial = FeatureStats(SFID_DIM) if sfid else None
     generated_probs = FeatureBank(INCEPTION_CLASSES) if inception_score else None
     accumulate_features(
@@ -693,9 +650,6 @@ def fid_for_checkpoint(
             real_bank,
             subsets=kid_subsets,
             subset_size=kid_subset_size,
-            # Seeded from the run's own seed rather than left to the global
-            # RNG, which sampling has advanced by an amount that depends on
-            # how many batches it drew.
             generator=torch.Generator().manual_seed(seed),
             device=cfg.device,
         )
@@ -715,8 +669,6 @@ def fid_for_checkpoint(
         is_score = inception_score_from_probs(generated_probs.features, splits=is_splits)
 
     if real.n < num_images:
-        # The split ran out first; scoring uneven sides is legitimate but the
-        # caller should know the count they asked for is not what they got.
         print(f"only {real.n} images in the {split} split, scoring against those")
 
     return FidResult(
@@ -732,9 +684,6 @@ def fid_for_checkpoint(
         used_ema=use_ema,
         sampler=draw_with,
         spacing=space_with,
-        # The resolved precision, not the requested one: a CPU run and a
-        # pre-Ampere card each fall back, and the report is where that would
-        # otherwise go unmentioned.
         sample_precision=drawn_at,
         kid=kid_score,
         precision_recall=pr_score,

@@ -34,17 +34,10 @@ from tinydiffusion.training.checkpoints import INTERRUPTED_CHECKPOINT
 from tinydiffusion.training.distributed import Distributed
 from tinydiffusion.utils.tracking import METRICS_FILENAME
 
-# One rank per CPU-bound subprocess. Two is enough to prove sharding, syncing
-# and the write guards; more only makes the suite slower.
 WORLD_SIZE = 2
 
-# How long a rank gets before the parent gives up on it. Generous for the real
-# training run, which builds a model and trains two epochs per rank.
 RUN_TIMEOUT = 300
 
-# The rendezvous probe below only has to reach an all-reduce, so it gets far
-# less rope. This is the number that decides how long a machine that cannot
-# form a group at all takes to say so.
 PROBE_TIMEOUT = 20
 
 
@@ -83,9 +76,6 @@ def _loopback_interfaces() -> list[str]:
     return ["lo"]
 
 
-# Run by `_working_environment` to find out whether a group can be formed at
-# all, before the expensive one is launched. Deliberately the smallest thing
-# that exercises both halves: the store rendezvous, and gloo's own transport.
 PROBE = textwrap.dedent(
     """
     import os, sys
@@ -131,20 +121,10 @@ def _launch(script, args_per_rank, env, timeout):
                 output = proc.communicate(timeout=timeout)[0]
                 results.append((proc.returncode, output))
             except subprocess.TimeoutExpired:
-                # One rank stuck means the rest are stuck waiting on it, so the
-                # whole group goes rather than each timing out in turn.
                 for other in procs:
                     other.kill()
                 results.append((None, "timed out"))
     finally:
-        # Reap whatever the kills left behind, so no rank outlives the test and
-        # holds the rendezvous port, then close the read ends by hand. A
-        # `communicate` that timed out never reached EOF, so it never closed
-        # its pipe, and `poll` on the rank we just killed reaps it here — which
-        # skips the second `communicate` that would otherwise have done it. The
-        # handle is then left to the garbage collector, which reports it as a
-        # ResourceWarning against whichever test happens to be running at the
-        # time.
         for proc in procs:
             if proc.poll() is None:
                 proc.kill()
@@ -197,8 +177,6 @@ def gloo_environment(tmp_path_factory):
     script = tmp_path_factory.mktemp("probe") / "probe.py"
     script.write_text(PROBE)
 
-    # An operator who has set this has already made the choice; do not probe
-    # around it, and do not silently override it.
     if os.environ.get("GLOO_SOCKET_IFNAME"):
         return _base_environment()
 
@@ -218,11 +196,6 @@ def gloo_environment(tmp_path_factory):
         "no two-rank gloo group could be formed on this machine; set GLOO_SOCKET_IFNAME "
         "to an interface the ranks can reach each other over. Tried — " + "; ".join(tried)
     )
-
-
-# ---------------------------------------------------------------------------
-# Reading the launcher's environment
-# ---------------------------------------------------------------------------
 
 
 def test_no_launcher_variables_means_a_single_process(monkeypatch):
@@ -269,11 +242,6 @@ def test_the_group_renders_for_the_plan_line():
     assert str(Distributed(enabled=True, rank=2, world_size=4)) == "rank 2/4"
 
 
-# ---------------------------------------------------------------------------
-# Collectives outside a group
-# ---------------------------------------------------------------------------
-
-
 def test_the_collectives_are_no_ops_without_a_group():
     """The single-process path runs straight through them, so they must not touch anything."""
     solo = Distributed()
@@ -290,8 +258,6 @@ def test_the_collectives_are_no_ops_without_a_group():
 
 
 def test_setup_routes_the_device_notice_to_the_caller(monkeypatch, capsys):
-    # The training loop hands its own `say` down, so the CPU-fallback notice
-    # takes the same route as every line after it.
     for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -312,11 +278,6 @@ def test_setup_without_a_launcher_resolves_a_device_and_starts_nothing(monkeypat
     assert not group.enabled
     assert device == "cpu"
     assert not torch.distributed.is_initialized()
-
-
-# ---------------------------------------------------------------------------
-# Sharding the dataloader
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -348,7 +309,6 @@ def test_an_unsharded_loader_has_no_distributed_sampler(synthetic_dataset, tmp_p
     loader = image_dataloader(synthetic_dataset, tmp_path, batch_size=4, num_workers=0)
 
     assert not isinstance(loader.sampler, DistributedSampler)
-    # set_loader_epoch has nothing to advance, and must not raise looking for it.
     set_loader_epoch(loader, 3)
 
 
@@ -379,7 +339,7 @@ def test_every_rank_gets_the_same_number_of_batches(synthetic_dataset, tmp_path)
         loader = image_dataloader(
             synthetic_dataset,
             tmp_path,
-            batch_size=5,  # 24 images over 2 ranks does not divide by 5
+            batch_size=5,
             num_workers=0,
             num_replicas=WORLD_SIZE,
             rank=rank,
@@ -436,13 +396,6 @@ def test_sharding_needs_a_rank(synthetic_dataset, tmp_path):
         image_dataloader(synthetic_dataset, tmp_path, num_replicas=2)
 
 
-# ---------------------------------------------------------------------------
-# A real two-process run
-# ---------------------------------------------------------------------------
-
-# Run in each subprocess. Registers the same synthetic dataset the fixture
-# above does — a rank cannot inherit a monkeypatch — trains, and writes what it
-# ended up with so the parent can compare the ranks against each other.
 WORKER = textwrap.dedent(
     """
     import json, sys
@@ -594,8 +547,6 @@ def test_the_checkpoint_is_written_once_and_loads(group_run):
     )
 
     assert checkpoint["epoch"] == 1
-    # No `module.` prefix: DDP wrapped the network but the checkpoint is taken
-    # from the eager one, so it stays loadable by every downstream command.
     assert not any(key.startswith("module.") for key in checkpoint["model"])
 
 
@@ -610,19 +561,9 @@ def test_the_logged_throughput_covers_the_whole_group(group_run):
     epoch = records[0]
 
     images = epoch["time/images_per_second"] * epoch["time/epoch_seconds"]
-    # 24 images, sharded two ways and dropped to whole batches of 4.
     assert images == pytest.approx(24, rel=0.2)
 
 
-# ---------------------------------------------------------------------------
-# Stopping a group from a watcher
-# ---------------------------------------------------------------------------
-
-# A watcher attaches to one process, so only rank 0's ever asks for the stop.
-# The run has to end on every rank anyway: a rank that left the loop on its own
-# would strand the others at the next gradient all-reduce, and a rank that stayed
-# would train against a group that is no longer there. Both symptoms are a hang
-# rather than an error, which is why these tests fail by timing out.
 OBSERVER_WORKER = textwrap.dedent(
     """
     import json, sys
@@ -750,17 +691,9 @@ def test_the_stop_lands_before_the_run_is_over(observer_stop_run):
         if line
     ]
 
-    # The partial epoch is still flushed, and nothing after it ever ran.
     assert [record["step"] for record in records] == [0]
 
 
-# ---------------------------------------------------------------------------
-# Sharing the adaptive timestep proposal
-# ---------------------------------------------------------------------------
-
-# Each rank folds in a batch only it can see, then writes the history it ended
-# up with. Without the gather each rank remembers its own half; with it, both
-# remember all of it and agree on the proposal.
 RESAMPLER_WORKER = textwrap.dedent(
     """
     import sys
@@ -824,10 +757,8 @@ def test_a_shared_proposal_sees_every_ranks_timesteps(resampler_runs):
     first = torch.load(resampler_runs["shared"] / "resampler_0.pt", weights_only=True)
     second = torch.load(resampler_runs["shared"] / "resampler_1.pt", weights_only=True)
 
-    # Every timestep has its full history, though no rank drew more than half.
     assert first["counts"].tolist() == [2, 2, 2, 2]
     assert first["warm"]
-    # And both ranks agree, so they are drawing from the same proposal.
     assert torch.equal(first["counts"], second["counts"])
     assert torch.equal(first["weights"], second["weights"])
 
@@ -840,7 +771,6 @@ def test_without_the_gather_each_rank_keeps_half_the_history(resampler_runs):
 
     assert first["counts"].tolist() == [2, 2, 0, 0]
     assert second["counts"].tolist() == [0, 0, 2, 2]
-    # Neither ever warms, so both fall back to a uniform draw forever.
     assert not first["warm"] and not second["warm"]
 
 

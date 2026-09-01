@@ -182,11 +182,6 @@ def sweep_points(
         overrides = dict(zip(fields, combination, strict=True))
         name = point_name(overrides)
         directory = root / name
-        # from_mapping rather than replace, for the reason the CLI uses it: an
-        # axis value arrives as whatever TOML made of it, and this is what
-        # coerces a string to a Path or a list to a tuple. It also validates,
-        # so a combination that cannot be trained is rejected here rather than
-        # after the points before it have already run.
         config = TrainConfig.from_mapping(
             {
                 **dataclasses.asdict(base),
@@ -287,9 +282,6 @@ def sweep_summary(runs: Sequence[SweepRun]) -> str:
         return "no points to run"
 
     def sort_key(run: SweepRun) -> tuple[int, float]:
-        # Two keys rather than one: a missing loss is not "infinitely bad", it
-        # is unranked, and sorting it as a number would put a failed point and
-        # an unvalidated one in a meaningful-looking position.
         return (1, 0.0) if run.best_val_loss is None else (0, run.best_val_loss)
 
     ordered = sorted(runs, key=sort_key)

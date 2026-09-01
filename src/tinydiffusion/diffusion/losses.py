@@ -110,9 +110,6 @@ def discretized_gaussian_log_likelihood(
     log_one_minus_cdf_min = (1.0 - cdf_min).clamp(min=1e-12).log()
     log_cdf_delta = (cdf_plus - cdf_min).clamp(min=1e-12).log()
 
-    # The extreme bins are half-open: everything below -0.999 collapses into the
-    # lowest bucket and everything above 0.999 into the highest, so those use a
-    # one-sided tail rather than a difference of two nearly equal CDFs.
     return torch.where(
         x < -0.999,
         log_cdf_plus,

@@ -107,7 +107,7 @@ class LossSecondMomentResampler:
     It is also kept *on the device the losses arrive on*, and every operation
     below is written to keep it there. The training loop goes to some trouble
     to queue a batch's work and move on without waiting for it — see
-    :data:`~tinydiffusion.training.train.DRAIN_EVERY` — and a proposal that
+    :data:`~tinydiffusion.training.reporting.DRAIN_EVERY` — and a proposal that
     read its own history back to the host would undo that for every run that
     turned this sampler on, once per batch. So there is no ``.item()``, no
     ``.tolist()`` and no Python-level branch on a tensor anywhere between
@@ -145,14 +145,8 @@ class LossSecondMomentResampler:
         self.history = history
         self.uniform_prob = uniform_prob
         self.gather = gather
-        # One row per timestep, plus a scratch row at index `num_timesteps`
-        # that `_placement` aims the writes it wants to discard at. Built on
-        # the CPU and moved to meet the first batch; see `_align`.
         self._losses = torch.zeros(num_timesteps + 1, history, dtype=torch.float64)
         self._counts = torch.zeros(num_timesteps, dtype=torch.long)
-        # Where the next write for each timestep goes. The history is a ring
-        # rather than a shifted window: same contents, but each update writes
-        # one slot instead of rewriting the whole row.
         self._position = torch.zeros(num_timesteps, dtype=torch.long)
 
     def _align(self, device: torch.device | str) -> None:
@@ -164,10 +158,6 @@ class LossSecondMomentResampler:
         Args:
             device: where the next draw or update is happening.
         """
-        # Unconditional because `Tensor.to` already is one: it hands back the
-        # same tensor when there is nothing to change. Guarding it with a
-        # comparison would mean resolving `cuda` against `cuda:0` by hand, and
-        # getting that wrong copies three buffers on every batch.
         self._losses = self._losses.to(device)
         self._counts = self._counts.to(device)
         self._position = self._position.to(device)
@@ -200,14 +190,8 @@ class LossSecondMomentResampler:
             dtype=rows.dtype,
             device=rows.device,
         )
-        # The square root of the second moment, i.e. the RMS over the history.
         rms = rows.square().mean(dim=1).sqrt()
         total = rms.sum()
-        # Both conditions stay tensors and the choice is made by `torch.where`,
-        # because `if not self.warm` would be a host read on the hot path. The
-        # second one covers a history of exactly zero everywhere, which happens
-        # in tests and nowhere else; the clamp only keeps the arithmetic finite
-        # in the branch that is then thrown away.
         usable = (self._counts == self.history).all() & (total > 0)
         adaptive = rms / total.clamp(min=torch.finfo(rows.dtype).tiny)
         adaptive = adaptive * (1.0 - self.uniform_prob) + self.uniform_prob / self.num_timesteps
@@ -234,9 +218,6 @@ class LossSecondMomentResampler:
         """
         self._align(device)
         probs = self.weights()
-        # With replacement: the batch is a Monte Carlo draw, and forbidding
-        # repeats would bias it away from exactly the peaked timesteps the
-        # proposal exists to concentrate on.
         index = torch.multinomial(probs, batch_size, replacement=True)
         weights = 1.0 / (self.num_timesteps * probs[index])
         return index, weights.float()
@@ -274,16 +255,12 @@ class LossSecondMomentResampler:
         ordered = steps[order]
         opens = torch.ones(count, dtype=torch.bool, device=device)
         opens[1:] = ordered[1:] != ordered[:-1]
-        # Running maximum of "index of the last run that opened", which for a
-        # sorted sequence is the first index holding this element's timestep.
         run_start = torch.cummax(torch.where(opens, index, torch.zeros_like(index)), dim=0).values
         rank = torch.empty_like(index)
         rank[order] = index - run_start
 
         occurrences = torch.zeros(self.num_timesteps, dtype=torch.long, device=device)
         occurrences.index_add_(0, steps, torch.ones_like(steps))
-        # Keep the last `history` occurrences of each timestep and discard the
-        # rest, which is what a ring of that size would hold anyway.
         keep = occurrences[steps] - rank <= self.history
         row = torch.where(keep, steps, torch.full_like(steps, self.num_timesteps))
         slot = (self._position[steps] + rank) % self.history
@@ -310,8 +287,6 @@ class LossSecondMomentResampler:
         steps = t.detach().reshape(-1).to(torch.long)
         values = losses.detach().reshape(-1)
         if self.gather is not None:
-            # Before `_align`, and unconditionally: a rank that skipped this
-            # because its own batch was empty would hang the rest of the group.
             steps = self.gather(steps)
             values = self.gather(values)
         if steps.numel() == 0:

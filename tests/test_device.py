@@ -14,7 +14,6 @@ def test_cpu_is_left_alone():
 
 
 def test_an_unknown_device_is_a_user_error():
-    # torch raises RuntimeError, which the CLI would surface as a traceback.
     with pytest.raises(ValueError, match="unknown device"):
         resolve_device("gpu")
 
@@ -44,9 +43,6 @@ def test_describe_device_names_the_gpu(monkeypatch):
 
 
 def test_emulated_bfloat16_does_not_count_as_supported(monkeypatch):
-    # torch.cuda.is_bf16_supported() counts the emulation path, so it says True
-    # on a pre-Ampere card. Emulated bf16 measures nearly five times slower
-    # than the fp16 it would be chosen over, so it is not a fallback to take.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(
         torch.cuda,
@@ -71,7 +67,6 @@ def test_bfloat16_is_not_supported_without_cuda(monkeypatch):
 
 
 def test_older_torch_without_the_emulation_keyword_still_answers(monkeypatch):
-    # The keyword is recent; before it, the broad answer is the only one there.
     def old_signature():
         return True
 

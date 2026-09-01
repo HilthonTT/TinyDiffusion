@@ -87,7 +87,6 @@ def dpmpp_sample(
             diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
         )
     ts = timesteps.to(device)
-    # As in DDIM, the last step lands on a t=-1 sentinel whose alphabar is 1.
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])
 
     alphabar = diffusion.alphabar_t
@@ -95,9 +94,6 @@ def dpmpp_sample(
 
     with eval_mode(net):
         x = initial_latent(num_samples, size, device, noise=noise, generator=generator)
-        # x_0 predicted at the previous step, and the log-SNR gap that step
-        # spanned. The very first step has neither, so it runs first-order —
-        # which is exactly a DDIM step.
         x0_prev: torch.Tensor | None = None
         h_prev: torch.Tensor | None = None
 
@@ -110,25 +106,17 @@ def dpmpp_sample(
             )
 
             if t_prev < 0:
-                # The final step denoises to alphabar = 1, where every solver
-                # collapses to its own x_0 prediction.
                 return x0
 
             alpha_t, sigma_t = ab_t.sqrt(), (1 - ab_t).sqrt()
             alpha_prev, sigma_prev = ab_prev.sqrt(), (1 - ab_prev).sqrt()
-            # lambda = log-SNR / 2; the step is taken in this variable, which
-            # is what makes the linear part of the ODE exactly integrable.
             lambda_t = alpha_t.log() - sigma_t.log()
             lambda_prev = alpha_prev.log() - sigma_prev.log()
             h = lambda_prev - lambda_t
 
             if x0_prev is None or h_prev is None:
-                # DPM-Solver++(1S), i.e. DDIM.
                 d = x0
             else:
-                # Second order: extrapolate x_0 linearly in lambda from the
-                # previous step's prediction. r is the ratio of step sizes, so
-                # a non-uniform timestep grid stays correct.
                 r = h_prev / h
                 d = (1.0 + 1.0 / (2.0 * r)) * x0 - (1.0 / (2.0 * r)) * x0_prev
 

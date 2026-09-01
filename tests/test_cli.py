@@ -10,6 +10,7 @@ import torch
 from tinydiffusion import __version__, cli
 from tinydiffusion import version as version_module
 from tinydiffusion.cli import build_parser, main
+from tinydiffusion.cli import commands as cli_commands
 from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES
 from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
 from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
@@ -50,7 +51,6 @@ def test_train_overrides_default_to_none():
     args = build_parser().parse_args(["train"])
     assert args.config is None
     assert (args.seed, args.device, args.num_epochs, args.resume) == (None, None, None, None)
-    # Tracking flags too: an unpassed flag must not override the config file.
     assert (args.log_dir, args.tensorboard, args.log_console) == (None, None, None)
 
 
@@ -66,13 +66,10 @@ def test_sample_defaults():
     assert args.num_images == 8
     assert args.eta == 0.0
     assert args.steps is None
-    # Unset, so the checkpoint's own conditioning settings decide.
     assert args.labels is None
     assert args.guidance is None
     assert args.guidance_rescale is None
-    # Likewise the sampler it was trained to be drawn with.
     assert args.sampler is None
-    # Unset, so the whole draw happens in one batch exactly as it always has.
     assert args.batch_size is None
     assert args.save_individual is False
 
@@ -132,7 +129,6 @@ def test_fid_defaults():
     assert args.split == "train"
     assert args.eta == 0.0
     assert args.use_ema is True
-    # Unset, so the checkpoint's own settings decide.
     assert (args.steps, args.guidance, args.batch_size, args.data_root) == (None,) * 4
     assert args.guidance_rescale is None
 
@@ -178,7 +174,7 @@ def test_fid_runs_and_prints_a_report(capsys, monkeypatch, tmp_path):
         seen.update(kwargs)
         return FakeResult()
 
-    monkeypatch.setattr(cli, "fid_for_checkpoint", fake_fid)
+    monkeypatch.setattr(cli_commands, "fid_for_checkpoint", fake_fid)
     assert main(["fid", "--checkpoint", str(tmp_path / "m.pt"), "--num-images", "64"]) == 0
     assert "fid 1.234" in capsys.readouterr().out
     assert seen["num_images"] == 64
@@ -193,7 +189,6 @@ def test_main_reports_a_missing_fid_checkpoint(capsys, tmp_path):
 def test_serve_defaults():
     args = build_parser().parse_args(["serve", "--checkpoint", "model.pt"])
     assert args.command == "serve"
-    # Loopback, not 0.0.0.0: the API is unauthenticated.
     assert args.host == "127.0.0.1"
     assert args.port == 8000
     assert args.use_ema is True
@@ -231,15 +226,10 @@ def test_serve_requires_a_checkpoint():
 
 
 def test_serve_builds_a_config_and_runs(capsys, monkeypatch, tmp_path):
-    # Patching the module means importing it, and it imports FastAPI at module
-    # scope. The missing-extra path is the test below this one, which needs no
-    # patching and so still runs on a base install.
     pytest.importorskip("fastapi", reason="needs the 'server' extra")
     checkpoint = tmp_path / "m.pt"
     checkpoint.write_bytes(b"")
     seen = {}
-    # Patched on the module the handler imports from, since it imports late so
-    # that only `serve` needs the optional extra.
     monkeypatch.setattr("tinydiffusion.server.app.serve", lambda config: seen.update(config=config))
 
     assert main(["serve", "--checkpoint", str(checkpoint), "--port", "9999"]) == 0
@@ -262,7 +252,7 @@ def trained(monkeypatch):
         seen["cfg"] = cfg
         seen["resume"] = resume
 
-    monkeypatch.setattr(cli, "train_run", fake_train)
+    monkeypatch.setattr(cli_commands, "train_run", fake_train)
     return seen
 
 
@@ -276,8 +266,6 @@ def _checkpoint(tmp_path, **overrides) -> Path:
 
 
 def test_a_bare_resume_continues_the_checkpoints_own_config(tmp_path, trained):
-    # Defaulting to TrainConfig() instead would refuse every checkpoint not
-    # trained on the defaults, over settings the user never asked to change.
     path = _checkpoint(tmp_path, base_channels=32, num_epochs=7, dataset="cifar10")
 
     assert main(["train", "--resume", str(path)]) == 0
@@ -325,9 +313,6 @@ def test_main_reports_a_missing_checkpoint(capsys, tmp_path):
     assert "error:" in capsys.readouterr().err
 
 
-# --- --set config overrides -------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -335,14 +320,9 @@ def test_main_reports_a_missing_checkpoint(capsys, tmp_path):
         ("lr=1e-4", ("lr", 1e-4)),
         ("amp=false", ("amp", False)),
         ("channel_mult=[1, 2, 2]", ("channel_mult", [1, 2, 2])),
-        # TOML cannot read these as values, so they arrive as bare strings and
-        # from_mapping coerces them — which is what keeps paths and registry
-        # names free of shell-hostile quoting.
         ("dataset=cifar10", ("dataset", "cifar10")),
         ("out_dir=runs/sweep", ("out_dir", "runs/sweep")),
         ("sample_spacing=quadratic", ("sample_spacing", "quadratic")),
-        # A quoted string is still a string, and spaces around the name are not
-        # part of it.
         ('device="cuda:1"', ("device", "cuda:1")),
         (" seed = 5", ("seed", 5)),
     ],
@@ -402,8 +382,6 @@ def test_set_overrides_a_resumed_config(tmp_path, trained):
 
 
 def test_set_wins_over_a_named_flag_for_the_same_field(trained):
-    # `--set` is applied last, so it is the escape hatch rather than one more
-    # voice in the vote.
     assert main(["train", "--epochs", "9", "--set", "num_epochs=3"]) == 0
     assert trained["cfg"].num_epochs == 3
 
@@ -434,9 +412,6 @@ def test_no_set_leaves_the_config_untouched(tmp_path, trained):
     assert main(["train", "--config", str(config)]) == 0
 
     assert trained["cfg"].batch_size == 64
-
-
-# --- --spacing --------------------------------------------------------------
 
 
 def test_sample_and_fid_default_the_spacing_to_the_checkpoints():
@@ -506,7 +481,7 @@ def test_the_metric_flags_reach_the_scorer(monkeypatch, tmp_path):
         seen.update(kwargs)
         return FakeResult()
 
-    monkeypatch.setattr(cli, "fid_for_checkpoint", fake_fid)
+    monkeypatch.setattr(cli_commands, "fid_for_checkpoint", fake_fid)
     main(["fid", "--checkpoint", str(tmp_path / "m.pt"), "--kid", "--precision-recall"])
     assert seen["kid"] is True
     assert seen["precision_recall"] is True
@@ -539,7 +514,7 @@ def test_plot_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
         seen["runs"], seen["out"] = runs, out
         return out
 
-    monkeypatch.setattr(cli, "plot_runs", fake_plot)
+    monkeypatch.setattr(cli_commands, "plot_runs", fake_plot)
     out = tmp_path / "fig.png"
     assert main(["plot", "runs/mnist", "--out", str(out)]) == 0
     assert str(out) in capsys.readouterr().out
@@ -547,8 +522,6 @@ def test_plot_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_path):
 
 
 def test_main_reports_a_run_with_no_metrics(pyplot, capsys, tmp_path):
-    # Takes `pyplot` because plot_runs checks for matplotlib before it looks at
-    # the run: without the extra this would pass on the wrong error.
     assert main(["plot", str(tmp_path / "nowhere"), "--out", str(tmp_path / "f.png")]) == 1
     assert "error:" in capsys.readouterr().err
 
@@ -576,9 +549,6 @@ def test_main_reports_a_missing_plots_extra(capsys, tmp_path, monkeypatch):
 @pytest.mark.parametrize("command", ["sample", "fid", "interpolate", "serve"])
 def test_every_sampling_command_defaults_to_float32(command):
     args = build_parser().parse_args([command, "--checkpoint", "model.pt"])
-    # The default has to stay fp32 on all four: it is the only precision whose
-    # result does not depend on the card it ran on, and the one that keeps a
-    # score comparable with one taken before the flag existed.
     assert args.precision == DEFAULT_PRECISION
 
 
@@ -602,7 +572,7 @@ def test_precision_reaches_the_sampler(monkeypatch, tmp_path):
         seen.update(kwargs)
         return out
 
-    monkeypatch.setattr(cli, "sample_from_checkpoint", fake_sample)
+    monkeypatch.setattr(cli_commands, "sample_from_checkpoint", fake_sample)
     assert (
         main(
             [
@@ -627,11 +597,9 @@ def test_precision_reaches_fid_under_its_own_name(monkeypatch):
         seen.update(kwargs)
         raise SystemExit(0)
 
-    monkeypatch.setattr(cli, "fid_for_checkpoint", fake_fid)
+    monkeypatch.setattr(cli_commands, "fid_for_checkpoint", fake_fid)
     with pytest.raises(SystemExit):
         main(["fid", "--checkpoint", "m.pt", "--precision", "fp16"])
-    # `precision` would sit next to `precision_recall` in that signature and
-    # read as its switch, so the scoring function spells it out.
     assert seen["sample_precision"] == "fp16"
     assert seen["precision_recall"] is False
 
@@ -666,9 +634,6 @@ def test_main_reports_a_missing_tui_extra(capsys, monkeypatch):
             raise ImportError("no textual")
         return real_import(name, *args, **kwargs)
 
-    # Dropped from the cache first: tui.app imports Textual at module scope, so
-    # a module another test already imported would be handed back from
-    # sys.modules without its body — and the refusal below never reached.
     monkeypatch.delitem(sys.modules, "tinydiffusion.tui.app", raising=False)
     monkeypatch.setattr(builtins, "__import__", refuse_textual)
     assert main(["tui"]) == 1
@@ -700,7 +665,6 @@ def test_interpolate_defaults():
     assert args.steps == 8
     assert (args.seed_start, args.seed_end) == (0, 1)
     assert args.out == Path("contents/interpolation.png")
-    # Unset, so the checkpoint's own settings decide.
     assert (args.num_steps, args.sampler, args.spacing, args.labels) == (None,) * 4
     assert (args.guidance, args.guidance_rescale) == (None, None)
 
@@ -742,7 +706,7 @@ def test_interpolate_runs_and_reports_where_it_wrote(capsys, monkeypatch, tmp_pa
         seen.update(kwargs)
         return out
 
-    monkeypatch.setattr(cli, "interpolate_from_checkpoint", fake_walk)
+    monkeypatch.setattr(cli_commands, "interpolate_from_checkpoint", fake_walk)
     out = tmp_path / "walk.png"
     assert main(["interpolate", "--checkpoint", "m.pt", "--steps", "6", "--out", str(out)]) == 0
     assert str(out) in capsys.readouterr().out

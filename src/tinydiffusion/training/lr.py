@@ -44,8 +44,6 @@ def _cosine_lr(step: int, warmup: int, total: int) -> float:
     """
     decaying = total - warmup
     if decaying <= 0:
-        # A run shorter than its own warmup never reaches the decay; the ramp
-        # is the whole schedule and this must not divide by zero.
         return 1.0
     progress = min(max(step - warmup, 0) / decaying, 1.0)
     return 0.5 * (1.0 + math.cos(math.pi * progress))
@@ -67,7 +65,5 @@ def lr_factor(step: int, *, warmup: int, total: int, schedule: str) -> float:
     """
     factor = _warmup_lr(step, warmup)
     if schedule == "cosine":
-        # Multiplied rather than branched: during the ramp the cosine term is
-        # still 1, so the two compose without a discontinuity where they meet.
         factor *= _cosine_lr(step, warmup, total)
     return factor

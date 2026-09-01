@@ -92,15 +92,10 @@ def inception_score_from_probs(
     if splits > total:
         raise ValueError(f"cannot split {total} samples into {splits} chunks")
 
-    # float64 throughout: the KL is a difference of two logs of numbers that
-    # can be 1e-9 apart, and float32 loses the digits the spread is made of.
     working = probs.double()
     size = total // splits
     scores = []
     for index in range(splits):
-        # Trailing samples beyond splits * size are dropped rather than piled
-        # into the last chunk: the score depends on the chunk size, so a final
-        # chunk of a different size would be averaged in on a different scale.
         chunk = working[index * size : (index + 1) * size]
         marginal = chunk.mean(dim=0, keepdim=True)
         kl = (chunk * (chunk.clamp_min(_EPS).log() - marginal.clamp_min(_EPS).log())).sum(dim=1)
@@ -109,9 +104,6 @@ def inception_score_from_probs(
     stacked = torch.stack(scores)
     return InceptionScoreResult(
         mean=float(stacked.mean()),
-        # Unbiased where there is more than one split, and 0 where there is
-        # one — torch's default would report nan, which reads as a failure
-        # rather than as "one split has no spread".
         std=float(stacked.std(unbiased=True)) if splits > 1 else 0.0,
         splits=splits,
         split_size=size,

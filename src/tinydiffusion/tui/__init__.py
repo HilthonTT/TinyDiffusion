@@ -38,7 +38,7 @@ def run_tui(
     """
     try:
         from tinydiffusion.tui.app import TinyDiffusionApp
-    except ImportError as exc:  # pragma: no cover - exercised by the extra
+    except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "the dashboard needs the 'tui' extra: pip install 'tinydiffusion[tui]'"
         ) from exc

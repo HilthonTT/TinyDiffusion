@@ -33,7 +33,7 @@ uv sync --all-extras --dev              # creates .venv/ (~3.5 GB with CUDA)
 
 On Windows use `.\scripts\run.ps1` in place of `./scripts/run.sh`. The wrappers
 find an interpreter that has the package installed and forward the rest to the
-CLI — `python src/tinydiffusion/cli.py` does not work in a `src/` layout.
+CLI — `python src/tinydiffusion/cli/commands.py` does not work in a `src/` layout.
 
 `configs/smoke.toml` is a deliberately tiny run for checking the pipeline end to
 end (~28 s per epoch on an RTX 5060, ~3.5 min on a CPU). The real run is

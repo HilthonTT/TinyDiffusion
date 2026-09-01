@@ -112,7 +112,6 @@ def heun_sample(
             diffusion.num_timesteps, num_steps, alphabar=diffusion.alphabar_t
         )
     ts = timesteps.to(device)
-    # As in DDIM, the last step lands on a t=-1 sentinel whose alphabar is 1.
     ts_prev = torch.cat([ts[1:], ts.new_tensor([-1])])
 
     alphabar = diffusion.alphabar_t
@@ -130,26 +129,14 @@ def heun_sample(
             )
 
             if t_prev < 0:
-                # Denoising to alphabar = 1 leaves the x_0 prediction itself,
-                # and a corrector would have to evaluate the network at a
-                # timestep that does not exist.
                 return x0
 
             alpha_t, sigma_t = ab_t.sqrt(), (1 - ab_t).sqrt()
             alpha_prev, sigma_prev = ab_prev.sqrt(), (1 - ab_prev).sqrt()
-            # lambda = log-SNR / 2, the variable the linear part of the ODE is
-            # exactly integrable in; h is the gap this step spans.
             h = (alpha_prev.log() - sigma_prev.log()) - (alpha_t.log() - sigma_t.log())
-            # Common to both the provisional step and the corrected one, so the
-            # two differ in nothing but which x_0 estimate they are given.
             decay, step = sigma_prev / sigma_t, -alpha_prev * torch.expm1(-h)
 
-            # Euler: the whole step along the direction measured at t_cur.
             x_euler = decay * x + step * x0
-            # And the direction at where that landed. Evaluated at t_prev, the
-            # timestep x_euler is an estimate of, which is what makes the
-            # average a trapezoidal rule over the step rather than two samples
-            # of the same end of it.
             x0_next, _ = predict_xstart_eps(
                 diffusion,
                 x_euler,

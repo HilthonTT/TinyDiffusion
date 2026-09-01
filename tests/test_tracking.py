@@ -88,7 +88,6 @@ def test_the_context_manager_closes_every_backend():
 
 
 def test_close_reports_every_failing_backend():
-    # A healthy backend after the failing one must still be closed.
     healthy = RecordingBackend()
     with pytest.raises(ExceptionGroup):
         RunLogger([ExplodingBackend(), healthy]).close()
@@ -122,9 +121,6 @@ def test_jsonl_appends_to_an_existing_file(tmp_path):
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_a_non_finite_value_is_recorded_as_null(tmp_path, value):
-    # json would write the bare tokens NaN/Infinity, which are a Python
-    # extension: a strict reader rejects the whole file over one of them, and
-    # a diverged run is exactly the one whose log is worth reading.
     path = tmp_path / "metrics.jsonl"
     backend = JsonlBackend(path)
     backend.write({"train/loss": value, "train/lr": 1e-4}, 2)
@@ -137,8 +133,6 @@ def test_a_non_finite_value_is_recorded_as_null(tmp_path, value):
 
 
 def test_a_metric_cannot_overwrite_the_step_it_was_logged_at(tmp_path):
-    # step is what every reader joins on, so it outranks a metric of the
-    # same name rather than the other way round.
     path = tmp_path / "metrics.jsonl"
     backend = JsonlBackend(path)
     backend.write({"step": 99.0, "time": 0.0}, 3)
@@ -165,9 +159,6 @@ def test_each_reopen_stamps_a_new_session(tmp_path):
 
 
 def test_a_resumed_run_reads_back_as_one_record_per_step(tmp_path):
-    # Resuming from step 1 replays steps the file already holds. The raw file
-    # keeps both copies -- the first run's are still what it measured -- but a
-    # reader wants the run as it now stands, not one that doubles back.
     path = tmp_path / "metrics.jsonl"
     first = JsonlBackend(path)
     for step, loss in enumerate((3.0, 2.0, 1.0)):
@@ -184,7 +175,6 @@ def test_a_resumed_run_reads_back_as_one_record_per_step(tmp_path):
 
 
 def test_reading_a_file_written_before_sessions_existed(tmp_path):
-    # No session key at all: file order is then the only ordering there is.
     path = tmp_path / "metrics.jsonl"
     path.write_text('{"step": 0, "loss": 1.0}\n{"step": 0, "loss": 2.0}\n')
     assert read_metrics(path) == [{"step": 0, "loss": 2.0}]
@@ -206,8 +196,6 @@ def test_reading_a_missing_file_is_empty(tmp_path):
 
 
 def test_a_failing_close_does_not_shadow_the_error_that_ended_the_run():
-    # The training exception is the one worth reading; a file handle that
-    # would not close is a footnote to it.
     with (
         pytest.warns(UserWarning, match="nope"),
         pytest.raises(RuntimeError, match="diverged"),
@@ -239,7 +227,6 @@ def test_console_output_holds_every_metric(capsys):
     assert "step 3" in out
     assert "train/loss" in out
     assert "0.2500" in out
-    # A learning rate would round to 0.0002 in fixed point.
     assert "2.0e-04" in out
 
 
@@ -283,8 +270,6 @@ def test_totals_are_sums_and_counts_rather_than_means():
 
 
 def test_totals_leave_everything_on_the_device_they_were_given():
-    # The whole reason they are totals: a training loop adds them into a
-    # running pair and reads the result back once, at the end of the epoch.
     losses = torch.tensor([1.0, 2.0])
     sums, counts = timestep_quartile_totals(losses, torch.tensor([0, 90]), num_timesteps=100)
 
@@ -294,9 +279,6 @@ def test_totals_leave_everything_on_the_device_they_were_given():
 
 
 def test_totals_accumulate_across_batches_into_a_pooled_mean():
-    # One batch lands a single sample in q0, the next lands three. Pooling has
-    # to weight them 1:3; averaging the two batch means would call it 1:1 and
-    # report 6.0 instead.
     sums, counts = torch.zeros(4), torch.zeros(4)
     for losses, steps in (
         (torch.tensor([10.0]), torch.tensor([0])),

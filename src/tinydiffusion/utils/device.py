@@ -33,8 +33,6 @@ def resolve_device(
         return "cuda" if torch.cuda.is_available() else "cpu"
 
     try:
-        # torch raises RuntimeError for a typo like "gpu", which the CLI treats
-        # as a crash rather than the user error it is.
         device = torch.device(requested)
     except RuntimeError as exc:
         raise ValueError(f"unknown device {requested!r}: {exc}") from exc
@@ -81,7 +79,7 @@ def bf16_supported() -> bool:
         return False
     try:
         return bool(torch.cuda.is_bf16_supported(including_emulation=False))
-    except TypeError:  # pragma: no cover - torch before the keyword existed
+    except TypeError:  # pragma: no cover
         return bool(torch.cuda.is_bf16_supported())
 
 
@@ -92,12 +90,9 @@ def enable_tf32() -> None:
     costs nothing visible in a diffusion sample, and float32 accumulation is
     unchanged. A no-op on hardware without TF32 units.
     """
-    # `fp32_precision` supersedes the older `allow_tf32` flags; prefer it when
-    # the installed torch has it so this does not start warning later.
     if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
         torch.backends.cuda.matmul.fp32_precision = "tf32"
-        # Present at runtime, absent from the shipped stubs.
         torch.backends.cudnn.conv.fp32_precision = "tf32"  # type: ignore[attr-defined]
-    else:  # pragma: no cover - older torch
+    else:  # pragma: no cover
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True

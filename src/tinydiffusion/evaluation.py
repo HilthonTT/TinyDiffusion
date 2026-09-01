@@ -105,10 +105,6 @@ class EvalResult:
             f"loss {self.loss:.5f}",
         ]
         if self.bpd is not None:
-            # The prior term is printed beside the total rather than folded
-            # into it: it is the one part of the bound training cannot improve,
-            # so a reader comparing two checkpoints needs to see how much of
-            # the difference was ever theirs to move.
             lines.append(
                 f"bpd {self.bpd:.5f} (prior {self.prior_bpd:.5f}) over {self.num_bpd_images} images"
             )
@@ -184,12 +180,7 @@ def evaluate_checkpoint(
     net = ema.module if use_ema else diffusion.net
 
     if bpd and not isinstance(diffusion, GaussianDiffusion):
-        # DDPM is the fixed-variance special case, built directly rather than
-        # through GaussianDiffusion, and has no variational bound to walk. The
-        # weights are fine; it is the process wrapper that cannot answer.
         raise ValueError(
-            # ASCII only: this reaches a terminal, and a Windows console on the
-            # default code page renders an em dash as mojibake.
             "the variational bound needs the generalised process, and this "
             "checkpoint's parameterisation is served by the plain DDPM one. "
             "Train with a non-default `predict`, `variance` or `objective`; "
@@ -204,9 +195,6 @@ def evaluate_checkpoint(
         train=split == "train",
         image_size=cfg.image_size,
         num_workers=cfg.num_workers,
-        # A score has to cover the whole split in a fixed order. The train
-        # split's own defaults would shuffle it and drop the ragged last
-        # batch, quietly leaving up to batch_size-1 images out of the average.
         shuffle=False,
         drop_last=False,
     )
@@ -219,21 +207,11 @@ def evaluate_checkpoint(
         batches = tqdm(loader, desc=f"eval {split}", disable=not progress)
         for index, (x, y) in enumerate(batches):
             x = x.to(cfg.device, non_blocking=True)
-            # A conditional model is scored on the true labels, and never with
-            # guidance: the objective it was trained on is the conditional
-            # prediction, and scoring it against a null or extrapolated one
-            # would measure something the run never optimised.
             scored = (
                 Conditioned(net, y.to(cfg.device, non_blocking=True))
                 if cfg.num_classes is not None
                 else net
             )
-            # Reseed per batch so the noise depends only on position in the
-            # split, never on batch count or how many timesteps were scored.
-            # Offset by the batch index, or every batch would be scored against
-            # the identical draw: the average would then cover num_images
-            # images but only one noise sample per slot, and carry whatever
-            # bias that single draw happens to have.
             seed_everything(seed + index)
             for i, step in enumerate(steps):
                 t = step.expand(x.shape[0])
@@ -323,16 +301,11 @@ def _bound_bits_per_dim(
                 else net
             )
             seed_everything(seed + index)
-            # Unclipped: clamping the implied x_0 at each step tightens the
-            # number without it still being an upper bound on the negative
-            # log-likelihood, which is the only thing that makes it comparable
-            # with anyone else's.
             terms = diffusion.calc_bpd_loop(x, model=scored, clip_denoised=False)
             totals += terms["total_bpd"].double().sum()
             priors += terms["prior_bpd"].double().sum()
             seen += x.shape[0]
 
-    # tqdm holds the iterator open, and the loader's workers with it.
     batches.close()
     divisor = max(seen, 1)
     return float(totals / divisor), float(priors / divisor), seen

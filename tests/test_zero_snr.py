@@ -25,8 +25,6 @@ def test_the_terminal_signal_is_removed(betas):
     after = _alphabar(enforce_zero_terminal_snr(betas))[-1].sqrt()
 
     assert after < before
-    # Down to the floor, give or take the float error in rebuilding the betas
-    # from it and taking the product back out again.
     assert after == pytest.approx(1e-4, rel=1e-2)
 
 
@@ -47,8 +45,6 @@ def test_the_linear_schedule_is_the_one_that_leaks():
     assert _alphabar(betas)[-1].sqrt() > 1e-3
     assert _alphabar(enforce_zero_terminal_snr(betas))[-1].sqrt() < 1e-3
 
-    # The cosine schedule clamps its betas at 0.999 and gets there by itself,
-    # so the rescale has little left to do; this pins that it stays true.
     assert _alphabar(cosine_beta_schedule(1000))[-1].sqrt() < 1e-3
 
 
@@ -58,8 +54,6 @@ def test_the_schedule_stays_monotone_and_usable():
 
     assert torch.all(betas > 0) and torch.all(betas < 1)
     assert torch.all(alphabar[:-1] >= alphabar[1:])
-    # Every derived coefficient has to stay finite, since they are built for
-    # the whole schedule whether or not this run's parameterisation reads them.
     for name, buffer in ddpm_schedules(betas).items():
         assert torch.isfinite(buffer).all(), name
 
@@ -94,7 +88,6 @@ def test_the_rescale_stays_buildable_at_every_length(schedule, length):
 
     assert torch.all(betas > 0) and torch.all(betas < 1)
     alphabar = _alphabar(betas)
-    # Strictly decreasing, not merely non-increasing: a repeat is the flat tail.
     assert torch.all(alphabar[:-1] > alphabar[1:])
     for name, buffer in ddpm_schedules(betas).items():
         assert torch.isfinite(buffer).all(), name

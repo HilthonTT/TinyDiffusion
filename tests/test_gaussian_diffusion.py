@@ -13,11 +13,11 @@ from tinydiffusion.diffusion.gaussian_diffusion import (
     ModelVarType,
 )
 from tinydiffusion.diffusion.schedules import linear_beta_schedule
+from tinydiffusion.training.artifacts import save_samples
 from tinydiffusion.training.checkpoints import restore_checkpoint, save_checkpoint
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.model import build_model
-from tinydiffusion.training.train import save_samples
 
 T = 20
 SHAPE = (2, 1, 8, 8)
@@ -63,9 +63,7 @@ def test_q_sample_matches_the_closed_form():
     x = torch.randn(*SHAPE)
     t = torch.full((SHAPE[0],), T - 1)
     noise = torch.randn_like(x)
-    expected = (
-        diffusion.sqrtab[T - 1] * x + diffusion.sqrtmab[T - 1] * noise  # broadcast scalars
-    )
+    expected = diffusion.sqrtab[T - 1] * x + diffusion.sqrtmab[T - 1] * noise
     assert torch.allclose(diffusion.q_sample(x, t, noise=noise), expected, atol=1e-6)
 
 
@@ -122,10 +120,6 @@ def test_rescaled_mse_needs_a_learned_variance():
             loss_type=LossType.RESCALED_MSE,
         )
 
-
-# ---------------------------------------------------------------------------
-# wiring through the config and the training entry points
-# ---------------------------------------------------------------------------
 
 TINY = TrainConfig(
     image_size=8,

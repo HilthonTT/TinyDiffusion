@@ -54,13 +54,8 @@ def rescale_guided(guided: torch.Tensor, cond: torch.Tensor, rescale: float) -> 
     """
     if rescale <= 0.0:
         return guided
-    # Over every dimension but the batch: the correction is per-sample, since
-    # each image in the batch extrapolates its own distance.
     dims = list(range(1, guided.ndim))
     std_cond = cond.std(dim=dims, keepdim=True)
-    # A guided prediction of exactly zero variance is degenerate rather than
-    # impossible — a constant tensor early in a badly initialised run — and
-    # dividing by it would put NaN into the chain with nothing to report it.
     std_guided = guided.std(dim=dims, keepdim=True).clamp(min=1e-12)
     return rescale * (guided * (std_cond / std_guided)) + (1.0 - rescale) * guided
 
@@ -79,10 +74,6 @@ class _LabelBound(nn.Module):
         super().__init__()
         self.net = net
         self.labels = labels
-        # Adopt the wrapped network's train/eval mode. `eval_mode` restores
-        # whatever mode it found on the module it was handed, so a wrapper
-        # left at nn.Module's default of training=True would quietly put a
-        # net that was in eval mode back into training.
         self.train(net.training)
 
 
@@ -168,9 +159,6 @@ class ClassifierFreeGuidance(_LabelBound):
             cond_mean, cond_var = cond.split(channels, dim=1)
             uncond_mean, _ = uncond.split(channels, dim=1)
             guided = uncond_mean + self.scale * (cond_mean - uncond_mean)
-            # Rescaled against the mean channels alone: the variance channels
-            # are not being guided, so they are not part of the scale that
-            # guidance inflated.
             guided = rescale_guided(guided, cond_mean, self.rescale)
             return torch.cat([guided, cond_var], dim=1)
 

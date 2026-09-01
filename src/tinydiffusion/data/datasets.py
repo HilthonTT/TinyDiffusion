@@ -82,7 +82,6 @@ DATASETS: dict[str, DatasetSpec] = {
         channels=1,
         native_size=28,
         num_classes=10,
-        # A mirrored 2 is not a 2, and a mirrored 5 is nothing at all.
         hflip=False,
         builder=MNIST,
     ),
@@ -91,8 +90,6 @@ DATASETS: dict[str, DatasetSpec] = {
         channels=1,
         native_size=28,
         num_classes=10,
-        # Same shape and size as MNIST but far less separable, which makes it
-        # the cheapest way to see whether a change helps or only helps on MNIST.
         hflip=True,
         builder=FashionMNIST,
     ),
@@ -194,7 +191,7 @@ def folder_spec(
         download: bool,
         transform: Any,
     ) -> Dataset[tuple[torch.Tensor, int]]:
-        del download  # The images are already on disk; there is nothing to fetch.
+        del download
         return load_folder(
             root,
             train=train,
@@ -208,9 +205,6 @@ def folder_spec(
         name=FOLDER_DATASET,
         channels=channels,
         native_size=image_size,
-        # A spec's count is the label space the loader will produce, which for
-        # an unconditional run is none: the labels are still read, and still
-        # ignored, exactly as they are for MNIST at num_classes=None.
         num_classes=num_classes if num_classes is not None else 0,
         hflip=hflip,
         crop=True,
@@ -252,8 +246,8 @@ def image_transform(
     if hflip:
         steps.append(transforms.RandomHorizontalFlip())
     steps += [
-        transforms.ToTensor(),  # [0, 255] uint8 -> [0, 1] float
-        transforms.Normalize((0.5,) * channels, (0.5,) * channels),  # [0, 1] -> [-1, 1]
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,) * channels, (0.5,) * channels),
     ]
     return transforms.Compose(steps)
 
@@ -370,7 +364,6 @@ def image_dataloader(
 
     loader_kwargs: dict[str, Any] = {}
     if num_workers > 0:
-        # Re-spawning workers every epoch dominates runtime on a dataset this small.
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 2
 
@@ -378,15 +371,6 @@ def image_dataloader(
     wants_drop_last = train if drop_last is None else drop_last
 
     if num_replicas is not None:
-        # The sampler owns the shuffle now, and DataLoader rejects being given
-        # both — so `shuffle` moves into the sampler rather than staying here.
-        #
-        # drop_last is the sampler's too, and it means something stricter than
-        # the loader's: with it set, every rank is handed the same number of
-        # batches, which is what keeps the gradient all-reduces in lockstep. It
-        # is also why scoring passes it False and pads instead — a rank short
-        # by one batch would leave the others waiting at a collective that
-        # never comes.
         loader_kwargs["sampler"] = DistributedSampler(
             dataset,
             num_replicas=num_replicas,

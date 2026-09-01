@@ -68,9 +68,6 @@ def test_the_path_keeps_the_shape_of_its_ends():
 
 
 def test_the_walk_stays_on_the_shell_the_latents_were_drawn_from():
-    # The whole reason it is spherical. A Gaussian's mass sits in a thin shell
-    # at radius sqrt(d); the midpoint of a straight line between two samples
-    # falls well inside it, onto latents the model never saw.
     start, end = endpoints(dim=1024)
     weights = torch.linspace(0, 1, 9)
 
@@ -78,10 +75,8 @@ def test_the_walk_stays_on_the_shell_the_latents_were_drawn_from():
     linear = torch.stack([(1 - w) * start + w * end for w in weights]).norm(dim=1)
 
     ends = torch.stack([start.norm(), end.norm()])
-    # Never further from the shell than its own two ends are from each other.
     assert (spherical >= ends.min() - 1e-3).all()
     assert (spherical <= ends.max() + 1e-3).all()
-    # Where the straight line has collapsed towards the origin.
     assert linear.min() < 0.8 * ends.min()
 
 
@@ -93,8 +88,6 @@ def test_the_walk_moves_monotonically_away_from_where_it_started():
 
 
 def test_parallel_latents_fall_back_to_a_straight_line():
-    # The great circle through two parallel vectors is not unique and the
-    # spherical formula is 0/0 there; the straight line is its limit.
     start = torch.randn(32, generator=torch.Generator().manual_seed(0))
     path = slerp(start, start * 3.0, torch.tensor([0.0, 0.5, 1.0]))
     assert torch.allclose(path[1], start * 2.0, atol=1e-5)
@@ -124,7 +117,6 @@ def test_a_seed_pair_names_the_same_walk_every_time():
 def test_different_seeds_give_different_ends():
     first = latent_walk((1, 4, 4), 4, device="cpu", seed_start=0, seed_end=1)
     second = latent_walk((1, 4, 4), 4, device="cpu", seed_start=0, seed_end=2)
-    # Same start, since that seed did not change.
     assert torch.equal(first[0], second[0])
     assert not torch.equal(first[-1], second[-1])
 

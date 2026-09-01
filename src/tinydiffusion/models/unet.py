@@ -21,7 +21,6 @@ from tinydiffusion.models.blocks import (
 from tinydiffusion.models.embeddings import LabelEmbedding, TimeEmbedding
 from tinydiffusion.utils.fp16 import convert_module_to_f16, convert_module_to_f32
 
-# DDPM projects the sinusoidal embedding to 4x the base width before conditioning.
 TIME_EMBED_MULT = 4
 
 
@@ -71,10 +70,6 @@ class UNet(nn.Module):
     ) -> None:
         super().__init__()
 
-        # The decoder concatenates each skip with a nearest-neighbour upsample,
-        # which can only undo an exact halving. An image_size that does not
-        # divide evenly would otherwise fail deep inside forward() with a
-        # torch.cat size mismatch, and a 1x1 bottleneck fails in GroupNorm.
         divisor = 2 ** (len(channel_mult) - 1)
         if image_size % divisor or image_size // divisor < 2:
             raise ValueError(
@@ -84,21 +79,16 @@ class UNet(nn.Module):
             )
 
         self.use_checkpoint = use_checkpoint
-        # Flipped by convert_to_fp16(). forward() reads it to meet the
-        # convolutions in whatever precision they are currently holding.
         self.dtype = torch.float32
 
         time_dim = base_channels * TIME_EMBED_MULT
         self.time_embed = TimeEmbedding(base_channels, time_dim)
         self.num_classes = num_classes
-        # Summed into the time embedding, so the class rides the FiLM path the
-        # ResBlocks already have and the rest of the architecture is untouched.
         self.label_embed = (
             LabelEmbedding(num_classes, time_dim) if num_classes is not None else None
         )
         self.init_conv = nn.Conv2d(in_channels, base_channels, 3, padding=1)
 
-        # the encoder
         self.downs = nn.ModuleList()
         skip_channels = [base_channels]
         channels = base_channels
@@ -122,18 +112,15 @@ class UNet(nn.Module):
                 skip_channels.append(channels)
                 resolution //= 2
 
-        # the bottleneck: stays spatial, no vector collapse
         self.mid = TimestepSequential(
             ResBlock(channels, channels, time_dim, dropout, use_checkpoint),
             SelfAttention(channels, num_heads, use_checkpoint),
             ResBlock(channels, channels, time_dim, dropout, use_checkpoint),
         )
 
-        # the decoder
         self.ups = nn.ModuleList()
         for level, mult in reversed(list(enumerate(channel_mult))):
             level_channels = base_channels * mult
-            # One extra block per level consumes the skip left by the Downsample.
             for block in range(num_res_blocks + 1):
                 layers = [
                     ResBlock(
@@ -230,8 +217,6 @@ class UNet(nn.Module):
         elif y is not None:
             raise ValueError("this UNet was built without num_classes, so it takes no labels")
 
-        # A no-op unless convert_to_fp16 has run. The time embedding stays in
-        # float32 either way: each ResBlock casts it down as it applies it.
         h = self.init_conv(x.to(self.dtype))
         skips = [h]
         for module in self.downs:
@@ -244,9 +229,5 @@ class UNet(nn.Module):
             h = module(torch.cat([h, skips.pop()], dim=1), time_emb)
 
         if self.dtype is not torch.float32:
-            # The output head kept its float32 weights, so the cast back
-            # happens here. Guarded rather than unconditional: under autocast
-            # `h` is already half and forcing it up would only make autocast
-            # cast it down again for the final convolution.
             h = h.float()
         return self.out(h)

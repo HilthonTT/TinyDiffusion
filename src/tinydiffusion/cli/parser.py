@@ -1,29 +1,30 @@
-"""Command line entry point for TinyDiffusion."""
+"""The argument parser, one subcommand at a time.
+
+``tinydiffusion`` has nine subcommands and most of them take a dozen flags, so
+a single builder would be several hundred lines with no seam in it. Each
+command defines its own here, and :func:`build_parser` is the assembly —
+which is also what keeps a flag two commands share, like ``--precision``,
+visibly shared rather than written out twice.
+"""
 
 import argparse
-import dataclasses
-import sys
-import tomllib
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from tinydiffusion import __version__
+from tinydiffusion.cli.options import (
+    add_precision_argument,
+    class_labels,
+    config_override,
+    sweep_axis,
+)
 from tinydiffusion.data.datasets import dataset_names
 from tinydiffusion.diffusion.ddim import spacing_names
 from tinydiffusion.diffusion.samplers import sampler_names
-from tinydiffusion.evaluation import (
-    DEFAULT_BPD_IMAGES,
-    DEFAULT_EVAL_STEPS,
-    evaluate_checkpoint,
-)
-from tinydiffusion.interpolation import interpolate_from_checkpoint
-from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES, fid_for_checkpoint
+from tinydiffusion.evaluation import DEFAULT_BPD_IMAGES, DEFAULT_EVAL_STEPS
+from tinydiffusion.metrics.evaluate import DEFAULT_FID_IMAGES
 from tinydiffusion.metrics.inception_score import DEFAULT_IS_SPLITS
 from tinydiffusion.metrics.kid import DEFAULT_KID_SUBSET_SIZE, DEFAULT_KID_SUBSETS
 from tinydiffusion.metrics.precision_recall import DEFAULT_NEIGHBOURS
-from tinydiffusion.plotting import plot_runs
-from tinydiffusion.sampling import sample_from_checkpoint
 from tinydiffusion.server.config import (
     DEFAULT_HOST,
     DEFAULT_IMAGE_TTL,
@@ -31,140 +32,19 @@ from tinydiffusion.server.config import (
     DEFAULT_MAX_IMAGES,
     DEFAULT_MAX_INFLIGHT,
     DEFAULT_PORT,
-    ServerConfig,
 )
-from tinydiffusion.sweep import run_sweep, sweep_points, sweep_summary
-from tinydiffusion.training.checkpoints import config_from_checkpoint
-from tinydiffusion.training.config import TrainConfig, load_config
-from tinydiffusion.training.train import train as train_run
-from tinydiffusion.utils.precision import DEFAULT_PRECISION, PRECISIONS
+
+__all__ = ["build_parser"]
+
+type Subparsers = argparse._SubParsersAction[argparse.ArgumentParser]
 
 
-def class_labels(value: str) -> list[int]:
-    """Parse a comma-separated list of class labels.
-
-    Args:
-        value: the raw ``--labels`` argument, e.g. ``"0,1,2"``.
-
-    Returns:
-        The labels, in the order given.
-
-    Raises:
-        argparse.ArgumentTypeError: if the list is empty or holds a non-integer.
-    """
-    try:
-        labels = [int(part) for part in value.split(",") if part.strip()]
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"labels must be whole numbers: {exc}") from exc
-    if not labels:
-        raise argparse.ArgumentTypeError("no labels given")
-    return labels
-
-
-def config_override(value: str) -> tuple[str, Any]:
-    """Parse one ``--set field=value`` pair into a config field and its value.
-
-    The value is read as a TOML value, so it types itself exactly as the same
-    text would in a config file: ``lr=1e-4`` is a float, ``amp=false`` a bool,
-    ``channel_mult=[1,2,2]`` a list. Anything TOML cannot parse is taken as a
-    bare string, which is what makes ``dataset=cifar10`` and
-    ``out_dir=runs/sweep`` work without shell-hostile quoting —
-    :meth:`~tinydiffusion.training.config.TrainConfig.from_mapping` coerces
-    the string to whatever the field actually holds.
+def _add_train(subparsers: Subparsers) -> None:
+    """Define the ``train`` subcommand: Train a diffusion model.
 
     Args:
-        value: the raw argument, e.g. ``"batch_size=64"``.
-
-    Returns:
-        The field name and its parsed value.
-
-    Raises:
-        argparse.ArgumentTypeError: if there is no ``=``, or the name is empty.
+        subparsers: the top-level subparser action to register on.
     """
-    name, sep, raw = value.partition("=")
-    name = name.strip()
-    if not sep or not name:
-        raise argparse.ArgumentTypeError(f"expected field=value, got {value!r}")
-    return name, toml_value(raw)
-
-
-def toml_value(raw: str) -> Any:
-    """Read one config value the way a config file would read it.
-
-    Args:
-        raw: the text on the right of an ``=``.
-
-    Returns:
-        The TOML value it denotes, or `raw` itself where TOML cannot parse it —
-        the common case for paths and registry names, which
-        :meth:`~tinydiffusion.training.config.TrainConfig.from_mapping` then
-        coerces to whatever the field holds.
-    """
-    try:
-        # A one-key document is the cheapest way to borrow TOML's own literals.
-        return tomllib.loads(f"value = {raw}")["value"]
-    except tomllib.TOMLDecodeError:
-        return raw
-
-
-def sweep_axis(value: str) -> tuple[str, list[Any]]:
-    """Parse one ``--axis field=a,b,c`` into a config field and its values.
-
-    Each value is read exactly as ``--set`` reads one, so a sweep's literals
-    and a config file's are the same literals.
-
-    Args:
-        value: the raw argument, e.g. ``"lr=1e-4,2e-4"``.
-
-    Returns:
-        The field name and the values to sweep it over, in the order given.
-
-    Raises:
-        argparse.ArgumentTypeError: if there is no ``=``, the name is empty, or
-            no values follow it.
-    """
-    name, sep, raw = value.partition("=")
-    name = name.strip()
-    if not sep or not name:
-        raise argparse.ArgumentTypeError(f"expected field=value[,value...], got {value!r}")
-    values = [toml_value(part.strip()) for part in raw.split(",") if part.strip()]
-    if not values:
-        raise argparse.ArgumentTypeError(f"axis {name!r} has no values: {value!r}")
-    return name, values
-
-
-def add_precision_argument(parser: argparse.ArgumentParser) -> None:
-    """Give a sampling subcommand its ``--precision`` flag.
-
-    Four subcommands draw samples and all four take the same setting, so the
-    help text lives here rather than four times over.
-
-    Args:
-        parser: the subcommand parser to add the flag to.
-    """
-    parser.add_argument(
-        "--precision",
-        choices=PRECISIONS,
-        default=DEFAULT_PRECISION,
-        help="What to run the network in. 'fp32' is the default and the only one "
-        "whose result does not depend on the GPU it ran on. 'tf32' keeps float32 "
-        "storage and uses reduced-mantissa matmuls on Ampere and later; 'fp16' and "
-        "'bf16' roughly halve the time a step takes on any card with tensor cores. "
-        "They move a score slightly, so hold this fixed across the checkpoints "
-        "being compared. Anything but 'fp32' falls back to it off CUDA.",
-    )
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Construct the top-level argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="tinydiffusion",
-        description="Train and sample from a tiny diffusion model.",
-    )
-    parser.add_argument("-V", "--version", action="version", version=f"tinydiffusion {__version__}")
-
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
     train = subparsers.add_parser("train", help="Train a diffusion model.")
     train.add_argument(
         "--config",
@@ -199,7 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
     train.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
     train.add_argument("--log-dir", type=Path, help="Directory for metrics.jsonl and TB events.")
-    # store_true with default None so an unpassed flag leaves the config alone.
     train.add_argument(
         "--tensorboard",
         action="store_true",
@@ -232,6 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not print the per-epoch metrics table.",
     )
 
+
+def _add_eval(subparsers: Subparsers) -> None:
+    """Define the ``eval`` subcommand: Score a checkpoint on held-out data.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     evaluate = subparsers.add_parser("eval", help="Score a checkpoint on held-out data.")
     evaluate.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     evaluate.add_argument(
@@ -269,6 +155,13 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed", type=int, default=0, help="Random seed.")
     evaluate.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
 
+
+def _add_fid(subparsers: Subparsers) -> None:
+    """Define the ``fid`` subcommand: Score a checkpoint's samples against real data.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     fid = subparsers.add_parser("fid", help="Score a checkpoint's samples against real data.")
     fid.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     fid.add_argument(
@@ -390,6 +283,13 @@ def build_parser() -> argparse.ArgumentParser:
     fid.add_argument("--device", help="Device to score on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(fid)
 
+
+def _add_serve(subparsers: Subparsers) -> None:
+    """Define the ``serve`` subcommand: Serve a checkpoint over HTTP.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     serve = subparsers.add_parser("serve", help="Serve a checkpoint over HTTP.")
     serve.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     serve.add_argument(
@@ -446,6 +346,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(serve)
 
+
+def _add_sample(subparsers: Subparsers) -> None:
+    """Define the ``sample`` subcommand: Sample images from a checkpoint.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     sample = subparsers.add_parser("sample", help="Sample images from a checkpoint.")
     sample.add_argument("--checkpoint", type=Path, required=True, help="Trained checkpoint.")
     sample.add_argument("--num-images", type=int, default=8, help="How many images to generate.")
@@ -502,6 +409,13 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(sample)
 
+
+def _add_interpolate(subparsers: Subparsers) -> None:
+    """Define the ``interpolate`` subcommand: Walk between two latents.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     interpolate = subparsers.add_parser(
         "interpolate", help="Walk between two latents and sample every point."
     )
@@ -558,6 +472,13 @@ def build_parser() -> argparse.ArgumentParser:
     interpolate.add_argument("--device", help="Device to sample on, e.g. 'cuda' or 'cpu'.")
     add_precision_argument(interpolate)
 
+
+def _add_tui(subparsers: Subparsers) -> None:
+    """Define the ``tui`` subcommand: Train in a terminal dashboard.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     tui = subparsers.add_parser(
         "tui",
         help="Train in a terminal dashboard: live loss, progress and samples.",
@@ -597,6 +518,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Begin training as soon as the dashboard opens, rather than waiting for 's'.",
     )
 
+
+def _add_sweep(subparsers: Subparsers) -> None:
+    """Define the ``sweep`` subcommand: Train one config over a grid of hyperparameters.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     sweep = subparsers.add_parser(
         "sweep",
         help="Train one config over a grid of hyperparameters, one directory per point.",
@@ -649,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")
     sweep.add_argument("--epochs", type=int, dest="num_epochs", help="Epochs, overriding config.")
 
+
+def _add_plot(subparsers: Subparsers) -> None:
+    """Define the ``plot`` subcommand: Draw a run's metrics as a figure.
+
+    Args:
+        subparsers: the top-level subparser action to register on.
+    """
     plot = subparsers.add_parser("plot", help="Draw a run's metrics as a figure.")
     plot.add_argument(
         "runs",
@@ -666,282 +601,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plot.add_argument("--dpi", type=int, default=120, help="Resolution for raster formats.")
 
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the top-level argument parser.
+
+    Returns:
+        A parser covering every subcommand.
+    """
+    parser = argparse.ArgumentParser(
+        prog="tinydiffusion",
+        description="Train and sample from a tiny diffusion model.",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"tinydiffusion {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for add in (
+        _add_train,
+        _add_eval,
+        _add_fid,
+        _add_serve,
+        _add_sample,
+        _add_interpolate,
+        _add_tui,
+        _add_sweep,
+        _add_plot,
+    ):
+        add(subparsers)
     return parser
-
-
-def config_from_args(args: argparse.Namespace) -> TrainConfig:
-    """Assemble the config a run should use, from a file and the flags over it.
-
-    Shared by ``train`` and ``tui``, which take the same settings and have to
-    resolve them the same way: a config file, or the checkpoint being resumed,
-    or the defaults — then the named flags the user actually passed, then
-    ``--set``.
-
-    Args:
-        args: the parsed arguments. Flags a subcommand does not define are
-            simply absent, and count as unset.
-
-    Returns:
-        The resolved configuration.
-
-    Raises:
-        ValueError: if a config file, a checkpoint or an override is unusable.
-    """
-    if args.config is not None:
-        cfg = load_config(args.config)
-    elif args.resume is not None:
-        # A checkpoint carries the config it was trained with, so a bare
-        # --resume continues that run. Falling back to the defaults instead
-        # would refuse every checkpoint not trained on them, by way of a
-        # mismatch report about settings the user never asked to change.
-        cfg = config_from_checkpoint(args.resume)
-    else:
-        cfg = TrainConfig()
-    # Only flags the user actually passed override the file, and only the ones
-    # this subcommand defines at all.
-    overrides: dict[str, Any] = {
-        name: value
-        for name in (
-            "dataset",
-            "seed",
-            "device",
-            "num_epochs",
-            "log_dir",
-            "tensorboard",
-            "wandb",
-            "wandb_project",
-            "log_console",
-            "deterministic",
-        )
-        if (value := getattr(args, name, None)) is not None
-    }
-    # Applied last, so `--set` wins wherever it and a named flag spell the same
-    # field. It is the escape hatch: whatever the file and the flags worked out
-    # between them, this is the value.
-    overrides.update(dict(getattr(args, "overrides", None) or ()))
-    # Rebuilt through from_mapping rather than dataclasses.replace: it is what
-    # knows a --set of a path or a tuple field arrives as a string or a list,
-    # and it is what reports an unknown field name as such rather than as a
-    # TypeError about an unexpected keyword argument.
-    return TrainConfig.from_mapping({**dataclasses.asdict(cfg), **overrides})
-
-
-def _train(args: argparse.Namespace) -> int:
-    """Run the training subcommand."""
-    cfg = config_from_args(args)
-    train_run(cfg, resume=args.resume)
-    print(f"checkpoints in {cfg.ckpt_dir}, samples in {cfg.out_dir}, metrics in {cfg.log_dir}")
-    return 0
-
-
-def _eval(args: argparse.Namespace) -> int:
-    """Run the evaluation subcommand."""
-    result = evaluate_checkpoint(
-        args.checkpoint,
-        split=args.split,
-        num_steps=args.num_steps,
-        batch_size=args.batch_size,
-        data_root=args.data_root,
-        use_ema=args.use_ema,
-        seed=args.seed,
-        device=args.device,
-        bpd=args.bpd,
-        bpd_images=args.bpd_images,
-    )
-    print(result.format())
-    return 0
-
-
-def _fid(args: argparse.Namespace) -> int:
-    """Run the scoring subcommand: FID always, KID and precision/recall on request."""
-    result = fid_for_checkpoint(
-        args.checkpoint,
-        num_images=args.num_images,
-        split=args.split,
-        batch_size=args.batch_size,
-        data_root=args.data_root,
-        num_steps=args.steps,
-        eta=args.eta,
-        sampler=args.sampler,
-        spacing=args.spacing,
-        guidance=args.guidance,
-        guidance_rescale=args.guidance_rescale,
-        use_ema=args.use_ema,
-        cache=args.cache,
-        seed=args.seed,
-        device=args.device,
-        kid=args.kid,
-        kid_subsets=args.kid_subsets,
-        kid_subset_size=args.kid_subset_size,
-        precision_recall=args.precision_recall,
-        neighbours=args.neighbours,
-        sample_precision=args.precision,
-        sfid=args.sfid,
-        inception_score=args.inception_score,
-        is_splits=args.is_splits,
-    )
-    print(result.format())
-    return 0
-
-
-def _interpolate(args: argparse.Namespace) -> int:
-    """Run the interpolate subcommand."""
-    out = interpolate_from_checkpoint(
-        args.checkpoint,
-        args.out,
-        steps=args.steps,
-        num_steps=args.num_steps,
-        sampler=args.sampler,
-        spacing=args.spacing,
-        labels=args.labels,
-        guidance=args.guidance,
-        guidance_rescale=args.guidance_rescale,
-        seed_start=args.seed_start,
-        seed_end=args.seed_end,
-        device=args.device,
-        precision=args.precision,
-    )
-    print(f"wrote {out}")
-    return 0
-
-
-def _tui(args: argparse.Namespace) -> int:
-    """Run the dashboard subcommand."""
-    # Imported here so `tui` is the only command that needs the extra.
-    from tinydiffusion.tui import run_tui
-
-    cfg = config_from_args(args)
-    # The console backend prints a table per epoch, and stdout belongs to the
-    # display: left on, every flush would be drawn straight through the widgets.
-    # metrics.jsonl is untouched, so the run still records everything it would.
-    cfg = dataclasses.replace(cfg, log_console=False)
-    run_tui(cfg, resume=args.resume, autostart=args.start)
-    return 0
-
-
-def _sweep(args: argparse.Namespace) -> int:
-    """Run the sweep subcommand."""
-    # `sweep` defines no --resume, and config_from_args reads one; supplying it
-    # as absent keeps that shared resolver usable rather than forked.
-    args.resume = None
-    base = config_from_args(args)
-    points = sweep_points(base, args.axes, args.out_root)
-
-    print(f"{len(points)} points under {args.out_root}")
-    for point in points:
-        print(f"  {point.name}")
-    if args.dry_run:
-        return 0
-
-    runs = list(run_sweep(points, train=train_run, skip_existing=args.skip_existing))
-    print()
-    print(sweep_summary(runs))
-    # Non-zero when any point failed: a sweep is normally the last thing in a
-    # script, and a summary nobody reads is not a way to report a failure.
-    return 0 if all(run.ok for run in runs) else 1
-
-
-def _plot(args: argparse.Namespace) -> int:
-    """Run the plot subcommand."""
-    out = plot_runs(args.runs, args.out, dpi=args.dpi)
-    print(f"wrote {out}")
-    return 0
-
-
-def _serve(args: argparse.Namespace) -> int:
-    """Run the serve subcommand."""
-    config = ServerConfig(
-        checkpoint=args.checkpoint,
-        host=args.host,
-        port=args.port,
-        device=args.device,
-        use_ema=args.use_ema,
-        max_images=args.max_images,
-        max_inflight=args.max_inflight,
-        image_dir=args.image_dir,
-        cors_origins=tuple(args.cors_origins or ()),
-        image_ttl=args.image_ttl,
-        keep_images=args.keep_images,
-        precision=args.precision,
-    )
-    if not config.checkpoint.is_file():
-        # uvicorn would otherwise bind the port and only fail during startup,
-        # which reads as a server crash rather than a bad path.
-        raise ValueError(f"no such checkpoint: {config.checkpoint}")
-
-    # Imported here so `serve` is the only command that needs the extra.
-    from tinydiffusion.server.app import serve as run_server
-
-    print(f"serving {config.checkpoint} on http://{config.host}:{config.port}")
-    run_server(config)
-    return 0
-
-
-def _sample(args: argparse.Namespace) -> int:
-    """Run the sampling subcommand."""
-    out = sample_from_checkpoint(
-        args.checkpoint,
-        args.out,
-        num_images=args.num_images,
-        batch_size=args.batch_size,
-        num_steps=args.steps,
-        eta=args.eta,
-        sampler=args.sampler,
-        spacing=args.spacing,
-        labels=args.labels,
-        guidance=args.guidance,
-        guidance_rescale=args.guidance_rescale,
-        save_individual=args.save_individual,
-        seed=args.seed,
-        device=args.device,
-        precision=args.precision,
-    )
-    print(f"wrote {args.num_images} images to {out}")
-    if args.save_individual:
-        print(f"and one file each, {out.with_name(f'{out.stem}_0000{out.suffix}')} onwards")
-    return 0
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI.
-
-    Args:
-        argv: Argument list, defaulting to ``sys.argv[1:]``.
-
-    Returns:
-        A process exit code.
-    """
-    args = build_parser().parse_args(argv)
-    handlers = {
-        "train": _train,
-        "eval": _eval,
-        "fid": _fid,
-        "interpolate": _interpolate,
-        "plot": _plot,
-        "sample": _sample,
-        "sweep": _sweep,
-        "serve": _serve,
-        "tui": _tui,
-    }
-    handler = handlers[args.command]
-    try:
-        return handler(args)
-    except (OSError, ValueError, ImportError) as exc:
-        # Bad paths, bad configs and a missing optional extra are user errors,
-        # not something to hand back as a traceback. KeyError is deliberately
-        # not in that list: nothing raises one to describe a request — the
-        # registries turn theirs into ValueError, and so does the checkpoint
-        # that stores no config — so catching it here could only dress a
-        # genuine bug up as a user error, and report it as a bare key name.
-        #
-        # On stderr, so that redirecting a command's output to a file does not
-        # swallow the reason it produced none.
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("interrupted", file=sys.stderr)
-        return 130
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())

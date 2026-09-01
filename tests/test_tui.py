@@ -7,9 +7,6 @@ from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.observer import BatchProgress, TrainObserver, TrainPlan
 from tinydiffusion.tui.preview import HALF_BLOCK, half_block_rows
 
-# Everything below drives the app itself, so the whole module needs the extra.
-# The message a missing Textual produces is covered in test_cli.py, which is
-# where it has to keep working on an install that does not have it.
 pytest.importorskip("textual", reason="needs the 'tui' extra")
 
 from tinydiffusion.tui.app import (
@@ -49,9 +46,6 @@ def config_dir(tmp_path, monkeypatch):
     return tmp_path / "config"
 
 
-# --- the image preview -----------------------------------------------------
-
-
 @pytest.fixture
 def grid(tmp_path):
     """A 64x32 image, standing in for a sample grid."""
@@ -65,8 +59,6 @@ def grid(tmp_path):
 def test_a_grid_is_reduced_to_cells_that_fit_the_box(grid):
     rows = half_block_rows(grid, max_width=32, max_height=32)
     assert len(rows[0]) == 32
-    # Two pixels to a row: a 64x32 image scaled to 32 wide is 16 pixels tall,
-    # which is 8 rows -- half as many rows as columns for a 2:1 image.
     assert len(rows) == 8
 
 
@@ -77,8 +69,6 @@ def test_the_box_is_never_exceeded(grid):
 
 
 def test_a_small_image_is_not_blown_up(grid):
-    # Scaling never goes above 1: enlarging a 32px grid to fill a wide terminal
-    # would show interpolation, not the model's output.
     rows = half_block_rows(grid, max_width=400, max_height=400)
     assert len(rows[0]) == 64
 
@@ -95,7 +85,6 @@ def test_greyscale_comes_back_as_colour_triples(grid):
 
 
 def test_every_row_holds_a_top_and_a_bottom(grid):
-    # An odd pixel height would leave the last cell with nothing underneath it.
     rows = half_block_rows(grid, max_width=15, max_height=15)
     assert all(len(cell) == 2 for row in rows for cell in row)
 
@@ -105,9 +94,6 @@ def test_an_unreadable_file_is_an_oserror(tmp_path):
     broken.write_text("nope")
     with pytest.raises(OSError):
         half_block_rows(broken)
-
-
-# --- the small pure pieces -------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -125,7 +111,6 @@ def test_a_series_is_bounded():
     for value in range(MAX_POINTS + 50):
         series.add(float(value))
     assert len(series.values) == MAX_POINTS
-    # The newest are the ones kept.
     assert series.values[-1] == float(MAX_POINTS + 49)
 
 
@@ -133,7 +118,6 @@ def test_the_eta_extrapolates_from_the_epoch_so_far():
     progress = BatchProgress(
         epoch=0, num_epochs=4, batch=4, num_batches=10, loss=0.5, images=50, seconds=10.0
     )
-    # Half an epoch in 10s, so an epoch is 20s and there are 3.5 left.
     assert run_eta(progress) == pytest.approx(70.0)
 
 
@@ -166,11 +150,7 @@ def test_two_columns_aligns_and_does_not_trail_a_blank_line():
     lines = rendered.plain.splitlines()
     assert len(lines) == 2
     assert not rendered.plain.endswith("\n")
-    # The values line up under each other.
     assert lines[0].index("1") == lines[1].index("2")
-
-
-# --- the observer ----------------------------------------------------------
 
 
 class FakeApp:
@@ -216,9 +196,6 @@ def test_batch_reports_are_throttled():
     observer = TuiObserver(app)
     for batch in range(50):
         observer.on_batch(progress_at(batch))
-    # call_from_thread blocks the training thread until the UI has rendered, so
-    # an unthrottled observer would make training wait on the screen. Only the
-    # first of a burst gets through.
     assert len(app.calls) == 1
 
 
@@ -230,14 +207,9 @@ def test_a_stop_is_visible_from_the_training_thread():
 
 
 def test_an_app_that_has_gone_does_not_take_training_with_it():
-    # The display can be closed while a run is still going. Reporting into the
-    # wreckage must not raise on the training thread.
     observer = TuiObserver(FakeApp(fail=True))
     observer.on_message("into the void")
     observer.on_epoch(0, {})
-
-
-# --- the app --------------------------------------------------------------
 
 
 @pytest.fixture
@@ -298,7 +270,6 @@ def test_the_app_mounts_with_every_panel(cfg):
         assert app.query_one(SamplePreview)
         assert app.query_one(LossChart)
         assert len(app.query(StatTile)) == 5
-        # Nothing is running until it is asked to be.
         assert not app.running
 
     drive(TinyDiffusionApp(cfg), steps)
@@ -380,17 +351,12 @@ def test_epoch_metrics_reach_the_charts_and_the_quartiles(cfg):
 
         assert app.train_loss.values == [0.9, 0.7]
         assert app.val_loss.values == [0.8, 0.6]
-        # Both series reach one chart on one axis: a validation curve that has
-        # stopped following the training curve down is the whole point, and it
-        # is invisible on two charts each normalised to its own range.
         chart = text_of(app.query_one(LossChart))
         assert "train 0.7" in chart
         assert "val 0.6" in chart
 
         bars = text_of(app.query_one(QuartileBars))
         assert "t 0-25%" in bars and "t 75-100%" in bars
-        # One scale across all four, so the bars compare with each other: the
-        # largest fills the width and the smallest does not.
         lines = bars.splitlines()
         assert lines[0].count("█") > lines[3].count("█")
 
@@ -431,7 +397,6 @@ def test_a_grid_that_cannot_be_read_is_reported_not_raised(cfg, tmp_path):
         app = pilot.app
         app.apply_sample(broken)
         await pilot.pause()
-        # The next epoch writes another grid; this is not worth a crash.
         assert "could not read" in text_of(app.query_one("#preview"))
 
     drive(TinyDiffusionApp(cfg), steps)
@@ -440,8 +405,6 @@ def test_a_grid_that_cannot_be_read_is_reported_not_raised(cfg, tmp_path):
 def test_a_run_message_is_not_read_as_markup(cfg):
     async def steps(pilot):
         app = pilot.app
-        # Training prints tensor shapes and paths; a bare [dim] in one of them
-        # must not be swallowed as a tag, or eat the rest of the line.
         app.apply_message("shape [4, 1, 16, 16] on /tmp/x")
         await pilot.pause()
 
@@ -476,7 +439,6 @@ def test_the_theme_cycles_both_ways_and_is_remembered(cfg):
         first = app.theme
         await pilot.press("d")
         assert app.theme != first
-        # Remembered as soon as it is chosen, so the next run opens in it.
         assert load_preferred_theme() == app.theme
         await pilot.press("D")
         assert app.theme == first
@@ -519,8 +481,6 @@ def test_the_theme_picker_previews_and_can_be_cancelled(cfg):
         assert isinstance(app.screen, ThemeScreen)
         await pilot.press("down")
         await pilot.pause()
-        # The whole reason the picker exists next to the cycle key: the theme is
-        # applied as the highlight moves, so the choice is made by eye.
         assert app.theme != before
         await pilot.press("escape")
         await pilot.pause()
@@ -613,8 +573,6 @@ def test_a_narrow_terminal_drops_the_tiles_rather_than_squashing_them(cfg):
         app = TinyDiffusionApp(cfg)
         async with app.run_test(size=(80, 30)) as pilot:
             await pilot.pause()
-            # Five readable numbers do not fit across 80 columns, and the
-            # sidebar's stats panel is already carrying every one of them.
             assert not app.query_one("#tiles").display
             assert app.query_one("#sidebar").display
 
@@ -640,10 +598,7 @@ def test_a_failing_run_is_reported_rather_than_swallowed(cfg):
         app.running = True
         app.post_message(TrainingEnded(RuntimeError("CUDA out of memory")))
         await pilot.pause()
-        # A run that dies on the first batch is exactly when a display earns
-        # its keep; a blank screen would be the worst possible answer.
         assert not app.running
-        # RichLog keeps rendered strips rather than the strings it was handed.
         written = "\n".join(strip.text for strip in app.query_one("#log").lines)
         assert "CUDA out of memory" in written
 
@@ -679,8 +634,6 @@ def test_restarting_a_running_dashboard_waits_for_the_worker_to_leave(cfg, no_tr
         assert not app.running or app.query_one(StatusBar).state == "stopping"
         app.post_message(TrainingEnded(None))
         await pilot.pause()
-        # Doing this by hand means watching for the stop to land before pressing
-        # start; the point of the key is that the dashboard watches instead.
         assert app.running
 
     drive(TinyDiffusionApp(cfg), steps)
@@ -693,7 +646,6 @@ def test_a_failed_run_is_not_restarted(cfg, no_training):
         await pilot.press("r")
         app.post_message(TrainingEnded(RuntimeError("CUDA out of memory")))
         await pilot.pause()
-        # Restarting into the same out-of-memory is not a service to anyone.
         assert not app.running
 
     drive(TinyDiffusionApp(cfg), steps)
@@ -708,16 +660,11 @@ def test_a_screenshot_lands_beside_the_run(cfg):
     drive(TinyDiffusionApp(cfg), steps)
 
 
-# --- colours ---------------------------------------------------------------
-
-
 def test_a_plain_colour_comes_back_as_itself():
     assert resolve_colour("#88C0D0", {}).lower() == "#88c0d0"
 
 
 def test_a_faded_colour_is_blended_towards_what_is_behind_it():
-    # Textual resolves `auto 60%` at render time against whatever it lands on;
-    # Rich has never heard of it, so the blend has to happen up front.
     faded = resolve_colour("auto 50%", {"foreground": "#FFFFFF", "surface": "#000000"})
     assert faded.lower() in {"#7f7f7f", "#808080"}
 
@@ -737,9 +684,6 @@ def test_a_faded_colour_with_nothing_behind_it_keeps_its_strength():
     ],
 )
 def test_the_terminals_own_colours_are_spelt_the_way_rich_spells_them(value, expected):
-    # The ANSI themes name colours `ansi_blue` so the terminal's palette shows
-    # through. Rich drops the prefix, and there is nothing to fade a
-    # terminal-defined colour against, so a percentage on one is left alone.
     assert resolve_colour(value, {}) == expected
 
 

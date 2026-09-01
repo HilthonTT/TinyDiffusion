@@ -36,16 +36,11 @@ def test_the_chunked_estimator_matches_the_written_out_one():
 
 
 def test_uneven_set_sizes_are_allowed():
-    # The estimator is defined over m and n separately, unlike a FID covariance.
     assert compute_kid(draw(40), draw(90, seed=1), subsets=2, subset_size=20).subsets == 2
 
 
 @pytest.mark.parametrize("n", [25, 100, 400])
 def test_the_estimate_does_not_drift_with_the_sample_count(n):
-    # The property KID exists for, and the one FID does not have: drawn from
-    # one distribution, the expected value is zero at every n. Averaged over
-    # independent draws, because it is unbiased over datasets rather than zero
-    # for any particular pair.
     g = torch.Generator().manual_seed(7)
     values = [
         float(_mmd2(torch.randn(n, 8, generator=g), torch.randn(n, 8, generator=g)))

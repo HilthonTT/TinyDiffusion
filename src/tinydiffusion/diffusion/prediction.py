@@ -44,9 +44,6 @@ def predict_xstart_eps(
     net = model if model is not None else diffusion.net
 
     if isinstance(diffusion, GaussianDiffusion):
-        # The network may emit 2C channels, and may be predicting v or x_0
-        # rather than epsilon, so the implied x_0 has to come from the process
-        # itself rather than from an inverse spelled out here.
         *_, x0 = diffusion.p_mean_variance(x, t, model=net, clip_denoised=clip_denoised)
         return x0, diffusion.predict_eps_from_xstart(x, t, x0)
 

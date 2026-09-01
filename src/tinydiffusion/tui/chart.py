@@ -72,12 +72,8 @@ def nice_bounds(values: Sequence[float]) -> tuple[float, float]:
         return (0.0, 1.0)
     low, high = min(finite), max(finite)
     if high > low:
-        # A small margin, so the extremes are dots on the chart rather than
-        # dots pressed against its edge.
         margin = (high - low) * 0.06
         bottom = low - margin
-        # A loss cannot be negative, and an axis that says it can is a worse
-        # lie than a curve sitting slightly high in its panel.
         return (max(bottom, 0.0) if low >= 0 else bottom, high + margin)
     spread = abs(low) * 0.1 or 1.0
     return (low - spread, low + spread)
@@ -166,8 +162,6 @@ def braille_cells(
 
     dot_width = width * _CELL_WIDTH
     dot_height = height * _CELL_HEIGHT
-    # Which series owns each dot. Later series overwrite earlier ones, which is
-    # what makes validation legible where it sits on top of training.
     owners: list[list[int | None]] = [[None] * dot_width for _ in range(dot_height)]
 
     for index, values in enumerate(series):
@@ -207,15 +201,11 @@ def _draw(
     if not points:
         return
     if len(points) == 1:
-        # One measurement is a flat line, not a single dot lost in the middle
-        # of an otherwise blank chart.
         points = points * 2
 
     spans = _column_spans(points, dot_width=dot_width, dot_height=dot_height, low=low, high=high)
 
     for column, (top, bottom) in enumerate(spans):
-        # Meet each neighbour halfway, so a steep step between two epochs is a
-        # line rather than two disconnected stubs with a gap between them.
         if column + 1 < dot_width:
             middle = (bottom + spans[column + 1][0]) // 2
             top, bottom = min(top, middle), max(bottom, middle)

@@ -105,9 +105,6 @@ def _mean_offdiagonal(x: torch.Tensor) -> torch.Tensor:
     total = torch.zeros((), dtype=torch.float64, device=x.device)
     for start in range(0, m, _CHUNK):
         block = _polynomial_kernel(x[start : start + _CHUNK], x).double()
-        # Subtract this block's share of the diagonal rather than materialising
-        # the mask: rows [start, start+len) carry diagonal entries at the same
-        # offset into the columns.
         rows = torch.arange(block.shape[0], device=x.device)
         total += block.sum() - block[rows, rows + start].sum()
     return total / (m * (m - 1))
@@ -198,15 +195,9 @@ def compute_kid(
 
     size = min(subset_size, fake.shape[0], real.shape[0])
     target = torch.device(device) if device is not None else fake.device
-    # float32 on the compute device: the kernel is a cube of an inner product,
-    # so the sums are accumulated in float64 but the matmuls themselves are
-    # what the feature vectors were stored in.
     fake = fake.to(device=target, dtype=torch.float32)
     real = real.to(device=target, dtype=torch.float32)
 
-    # Drawn on the CPU whatever the compute device: torch.randperm takes a
-    # generator only on the device it was created for, and a caller seeding one
-    # for reproducibility has no reason to know where the kernel will be built.
     scores = [
         _mmd2(
             fake[torch.randperm(fake.shape[0], generator=generator)[:size].to(target)],
@@ -215,8 +206,6 @@ def compute_kid(
         for _ in range(subsets)
     ]
     stacked = torch.stack(scores)
-    # Population rather than sample standard deviation for a single subset, so
-    # one subset reports a spread of zero rather than a NaN.
     spread = stacked.std(correction=1 if stacked.numel() > 1 else 0)
     return KidResult(
         mean=float(stacked.mean()),

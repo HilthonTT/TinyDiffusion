@@ -1,18 +1,3 @@
-<#
-.SYNOPSIS
-    Score a checkpoint's likelihood on held-out data.
-
-.DESCRIPTION
-    Checkpoint naming works as it does in sample.ps1; everything after it is
-    forwarded to `tinydiffusion eval`.
-
-.EXAMPLE
-    .\scripts\eval.ps1
-
-.EXAMPLE
-    .\scripts\eval.ps1 cifar10 --split train
-#>
-
 . (Join-Path $PSScriptRoot '_lib.ps1')
 
 $forwarded = @($args)

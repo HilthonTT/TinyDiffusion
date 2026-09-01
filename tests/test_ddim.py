@@ -24,7 +24,6 @@ def test_timesteps_are_descending_and_span_the_schedule(subsequence):
 
 @pytest.mark.parametrize("subsequence", [uniform_timesteps, quadratic_timesteps])
 def test_a_single_step_starts_from_the_noisiest_timestep(subsequence):
-    # [0] would denoise pure noise as if it were an almost-clean image.
     assert subsequence(T, 1).tolist() == [T - 1]
 
 
@@ -118,13 +117,8 @@ def test_omitting_the_latent_draws_a_fresh_one(echo_diffusion):
 
 @pytest.mark.parametrize("shape", [(2, 1, 4, 4), (3, 1, 8, 8), (3, 4, 4)])
 def test_a_misshapen_latent_is_rejected(echo_diffusion, shape):
-    # Caught up front rather than several steps into the chain, where it would
-    # surface as an unrelated broadcast error.
     with pytest.raises(ValueError, match="noise must be shaped"):
         ddim_sample(echo_diffusion, 3, (1, 4, 4), "cpu", num_steps=4, noise=torch.randn(*shape))
-
-
-# --- generator ------------------------------------------------------------
 
 
 def test_a_generator_makes_a_sample_reproducible(echo_diffusion):

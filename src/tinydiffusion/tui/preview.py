@@ -37,7 +37,7 @@ def half_block_rows(path: Path, *, max_width: int = 64, max_height: int = 32) ->
 
     Args:
         path: the PNG to read, typically a grid written by
-            :func:`~tinydiffusion.training.train.save_samples`.
+            :func:`~tinydiffusion.training.artifacts.save_samples`.
         max_width: columns available. The result is never wider.
         max_height: rows available. The result is never taller.
 
@@ -51,32 +51,20 @@ def half_block_rows(path: Path, *, max_width: int = 64, max_height: int = 32) ->
     if max_width < 1 or max_height < 1:
         return []
 
-    # Imported here rather than at module scope only for symmetry with the rest
-    # of this package; Pillow is a hard dependency of torchvision, so it is
-    # always present wherever this project runs at all.
     from PIL import Image
 
     with Image.open(path) as opened:
-        # Grids are saved as RGB or greyscale depending on the dataset, and a
-        # palette image would index rather than hold colours; one conversion
-        # covers all three.
         image = opened.convert("RGB")
 
         if not image.width or not image.height:
             return []
 
-        # Two pixels to a row, so the height budget is in pixels twice over.
         scale = min(max_width / image.width, (max_height * 2) / image.height, 1.0)
         width = max(int(image.width * scale), 1)
-        # Rounded up to an even number of pixel rows: an odd one would leave the
-        # final cell with a top pixel and nothing underneath it.
         height = max(int(image.height * scale), 1)
         height += height % 2
 
         resized = image.resize((width, height), Image.Resampling.LANCZOS)
-        # tobytes rather than getdata: the latter is deprecated in Pillow 12
-        # and goes away in 14, and this is three bytes per pixel in row-major
-        # order either way, which is exactly the walk below.
         raw = resized.tobytes()
 
     stride = width * 3

@@ -8,7 +8,7 @@ built, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); for contributing, see
 | Page | What it covers |
 | --- | --- |
 | [Installing and updating](docs/usage/install.md) | `uv sync`, confirming the GPU is really being used, what lands on disk, uv's cache, and the uv command reference |
-| [Running the CLI](docs/usage/cli.md) | The wrapper scripts, and why `python src/tinydiffusion/cli.py` does not work |
+| [Running the CLI](docs/usage/cli.md) | The wrapper scripts, and why `python src/tinydiffusion/cli/commands.py` does not work |
 | [Training and checkpoints](docs/usage/training.md) | Starting a run, the terminal dashboard, `--set` overrides, hyperparameter sweeps, stopping early, and resuming |
 | [Metrics and logging](docs/usage/metrics.md) | `metrics.jsonl`, the console, TensorBoard and Weights & Biases backends, and plotting a run |
 | [Sampling](docs/usage/sampling.md) | Samplers, step counts and spacing, half precision, latent walks, and asking for a particular digit |

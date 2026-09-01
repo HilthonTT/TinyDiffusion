@@ -21,9 +21,6 @@ def config_dir(tmp_path, monkeypatch):
     return tmp_path / "config"
 
 
-# --- the list --------------------------------------------------------------
-
-
 def test_the_themes_are_all_named_differently():
     names = [theme.name for theme in CUSTOM_THEMES]
     assert len(set(names)) == len(names)
@@ -39,8 +36,6 @@ def test_ours_lead_the_cycle():
 
 
 def test_a_theme_nobody_listed_still_appears():
-    # Registered later, or by Textual in a version we have not seen: dropping
-    # it silently would be the one outcome worth ruling out.
     order = cycle_order(["tinydiffusion", "some-new-theme"])
     assert "some-new-theme" in order
 
@@ -54,9 +49,6 @@ def test_a_theme_the_app_does_not_have_is_left_out():
     assert cycle_order(["nord"]) == ["nord"]
 
 
-# --- remembering -----------------------------------------------------------
-
-
 def test_a_chosen_theme_comes_back():
     save_preferred_theme("dracula")
     assert load_preferred_theme() == "dracula"
@@ -67,8 +59,6 @@ def test_nothing_saved_reads_as_nothing():
 
 
 def test_an_unreadable_preferences_file_is_not_an_error():
-    # A preference is a convenience; failing to recall one is not worth
-    # reporting, let alone raising in front of a training run.
     path = preferences_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
@@ -87,7 +77,7 @@ def test_a_directory_that_cannot_be_written_is_survived(monkeypatch):
         raise OSError("read-only")
 
     monkeypatch.setattr("pathlib.Path.mkdir", refuse)
-    save_preferred_theme("nord")  # must not raise
+    save_preferred_theme("nord")
 
 
 def test_the_config_directory_can_be_pointed_somewhere_else(tmp_path, monkeypatch):

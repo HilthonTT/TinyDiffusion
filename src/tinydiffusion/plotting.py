@@ -105,15 +105,9 @@ def plot_runs(
     try:
         import matplotlib
 
-        # Chosen before pyplot is imported: a machine with no display would
-        # otherwise fail inside a GUI toolkit, which is a confusing way to
-        # learn that a headless box cannot open a window it did not want.
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as exc:
-        # ImportError rather than something broader, and the same shape the
-        # server's extra raises: it is what the CLI catches to turn a missing
-        # optional dependency into a one-line message instead of a traceback.
         raise ImportError(
             "plotting needs the 'plots' extra: pip install 'tinydiffusion[plots]'"
         ) from exc
@@ -127,8 +121,6 @@ def plot_runs(
         records = read_metrics(path)
         if not records:
             raise ValueError(f"no metrics in {path}")
-        # The run directory rather than the filename, which is metrics.jsonl
-        # for every run and so labels nothing.
         runs.append((path.parent.name or str(path), records))
 
     drawn = [
@@ -155,10 +147,6 @@ def plot_runs(
             value > 0 for key in keys for _, records in runs for value in _series(records, key)[1]
         )
         if log and positive:
-            # Only where every point of every run is positive: a log axis drops
-            # a non-positive point silently, so asking of the first run alone
-            # would quietly delete the second run's zero rather than fall back
-            # to a linear axis for it.
             axis.set_yscale("log")
         axis.grid(alpha=0.3)
         axis.legend(fontsize=8)

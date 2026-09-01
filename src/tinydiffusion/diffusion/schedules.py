@@ -57,11 +57,8 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
 
     alpha_t = 1.0 - betas
     alphabar_t = torch.cumprod(alpha_t, dim=0)
-    # alphabar_{t-1}, with alphabar_{-1} := 1 so that t=0 is noise-free.
     alphabar_prev = torch.cat([torch.ones(1), alphabar_t[:-1]])
 
-    # Posterior variance beta_tilde_t = beta_t * (1 - abar_{t-1}) / (1 - abar_t).
-    # It is 0 at t=0, so clamp before taking a log or a sqrt.
     posterior_var = betas * (1.0 - alphabar_prev) / (1.0 - alphabar_t)
 
     return {
@@ -79,8 +76,6 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
         "posterior_logvar": posterior_var.clamp(min=1e-20).log(),
         "posterior_mean_c0": betas * alphabar_prev.sqrt() / (1.0 - alphabar_t),
         "posterior_mean_ct": (1.0 - alphabar_prev) * alpha_t.sqrt() / (1.0 - alphabar_t),
-        # Signal-to-noise ratio of x_t. Only the loss weighting reads it, but it
-        # belongs to the schedule rather than to any one objective.
         "snr": alphabar_t / (1.0 - alphabar_t),
     }
 
@@ -137,17 +132,8 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
             f"floor={floor} is not below the schedule's own first sqrt(alphabar) of "
             f"{first.item():g}, so there is nothing left to rescale"
         )
-    # Shift the tail onto the floor and stretch so the head lands back where it
-    # was. Mapped affinely rather than rescaled to zero and then clamped: a
-    # clamp flattens however many of the last steps fall below the floor onto
-    # one value, and two equal alphabars make alpha exactly 1 — a beta of 0,
-    # which `ddpm_schedules` rejects outright. The linear schedule at 1,000
-    # steps lands two entries under a floor of 1e-4 and so could not be built
-    # at all. An affine map keeps the sequence strictly decreasing, which is
-    # what keeps every beta inside (0, 1).
     sqrt_ab = floor + (sqrt_ab - last) * ((first - floor) / (first - last))
 
     alphabar = sqrt_ab.square()
-    # alpha_t = abar_t / abar_{t-1}, with abar_{-1} = 1.
     alphas = alphabar / torch.cat([torch.ones(1, dtype=alphabar.dtype), alphabar[:-1]])
     return 1.0 - alphas

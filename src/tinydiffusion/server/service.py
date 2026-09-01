@@ -82,9 +82,6 @@ class SamplerService:
         self._diffusion, ema, self._cfg = load_for_sampling(config.checkpoint, config.device)
         self._spec = self._cfg.dataset_spec()
         raw_net = ema.module if config.use_ema else self._diffusion.net
-        # Resolved once, here, rather than per request: the fallback messages
-        # belong in the startup log next to the device, and every request
-        # should get the same arithmetic as every other.
         self.precision = resolve_precision(config.precision, self._cfg.device)
         self._net = apply_precision(raw_net, self.precision, self._cfg.device)
         self._lock = threading.Lock()
@@ -245,8 +242,6 @@ class SamplerService:
         if guidance is not None and self._cfg.num_classes is None and guidance != 1.0:
             raise ValueError("this checkpoint is unconditional, so guidance does not apply")
 
-        # resolve_labels validates the labels against the checkpoint, and is
-        # what makes the API's conditioning behave exactly like the CLI's.
         y = resolve_labels(
             labels,
             num_images=num_images,
@@ -254,10 +249,6 @@ class SamplerService:
             device=self._cfg.device,
         )
 
-        # A request-local generator rather than seed_everything: reseeding the
-        # process from a request would make one caller's `seed` reach into
-        # every other caller's sampling, and outlive the request that asked
-        # for it. This keeps the reproducibility and drops the side effect.
         generator = (
             torch.Generator(device=self._cfg.device).manual_seed(seed) if seed is not None else None
         )
@@ -332,9 +323,6 @@ class SamplerService:
         if not ttl and not keep:
             return 0
 
-        # (mtime, path), oldest first. A file that vanishes underneath us — a
-        # concurrent sweep, a user with a broom — is already in the state the
-        # sweep wants it in.
         entries: list[tuple[float, Path]] = []
         for candidate in self.image_dir.glob("*.png"):
             if not _FILENAME.fullmatch(candidate.name):
@@ -385,8 +373,6 @@ class SamplerService:
             "default_steps": self.default_steps,
             "sampler": self._cfg.sampler,
             "sample_spacing": self._cfg.sample_spacing,
-            # The resolved precision rather than the requested one, so the
-            # endpoint reports what the samples were actually drawn at.
             "precision": self.precision,
             "default_guidance": self.default_guidance,
             "default_guidance_rescale": self.default_guidance_rescale,

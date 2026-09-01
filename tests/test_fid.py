@@ -31,8 +31,6 @@ def test_mean_shift_only_is_squared_distance():
 
 
 def test_scaled_covariance_matches_closed_form():
-    # For sigma1 = I and sigma2 = s^2 I with equal means, the distance reduces
-    # to d * (1 - s)^2.
     dim, s = 5, 3.0
     mu = torch.zeros(dim, dtype=torch.float64)
     eye = torch.eye(dim, dtype=torch.float64)
@@ -49,15 +47,13 @@ def test_symmetric_in_its_arguments():
 
 
 def test_singular_covariance_is_handled():
-    # A constant feature makes the covariance rank-deficient, which is the
-    # normal case for real activations with dead units.
     feats1 = gaussian(32, 4, seed=3)
     feats1[:, 0] = 1.0
     feats2 = gaussian(32, 4, mean=0.2, seed=4)
     feats2[:, 0] = 1.0
     score = compute_fid(*reference_stats(feats1), *reference_stats(feats2)).item()
     assert score >= 0.0
-    assert score == pytest.approx(score)  # not NaN
+    assert score == pytest.approx(score)
 
 
 def test_score_grows_with_separation():
@@ -70,10 +66,10 @@ def test_score_grows_with_separation():
 @pytest.mark.parametrize(
     ("mu1", "sigma1", "mu2", "sigma2"),
     [
-        (torch.zeros(2, 2), torch.eye(2), torch.zeros(2), torch.eye(2)),  # mu not 1-D
-        (torch.zeros(2), torch.eye(3), torch.zeros(2), torch.eye(2)),  # sigma1 wrong size
-        (torch.zeros(2), torch.eye(2), torch.zeros(2), torch.eye(3)),  # sigma2 wrong size
-        (torch.zeros(2), torch.eye(2), torch.zeros(3), torch.eye(2)),  # dims disagree
+        (torch.zeros(2, 2), torch.eye(2), torch.zeros(2), torch.eye(2)),
+        (torch.zeros(2), torch.eye(3), torch.zeros(2), torch.eye(2)),
+        (torch.zeros(2), torch.eye(2), torch.zeros(2), torch.eye(3)),
+        (torch.zeros(2), torch.eye(2), torch.zeros(3), torch.eye(2)),
     ],
 )
 def test_bad_shapes_rejected(mu1, sigma1, mu2, sigma2):

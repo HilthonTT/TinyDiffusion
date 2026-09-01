@@ -50,9 +50,6 @@ def test_float32_is_left_alone_wherever_it_runs():
     net = Spy()
     assert resolve_precision("fp32", "cpu") == "fp32"
     assert resolve_precision("fp32", "cuda") == "fp32"
-    # Not wrapped, not relaid out: fp32 has to be exactly what it was before
-    # this module existed, or a score taken today is not comparable with one
-    # taken before it.
     assert apply_precision(net, "fp32", "cpu") is net
 
 
@@ -63,8 +60,6 @@ def test_anything_but_float32_falls_back_off_cuda(name, capsys):
 
 
 def test_bf16_without_hardware_falls_back_to_fp16(monkeypatch, capsys):
-    # torch reports the emulation path as supported, so the check has to be
-    # bf16_supported rather than torch's own answer.
     monkeypatch.setattr(precision_module, "bf16_supported", lambda: False)
     assert resolve_precision("bf16", "cuda") == "fp16"
     assert "emulates bfloat16" in capsys.readouterr().out
@@ -84,8 +79,6 @@ def test_tf32_sets_the_backend_flag_rather_than_wrapping(monkeypatch):
     called = []
     monkeypatch.setattr(precision_module, "enable_tf32", lambda: called.append(True))
     net = Spy()
-    # A flag, not a wrapper: the network is handed back untouched, so the
-    # dtype and the layout are both still float32/NCHW.
     assert apply_precision(net, "tf32", "cuda") is net
     assert called == [True]
 
@@ -102,8 +95,6 @@ def test_the_wrapper_hands_back_float32_contiguous():
     net = Spy()
     wrapped = Autocast(net, "cpu", torch.bfloat16)
     out = wrapped(image(), torch.zeros(2, dtype=torch.long))
-    # Everything downstream — guidance, the schedule, the solver update — is
-    # written for float32 NCHW, and gains nothing from half precision.
     assert out.dtype is torch.float32
     assert out.is_contiguous()
 
@@ -113,8 +104,6 @@ def test_the_wrapper_feeds_the_network_channels_last():
     wrapped = Autocast(net, "cpu", torch.bfloat16)
     wrapped(image(), torch.zeros(2, dtype=torch.long))
     _, was_channels_last, _ = net.seen[0]
-    # The whole point of the layout: NCHW half precision transposes per
-    # convolution instead of using the tensor cores.
     assert was_channels_last
 
 
@@ -127,15 +116,12 @@ def test_the_wrapper_passes_labels_through():
 
 
 def test_the_wrapper_adopts_the_networks_mode():
-    # nn.Module defaults to training=True, so a wrapper that did not ask would
-    # put an eval-mode network back into training and re-enable its dropout.
     net = Spy().eval()
     assert not Autocast(net, "cpu", torch.float16).training
     assert Autocast(Spy().train(), "cpu", torch.float16).training
 
 
 def test_the_wrapper_handles_a_doubled_output_width():
-    # A learned variance emits 2C channels; nothing here may assume otherwise.
     net = Spy(out_channels=2)
     out = Autocast(net, "cpu", torch.bfloat16)(image(), torch.zeros(2, dtype=torch.long))
     assert out.shape == (2, 2, 8, 8)
@@ -181,9 +167,6 @@ def test_a_real_chain_stays_finite_in_half_precision(name, wake):
     )
 
     assert out.shape == (4, 1, 32, 32)
-    # Back in float32 for the caller, whatever the network ran in.
     assert out.dtype is torch.float32
     assert torch.isfinite(out).all()
-    # clip_denoised holds every step to the model's range, so a chain that
-    # overflowed shows up here as well as in the NaN check.
     assert out.abs().max() <= 1.0 + 1e-4

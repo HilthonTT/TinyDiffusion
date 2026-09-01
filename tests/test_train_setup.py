@@ -13,11 +13,8 @@ from tinydiffusion.data.datasets import dataset_spec
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.distributed import Distributed
 from tinydiffusion.training.model import build_model
-from tinydiffusion.training.train import (
-    _describe_plan,
-    _parameter_sets,
-    _resolve_precision,
-)
+from tinydiffusion.training.plan import describe_plan
+from tinydiffusion.training.setup import parameter_sets, resolve_precision
 
 
 @pytest.fixture
@@ -42,13 +39,8 @@ def said() -> list[str]:
     return []
 
 
-# --------------------------------------------------------------------------
-# _resolve_precision
-# --------------------------------------------------------------------------
-
-
 def test_half_precision_is_refused_on_a_cpu_and_said_so(cfg, said):
-    precision = _resolve_precision(dataclasses.replace(cfg, full_fp16=True), said.append)
+    precision = resolve_precision(dataclasses.replace(cfg, full_fp16=True), said.append)
 
     assert not precision.full_fp16
     assert not precision.amp
@@ -57,35 +49,32 @@ def test_half_precision_is_refused_on_a_cpu_and_said_so(cfg, said):
 
 
 def test_amp_is_off_on_a_cpu_however_loudly_the_config_asks(cfg, said):
-    precision = _resolve_precision(dataclasses.replace(cfg, amp=True), said.append)
+    precision = resolve_precision(dataclasses.replace(cfg, amp=True), said.append)
 
     assert not precision.amp
     assert said == []
 
 
 def test_bfloat16_falls_back_to_fp16_where_the_gpu_only_emulates_it(cfg, monkeypatch, said):
-    monkeypatch.setattr("tinydiffusion.training.train.bf16_supported", lambda: False)
-    # Bound before the patch, or the replacement calls itself.
+    monkeypatch.setattr("tinydiffusion.training.setup.bf16_supported", lambda: False)
     real_device = torch.device
     monkeypatch.setattr(torch, "device", lambda _: real_device("cuda"))
 
-    precision = _resolve_precision(
+    precision = resolve_precision(
         dataclasses.replace(cfg, device="cuda", amp=True, amp_dtype="bf16"), said.append
     )
 
     assert precision.amp_dtype is torch.float16
-    # The label reports the dtype the run will use, not the one it asked for.
     assert precision.label == "amp fp16"
     assert said == ["this GPU emulates bfloat16 rather than running it, falling back to fp16"]
 
 
 def test_bfloat16_survives_where_the_gpu_runs_it(cfg, monkeypatch, said):
-    monkeypatch.setattr("tinydiffusion.training.train.bf16_supported", lambda: True)
-    # Bound before the patch, or the replacement calls itself.
+    monkeypatch.setattr("tinydiffusion.training.setup.bf16_supported", lambda: True)
     real_device = torch.device
     monkeypatch.setattr(torch, "device", lambda _: real_device("cuda"))
 
-    precision = _resolve_precision(
+    precision = resolve_precision(
         dataclasses.replace(cfg, device="cuda", amp=True, amp_dtype="bf16"), said.append
     )
 
@@ -95,7 +84,7 @@ def test_bfloat16_survives_where_the_gpu_runs_it(cfg, monkeypatch, said):
 
 
 def test_the_label_carries_the_modifiers_the_config_asked_for(cfg):
-    precision = _resolve_precision(
+    precision = resolve_precision(
         dataclasses.replace(cfg, compile=True, channels_last=True), lambda _: None
     )
 
@@ -103,20 +92,15 @@ def test_the_label_carries_the_modifiers_the_config_asked_for(cfg):
 
 
 def test_the_scaler_is_enabled_only_where_it_earns_its_keep(cfg):
-    off = _resolve_precision(cfg, lambda _: None)
+    off = resolve_precision(cfg, lambda _: None)
 
     assert not off.grad_scaler().is_enabled()
-
-
-# --------------------------------------------------------------------------
-# _parameter_sets
-# --------------------------------------------------------------------------
 
 
 def test_without_a_master_copy_the_optimiser_steps_the_network_itself(cfg):
     diffusion = build_model(cfg)
 
-    model_params, master_params, step_params = _parameter_sets(diffusion, full_fp16=False)
+    model_params, master_params, step_params = parameter_sets(diffusion, full_fp16=False)
 
     assert master_params is None
     assert step_params is model_params
@@ -126,19 +110,12 @@ def test_without_a_master_copy_the_optimiser_steps_the_network_itself(cfg):
 def test_a_master_copy_is_what_the_optimiser_steps_instead(cfg):
     diffusion = build_model(cfg)
 
-    model_params, master_params, step_params = _parameter_sets(diffusion, full_fp16=True)
+    model_params, master_params, step_params = parameter_sets(diffusion, full_fp16=True)
 
     assert master_params is not None
     assert step_params == [*master_params]
-    # One flattened tensor where the network has a few hundred, which is why a
-    # resume cannot carry AdamW's moments across the boundary.
     assert len(master_params) < len(model_params)
     assert sum(p.numel() for p in master_params) == sum(p.numel() for p in model_params)
-
-
-# --------------------------------------------------------------------------
-# _describe_plan
-# --------------------------------------------------------------------------
 
 
 def plan(cfg, group=None, **kwargs) -> str:
@@ -149,7 +126,7 @@ def plan(cfg, group=None, **kwargs) -> str:
         "steps_per_epoch": 10,
         "validation_images": 0,
     }
-    return _describe_plan(
+    return describe_plan(
         cfg, dataset_spec(cfg.dataset), group or Distributed(), **(defaults | kwargs)
     )
 
@@ -163,7 +140,6 @@ def test_a_resumed_run_reports_the_epochs_that_are_left(cfg):
 
 
 def test_a_checkpoint_past_the_end_does_not_render_a_backwards_range(cfg):
-    # "epochs 5-4" is what a naive range would say here.
     assert "nothing to run (checkpoint is at 4 epochs)" in plan(cfg, start_epoch=4)
 
 
@@ -201,8 +177,6 @@ def test_accumulation_and_ranks_are_named_separately_in_the_effective_batch(cfg)
         group=Distributed(enabled=True, rank=0, local_rank=0, world_size=4),
     )
 
-    # Both mechanisms reach the same number by different routes, so both are
-    # named: "x2 accumulated" alone would be true and misleading.
     assert "10 steps/epoch (x2 accumulated, x4 ranks, 32 effective)" in line
 
 

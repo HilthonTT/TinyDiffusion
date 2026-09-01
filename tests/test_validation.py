@@ -112,8 +112,6 @@ def _recorded_noise(diffusion, batches, **kwargs):
 
 
 def test_each_scored_timestep_gets_its_own_noise(diffusion, batches):
-    # One draw reused down the timestep grid would make the average an estimate
-    # of the loss under that single realisation rather than under the objective.
     seen = _recorded_noise(diffusion, batches, num_steps=4)
 
     assert len(seen) == len(batches) * 4
@@ -123,8 +121,6 @@ def test_each_scored_timestep_gets_its_own_noise(diffusion, batches):
 
 
 def test_the_noise_sequence_is_replayed_every_call(diffusion, batches):
-    # Pinning the noise is the whole point of the fixed seed: two calls on the
-    # same weights have to see the same draws, or best.pt is chosen by luck.
     first = _recorded_noise(diffusion, batches, num_steps=3)
     second = _recorded_noise(diffusion, batches, num_steps=3)
 

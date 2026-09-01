@@ -15,14 +15,7 @@ from tinydiffusion.diffusion.ddim import (
 )
 from tinydiffusion.diffusion.ddpm import DDPM, LossTerms
 from tinydiffusion.diffusion.dpm_solver import dpmpp_sample
-from tinydiffusion.diffusion.gaussian_diffusion import (
-    Diffusion,
-    GaussianDiffusion,
-    LossType,
-    LossWeighting,
-    ModelMeanType,
-    ModelVarType,
-)
+from tinydiffusion.diffusion.gaussian_diffusion import Diffusion, GaussianDiffusion
 from tinydiffusion.diffusion.guidance import (
     ClassifierFreeGuidance,
     Conditioned,
@@ -37,6 +30,12 @@ from tinydiffusion.diffusion.losses import (
     discretized_gaussian_log_likelihood,
     mean_flat,
     normal_kl,
+)
+from tinydiffusion.diffusion.parameterization import (
+    LossType,
+    LossWeighting,
+    ModelMeanType,
+    ModelVarType,
 )
 from tinydiffusion.diffusion.plms import PLMS_COEFFICIENTS, plms_sample
 from tinydiffusion.diffusion.prediction import predict_xstart_eps

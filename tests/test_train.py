@@ -10,14 +10,31 @@ from PIL import Image
 
 from tinydiffusion.diffusion.gaussian_diffusion import GaussianDiffusion, LossTerms
 from tinydiffusion.sampling import load_for_sampling, sample_from_checkpoint
+from tinydiffusion.training import artifacts as artifacts_module
+from tinydiffusion.training import batches as batches_module
 from tinydiffusion.training import checkpoints as ckpt_module
+from tinydiffusion.training import loop as loop_module
 from tinydiffusion.training import lr as lr_module
 from tinydiffusion.training import model as model_module
+from tinydiffusion.training import reporting as reporting_module
+from tinydiffusion.training import setup as train_setup
 from tinydiffusion.training import train as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import InterruptChoice
 from tinydiffusion.utils.tracking import METRICS_FILENAME
+
+
+def _patch_loader(monkeypatch, factory):
+    """Stand a fake dataloader in everywhere a run reaches for one.
+
+    A run builds three: its training loader, and the two fixed reads in
+    :mod:`~tinydiffusion.training.batches`. A fixture that replaced only the
+    first would leave the held-out slice and the real strip coming off the
+    actual dataset.
+    """
+    for module in (train_module, batches_module):
+        monkeypatch.setattr(module, "image_dataloader", factory)
 
 
 @pytest.fixture
@@ -34,8 +51,6 @@ def tiny_cfg(tmp_path) -> TrainConfig:
         num_timesteps=10,
         num_epochs=2,
         ema_warmup=0,
-        # Four optimiser steps in total, so a ramp would leave the LR near zero
-        # and the weights barely moved. Warmup gets its own test below.
         lr_warmup=0,
         amp=False,
         device="cpu",
@@ -54,7 +69,7 @@ def fake_loader(monkeypatch):
     batches = [
         (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(2)
     ]
-    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+    _patch_loader(monkeypatch, lambda *a, **k: batches)
 
 
 def _records(cfg) -> list[dict]:
@@ -76,17 +91,12 @@ def test_the_logged_metrics_cover_loss_timesteps_and_throughput(tiny_cfg, fake_l
     assert record["train/lr"] == pytest.approx(tiny_cfg.lr)
     assert record["time/epoch_seconds"] > 0
     assert record["time/images_per_second"] > 0
-    # Eight images over ten timesteps will not hit every quartile, but the
-    # ones that do fire must be named after the schedule's quartiles.
     quartiles = {key for key in record if key.startswith("train/loss_q")}
     assert quartiles
     assert quartiles <= {f"train/loss_q{i}" for i in range(4)}
 
 
 def test_the_quartile_losses_average_to_the_epoch_loss(tiny_cfg, fake_loader):
-    # Not exactly equal — the quartiles cover one batch in QUARTILE_EVERY, and
-    # the loss covers all of them — but a quartile that had drifted off the
-    # loss entirely would show up here.
     train_module.train(tiny_cfg)
     record = _records(tiny_cfg)[0]
     quartiles = [v for k, v in record.items() if k.startswith("train/loss_q")]
@@ -117,8 +127,6 @@ def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
     diffusion = train_module.train(cfg)
 
     assert diffusion.net.num_classes == 10
-    # The reserved null row is what guidance extrapolates from, so the table
-    # has to be one wider than the class count.
     assert diffusion.net.label_embed.embed.num_embeddings == 11
     assert _records(cfg)[0]["train/loss"] > 0
     assert (cfg.out_dir / "sample_0002.png").exists()
@@ -127,13 +135,13 @@ def test_a_conditional_run_trains_end_to_end(tiny_cfg, fake_loader):
 def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkeypatch):
     """The grids are a flipbook of one latent set, not a fresh draw per epoch."""
     seen = []
-    real_sample = train_module.get_sampler("ddim")
+    real_sample = artifacts_module.get_sampler("ddim")
 
     def spy(*args, **kwargs):
         seen.append(kwargs["noise"])
         return real_sample(*args, **kwargs)
 
-    monkeypatch.setattr(train_module, "get_sampler", lambda name: spy)
+    monkeypatch.setattr(artifacts_module, "get_sampler", lambda name: spy)
     cfg = dataclasses.replace(tiny_cfg, sample_every=1)
     train_module.train(cfg)
 
@@ -145,13 +153,13 @@ def test_every_epoch_grid_redraws_the_same_latents(tiny_cfg, fake_loader, monkey
 def test_the_grid_latents_follow_the_seed(tiny_cfg, fake_loader, monkeypatch):
     """Derived from cfg.seed, so a --resume continues the same grid."""
     seen = []
-    real_sample = train_module.get_sampler("ddim")
+    real_sample = artifacts_module.get_sampler("ddim")
 
     def spy(*args, **kwargs):
         seen.append(kwargs["noise"])
         return real_sample(*args, **kwargs)
 
-    monkeypatch.setattr(train_module, "get_sampler", lambda name: spy)
+    monkeypatch.setattr(artifacts_module, "get_sampler", lambda name: spy)
     for seed in (0, 0, 1):
         train_module.train(dataclasses.replace(tiny_cfg, sample_every=1, num_epochs=1, seed=seed))
 
@@ -193,10 +201,8 @@ def shuffling_loader(monkeypatch):
         def __len__(self):
             return -(-len(images) // self.batch_size)
 
-    monkeypatch.setattr(
-        train_module,
-        "image_dataloader",
-        lambda *a, batch_size=4, generator=None, **k: Loader(batch_size, generator),
+    _patch_loader(
+        monkeypatch, lambda *a, batch_size=4, generator=None, **k: Loader(batch_size, generator)
     )
     return images, labels
 
@@ -205,13 +211,13 @@ def shuffling_loader(monkeypatch):
 def grid_inputs(monkeypatch):
     """Record the real strip and labels each epoch's sample grid is built on."""
     seen = []
-    real_save = train_module.save_samples
+    real_save = artifacts_module.save_samples
 
     def spy(diffusion, ema, real, cfg, epoch, labels=None, noise=None):
         seen.append((real.clone(), None if labels is None else labels.clone()))
         return real_save(diffusion, ema, real, cfg, epoch, labels=labels, noise=noise)
 
-    monkeypatch.setattr(train_module, "save_samples", spy)
+    monkeypatch.setattr(loop_module, "save_samples", spy)
     return seen
 
 
@@ -251,7 +257,6 @@ def test_an_unconditional_run_has_no_strip_labels(tiny_cfg, shuffling_loader, gr
 
 
 def test_no_reference_is_read_when_no_grid_is_drawn(tiny_cfg):
-    # sample_every=0 draws no grids, so the extra read is skipped entirely.
     assert train_module.reference_batch(dataclasses.replace(tiny_cfg, sample_every=0)) == (
         None,
         None,
@@ -269,8 +274,6 @@ def test_an_unconditional_run_says_so(tiny_cfg, fake_loader, capsys):
 
 
 def test_a_conditional_checkpoint_reloads(tiny_cfg, fake_loader, tmp_path):
-    # The label embedding is part of the state dict, so a conditional run has
-    # to round-trip through save/load or --resume breaks.
     cfg = dataclasses.replace(tiny_cfg, num_classes=10)
     train_module.train(cfg)
 
@@ -293,9 +296,6 @@ def test_the_hybrid_objective_trains_end_to_end(tiny_cfg, fake_loader):
     assert (cfg.out_dir / "sample_0002.png").exists()
 
 
-# --- learning rate warmup -------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("step", "warmup", "expected"),
     [
@@ -312,8 +312,6 @@ def test_the_warmup_factor_ramps_then_holds(step, warmup, expected):
 
 
 def test_the_learning_rate_ramps_over_the_configured_steps(tiny_cfg, fake_loader):
-    # Two batches an epoch over two epochs, so the run ends mid-ramp and the
-    # logged rate must still be climbing.
     cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
     train_module.train(cfg)
 
@@ -338,8 +336,6 @@ def test_the_warmup_survives_a_resume(tiny_cfg, fake_loader, tmp_path):
         ckpt, diffusion=diffusion, ema=ema, optim=optim, scaler=scaler, sched=sched
     )
 
-    # Four steps done, so the resumed run picks the ramp up where it stopped
-    # rather than replaying it from zero over already-trained weights.
     assert sched.get_last_lr()[0] == pytest.approx(cfg.lr * 4 / 8)
 
 
@@ -358,17 +354,12 @@ def test_a_checkpoint_without_a_schedule_still_restores(tiny_cfg, tmp_path):
     assert sched.get_last_lr()[0] == pytest.approx(0.0)
 
 
-# --- rng state ------------------------------------------------------------
-
-
 def test_a_resume_picks_the_random_stream_up_where_it_stopped(tiny_cfg, tmp_path):
     torch.manual_seed(1234)
     torch.randn(5)
     path = _checkpoint(tmp_path, tiny_cfg)
-    # What the run would have drawn next had it never stopped.
     expected = torch.randn(4)
 
-    # A fresh process seeds from cfg.seed, which is a different stream.
     torch.manual_seed(9999)
     ckpt = ckpt_module.read_checkpoint(path)
     assert ckpt_module.restore_rng_state(ckpt)
@@ -395,9 +386,6 @@ def test_a_resumed_run_draws_the_noise_the_epoch_would_have_drawn(tiny_cfg, fake
     train_module.train(stopped)
     train_module.train(cfg, resume=tmp_path / ckpt_module.LAST_CHECKPOINT)
     assert torch.equal(torch.randn(4), straight)
-
-
-# --- resume compatibility -------------------------------------------------
 
 
 def _checkpoint(tmp_path, cfg, *, best_val=None):
@@ -433,12 +421,7 @@ def test_an_unchanged_config_resumes(tiny_cfg, tmp_path):
         ("num_classes", {"num_classes": 10}),
         ("num_timesteps", {"num_timesteps": 20, "sample_steps": 5, "val_steps": 5}),
         ("schedule", {"schedule": "linear"}),
-        # A learned variance needs an objective that trains it, so the pair
-        # has to change together for the config to build at all.
         ("variance", {"variance": "learned_range", "objective": "rescaled_mse"}),
-        # zero_snr rescales the betas the whole schedule comes from, and epsilon
-        # prediction cannot invert the result — so, like variance, the pair has
-        # to move together.
         ("zero_snr", {"zero_snr": True, "predict": "v"}),
     ],
 )
@@ -480,9 +463,6 @@ def test_training_refuses_a_mismatched_resume(tiny_cfg, fake_loader, tmp_path):
         train_module.train(dataclasses.replace(tiny_cfg, base_channels=16), resume=path)
 
 
-# --- interrupt safety -----------------------------------------------------
-
-
 class _StubGuard:
     """Requests an interrupt once `after` batch boundaries have passed."""
 
@@ -511,8 +491,6 @@ def interrupt_after(monkeypatch):
 
 
 def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loader, interrupt_after):
-    # Two batches per epoch, so this lands on the first batch of epoch 2 —
-    # after epoch 1 has already written last.pt.
     interrupt_after(2)
     train_module.train(tiny_cfg)
 
@@ -523,8 +501,6 @@ def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loade
 
     complete = ckpt_module.read_checkpoint(last)
     partial = ckpt_module.read_checkpoint(interrupted)
-    # The interrupt landed a full optimiser step past the completed epoch, so
-    # if last.pt still holds that epoch's own weights the two must differ.
     key = next(iter(complete["model"]))
     assert not torch.equal(complete["model"][key], partial["model"][key])
 
@@ -544,9 +520,6 @@ def test_the_interrupt_message_points_at_the_file_it_wrote(
     train_module.train(tiny_cfg)
     expected = tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT
     assert f"--resume {expected}" in capsys.readouterr().out
-
-
-# --- validation and checkpoint retention ----------------------------------
 
 
 def test_validation_is_logged_and_a_best_checkpoint_is_kept(tiny_cfg, fake_loader):
@@ -601,7 +574,6 @@ def test_epoch_seed_depends_on_both_the_seed_and_the_epoch():
     assert train_module.epoch_seed(0, 0) == train_module.epoch_seed(0, 0)
     assert train_module.epoch_seed(0, 0) != train_module.epoch_seed(0, 1)
     assert train_module.epoch_seed(0, 1) != train_module.epoch_seed(1, 1)
-    # manual_seed rejects anything wider than 64 bits.
     assert 0 <= train_module.epoch_seed(2**40, 5) < 2**63
 
 
@@ -625,11 +597,9 @@ def shuffle_seeds(monkeypatch):
             return len(batches)
 
     def loader(*a, generator=None, **k):
-        # The held-out slice is read once, unshuffled, and passes no generator;
-        # only the training loader is of interest here.
         return RecordingLoader(generator) if generator is not None else batches
 
-    monkeypatch.setattr(train_module, "image_dataloader", loader)
+    _patch_loader(monkeypatch, loader)
     return seeds
 
 
@@ -643,9 +613,6 @@ def test_each_epoch_shuffles_from_its_own_seed(tiny_cfg, shuffle_seeds):
 
 
 def test_a_resumed_epoch_shuffles_as_it_would_have_unresumed(tiny_cfg, shuffle_seeds):
-    # Seeding the loader once at startup made a resumed epoch 1 replay epoch 0's
-    # ordering, so a run split across two processes saw different data than the
-    # same run trained straight through.
     train_module.train(dataclasses.replace(tiny_cfg, num_epochs=1))
     straight_through = list(shuffle_seeds)
     shuffle_seeds.clear()
@@ -659,8 +626,6 @@ def test_a_resumed_epoch_shuffles_as_it_would_have_unresumed(tiny_cfg, shuffle_s
 def test_deterministic_reaches_the_rng_and_leaves_the_autotuner_off(
     tiny_cfg, fake_loader, monkeypatch
 ):
-    # seed_everything clears cudnn.benchmark; training used to set it straight
-    # back, which quietly undid the setting that had just been applied.
     recorded = {}
     monkeypatch.setattr(
         train_module,
@@ -697,9 +662,6 @@ def test_the_model_is_built_with_the_datasets_channel_count():
 
 
 def test_a_checkpoint_cannot_resume_into_a_different_dataset(tiny_cfg, fake_loader):
-    # The channel count is the U-Net's input and output width, so the weights
-    # do not fit — and a bare load_state_dict would say so only as a wall of
-    # size mismatches.
     train_module.train(dataclasses.replace(tiny_cfg, num_epochs=1))
     ckpt = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
 
@@ -716,8 +678,6 @@ def _has_colour(path) -> bool:
 
 
 def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
-    # The whole point of the registry: nothing between the config and the PNG
-    # should know how many channels a dataset has.
     cfg = TrainConfig(
         dataset="cifar10",
         image_size=16,
@@ -744,12 +704,10 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
         log_dir=tmp_path / "runs",
     )
     batches = [(torch.randn(4, 3, 16, 16), torch.arange(4, dtype=torch.long)) for _ in range(2)]
-    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+    _patch_loader(monkeypatch, lambda *a, **k: batches)
 
     train_module.train(cfg)
 
-    # save_image writes RGB whatever it is handed, so the mode proves nothing:
-    # what distinguishes a colour run is that the channels actually differ.
     grid = cfg.out_dir / "sample_0001.png"
     assert grid.is_file()
     assert _has_colour(grid)
@@ -767,9 +725,6 @@ def test_a_three_channel_run_trains_samples_and_reloads(tmp_path, monkeypatch):
     assert _has_colour(out)
 
 
-# --------------------------------------------------------------- LR schedule
-
-
 def test_the_warmup_ramp_is_unchanged_by_a_constant_schedule():
     factor = lambda step: lr_module.lr_factor(  # noqa: E731
         step, warmup=10, total=100, schedule="constant"
@@ -784,16 +739,13 @@ def test_cosine_decays_from_the_end_of_the_ramp_to_zero():
     factor = lambda step: lr_module.lr_factor(  # noqa: E731
         step, warmup=10, total=100, schedule="cosine"
     )
-    # The two terms have to meet at 1: a jump where they join would show up as
-    # a spike in the loss right after warmup.
     assert factor(10) == pytest.approx(1.0)
     assert factor(55) == pytest.approx(0.5, abs=1e-6)
     assert factor(100) == pytest.approx(0.0, abs=1e-9)
-    assert factor(5) == pytest.approx(0.5)  # still ramping
+    assert factor(5) == pytest.approx(0.5)
 
 
 def test_a_run_shorter_than_its_warmup_still_has_a_schedule():
-    # total <= warmup would otherwise divide by zero or go negative.
     assert lr_module.lr_factor(3, warmup=10, total=5, schedule="cosine") == pytest.approx(0.3)
 
 
@@ -804,9 +756,6 @@ def test_the_cosine_schedule_is_monotone_after_the_ramp():
     assert factors == sorted(factors, reverse=True)
 
 
-# ------------------------------------------------------- gradient accumulation
-
-
 @pytest.fixture
 def counted_loader(monkeypatch):
     """A loader of `n` batches, for counting optimiser steps against."""
@@ -815,7 +764,7 @@ def counted_loader(monkeypatch):
         batches = [
             (torch.randn(4, 1, 16, 16), torch.arange(4, dtype=torch.long) % 10) for _ in range(n)
         ]
-        monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+        _patch_loader(monkeypatch, lambda *a, **k: batches)
 
     return build
 
@@ -831,14 +780,10 @@ def test_accumulation_takes_one_optimiser_step_per_group(tiny_cfg, counted_loade
 
     train_module.train(cfg)
 
-    # Four batches, two per step: the EMA — and so the LR schedule, which is
-    # stepped alongside it — advances twice, not four times.
     assert _ema_steps(cfg) == 2
 
 
 def test_a_ragged_accumulation_group_still_steps(tiny_cfg, counted_loader):
-    # Three batches at grad_accum=2 leaves a group of one. Dropping it would
-    # silently discard a third of the epoch.
     counted_loader(3)
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, grad_accum=2)
 
@@ -853,8 +798,6 @@ def test_accumulation_logs_one_step_outcome_per_group(tiny_cfg, counted_loader):
 
     train_module.train(cfg)
 
-    # Averaged over the batches that reported it, the skipped-step rate has to
-    # stay a rate: recording it per micro-batch would halve it.
     record = _records(cfg)[0]
     assert record["train/skipped_step"] == 0.0
     assert record["train/grad_norm"] > 0
@@ -867,9 +810,6 @@ def test_without_accumulation_every_batch_steps(tiny_cfg, counted_loader):
     train_module.train(cfg)
 
     assert _ema_steps(cfg) == 4
-
-
-# ------------------------------------------------------------------ optimiser
 
 
 def test_the_optimiser_carries_the_configured_betas_and_decay(tiny_cfg, fake_loader):
@@ -887,10 +827,6 @@ def test_the_optimiser_carries_the_configured_betas_and_decay(tiny_cfg, fake_loa
 
 
 def test_compiling_leaves_the_checkpoint_an_ordinary_one(tiny_cfg, fake_loader, monkeypatch):
-    # torch.compile's wrapper prefixes every state-dict key with `_orig_mod.`.
-    # Training through the wrapper while checkpointing the eager module is what
-    # keeps a compiled run's checkpoints loadable by everything else. Stubbed
-    # rather than really compiled: inductor is slow and needs a toolchain.
     compiled = []
 
     def fake_compile(module, **kwargs):
@@ -936,14 +872,12 @@ class _LinearDiffusion(torch.nn.Module):
 
 
 def _weight_after(cfg, batches, monkeypatch):
-    monkeypatch.setattr(train_module, "build_model", lambda cfg: _LinearDiffusion())
-    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+    monkeypatch.setattr(train_setup, "build_model", lambda cfg: _LinearDiffusion())
+    _patch_loader(monkeypatch, lambda *a, **k: batches)
     return train_module.train(cfg).net.weight.detach().clone()
 
 
 def test_accumulating_two_batches_updates_as_one_batch_of_both(tiny_cfg, tmp_path, monkeypatch):
-    # The group is divided by its own size, so summing two half-batches has to
-    # land exactly where the whole batch would have.
     images = torch.randn(8, 1, 16, 16)
     labels = torch.zeros(8, dtype=torch.long)
     base = dataclasses.replace(
@@ -969,8 +903,6 @@ def test_accumulating_two_batches_updates_as_one_batch_of_both(tiny_cfg, tmp_pat
 
 
 def test_a_ragged_group_is_averaged_over_what_it_holds(tiny_cfg, tmp_path, monkeypatch):
-    # A trailing group of one divided by grad_accum instead of by its own
-    # length would apply half the gradient it should.
     images = torch.randn(4, 1, 16, 16)
     labels = torch.zeros(4, dtype=torch.long)
     base = dataclasses.replace(
@@ -985,7 +917,6 @@ def test_a_ragged_group_is_averaged_over_what_it_holds(tiny_cfg, tmp_path, monke
     )
 
     with monkeypatch.context() as m:
-        # One batch, asked to accumulate three: the group holds one.
         ragged = dataclasses.replace(base, grad_accum=3, ckpt_dir=tmp_path / "ragged")
         accumulated = _weight_after(ragged, [(images, labels)], m)
 
@@ -998,10 +929,7 @@ def test_a_ragged_group_is_averaged_over_what_it_holds(tiny_cfg, tmp_path, monke
 
 @pytest.mark.gpu
 def test_compiling_is_skipped_when_triton_is_missing(tiny_cfg, fake_loader, monkeypatch, capsys):
-    # Inductor's CUDA backend needs Triton, which the Windows wheels do not
-    # ship. Discovering that on the first batch — several frames inside dynamo,
-    # after the dataset has downloaded — is not a useful place to find out.
-    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(train_setup.importlib.util, "find_spec", lambda name: None)
     monkeypatch.setattr(torch, "compile", lambda *a, **k: pytest.fail("should not compile"))
     cfg = dataclasses.replace(tiny_cfg, num_epochs=1, compile=True, device="cuda")
 
@@ -1011,26 +939,18 @@ def test_compiling_is_skipped_when_triton_is_missing(tiny_cfg, fake_loader, monk
 
 
 def test_compiling_goes_ahead_on_cpu_where_triton_is_not_needed():
-    # The CPU backend generates C++ rather than Triton kernels.
-    assert train_module._can_compile("cpu")
+    assert train_setup.can_compile("cpu")
 
 
 def test_compiling_needs_triton_on_cuda(monkeypatch):
-    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: None)
-    assert not train_module._can_compile("cuda")
-    monkeypatch.setattr(train_module.importlib.util, "find_spec", lambda name: object())
-    assert train_module._can_compile("cuda")
-
-
-# ---------------------------------------------------------------------------
-# the deprecated train_mnist alias
-# ---------------------------------------------------------------------------
+    monkeypatch.setattr(train_setup.importlib.util, "find_spec", lambda name: None)
+    assert not train_setup.can_compile("cuda")
+    monkeypatch.setattr(train_setup.importlib.util, "find_spec", lambda name: object())
+    assert train_setup.can_compile("cuda")
 
 
 def test_the_old_train_mnist_module_still_works_and_warns():
     """0.2 code imported the loop from train_mnist; that has to keep resolving."""
-    # Dropped from the cache first: the warning fires on import, and an earlier
-    # test in the session may already have paid for it.
     sys.modules.pop("tinydiffusion.training.train_mnist", None)
     with pytest.warns(DeprecationWarning, match="tinydiffusion.training.train"):
         legacy = importlib.import_module("tinydiffusion.training.train_mnist")
@@ -1042,16 +962,12 @@ def test_the_old_train_mnist_module_still_works_and_warns():
     assert legacy.LAST_CHECKPOINT == ckpt_module.LAST_CHECKPOINT
 
 
-# --- deferred per-batch metrics ---------------------------------------------
-
-
 def test_drain_replays_every_batch_in_order():
     from tinydiffusion.utils.tracking import null_logger
 
     pending = [{"train/loss": torch.tensor(float(i))} for i in (1.0, 2.0, 3.0)]
     with null_logger() as logger:
-        loss_ema = train_module._drain_metrics(pending, logger, None)
-        # Exactly the smoothing an unbuffered loop would have computed.
+        loss_ema = reporting_module.drain_metrics(pending, logger, None)
         expected = None
         for value in (1.0, 2.0, 3.0):
             expected = value if expected is None else 0.9 * expected + 0.1 * value
@@ -1064,8 +980,8 @@ def test_drain_carries_the_smoothed_loss_across_calls():
     from tinydiffusion.utils.tracking import null_logger
 
     with null_logger() as logger:
-        first = train_module._drain_metrics([{"train/loss": torch.tensor(1.0)}], logger, None)
-        second = train_module._drain_metrics([{"train/loss": torch.tensor(2.0)}], logger, first)
+        first = reporting_module.drain_metrics([{"train/loss": torch.tensor(1.0)}], logger, None)
+        second = reporting_module.drain_metrics([{"train/loss": torch.tensor(2.0)}], logger, first)
     assert first == pytest.approx(1.0)
     assert second == pytest.approx(0.9 * 1.0 + 0.1 * 2.0)
 
@@ -1074,8 +990,8 @@ def test_drain_of_nothing_leaves_the_smoothed_loss_alone():
     from tinydiffusion.utils.tracking import null_logger
 
     with null_logger() as logger:
-        assert train_module._drain_metrics([], logger, 0.5) == 0.5
-        assert train_module._drain_metrics([], logger, None) is None
+        assert reporting_module.drain_metrics([], logger, 0.5) == 0.5
+        assert reporting_module.drain_metrics([], logger, None) is None
 
 
 def test_drain_keeps_tensor_and_float_metrics_on_their_own_keys():
@@ -1090,7 +1006,7 @@ def test_drain_keeps_tensor_and_float_metrics_on_their_own_keys():
         {"train/loss": torch.tensor(4.0), "train/skipped_step": 1.0},
     ]
     with null_logger() as logger:
-        train_module._drain_metrics(pending, logger, None)
+        reporting_module.drain_metrics(pending, logger, None)
         means = logger.means
     assert means["train/loss"] == pytest.approx(3.0)
     assert means["train/grad_norm"] == pytest.approx(7.0)
@@ -1101,7 +1017,7 @@ def test_drain_handles_a_batch_of_floats_only():
     from tinydiffusion.utils.tracking import null_logger
 
     with null_logger() as logger:
-        loss_ema = train_module._drain_metrics([{"train/loss": 3.0}], logger, None)
+        loss_ema = reporting_module.drain_metrics([{"train/loss": 3.0}], logger, None)
     assert loss_ema == pytest.approx(3.0)
 
 
@@ -1116,17 +1032,15 @@ def many_batches(monkeypatch):
         )
         for _ in range(20)
     ]
-    monkeypatch.setattr(train_module, "image_dataloader", lambda *a, **k: batches)
+    _patch_loader(monkeypatch, lambda *a, **k: batches)
 
 
 DETERMINISTIC_KEYS = ("train/loss", "train/grad_norm", "train/lr", "train/skipped_step")
 
 
 def test_buffering_does_not_change_a_single_logged_number(tmp_path, many_batches, monkeypatch):
-    # The whole claim of DRAIN_EVERY: the same values, read later. Draining
-    # every batch is the old behaviour, so the two runs must agree exactly.
     def run(log_dir, drain_every):
-        monkeypatch.setattr(train_module, "DRAIN_EVERY", drain_every)
+        monkeypatch.setattr(loop_module, "DRAIN_EVERY", drain_every)
         cfg = TrainConfig(
             image_size=16,
             batch_size=4,
@@ -1163,16 +1077,15 @@ def test_buffering_does_not_change_a_single_logged_number(tmp_path, many_batches
 
 
 def test_a_partial_final_run_still_reaches_the_log(tmp_path, many_batches, monkeypatch):
-    # 20 batches over a buffer of 8 leaves 4 undrained at the end of the epoch.
-    monkeypatch.setattr(train_module, "DRAIN_EVERY", 8)
+    monkeypatch.setattr(loop_module, "DRAIN_EVERY", 8)
     seen = []
-    real_drain = train_module._drain_metrics
+    real_drain = loop_module.drain_metrics
 
     def counting(pending, logger, loss_ema):
         seen.append(len(pending))
         return real_drain(pending, logger, loss_ema)
 
-    monkeypatch.setattr(train_module, "_drain_metrics", counting)
+    monkeypatch.setattr(loop_module, "drain_metrics", counting)
     cfg = TrainConfig(
         image_size=16,
         batch_size=4,
@@ -1196,9 +1109,6 @@ def test_a_partial_final_run_still_reaches_the_log(tmp_path, many_batches, monke
     )
     train_module.train(cfg)
     assert seen == [8, 8, 4]
-
-
-# --- leaving the process group ----------------------------------------------
 
 
 @pytest.fixture
@@ -1231,7 +1141,7 @@ def test_the_group_is_left_even_when_the_loop_raises(
     def explode(*args, **kwargs):
         raise RuntimeError("CUDA out of memory")
 
-    monkeypatch.setattr(train_module, "_run_epoch", explode)
+    monkeypatch.setattr(train_module, "run_epoch", explode)
 
     with pytest.raises(RuntimeError, match="out of memory"):
         train_module.train(tiny_cfg)
@@ -1247,7 +1157,7 @@ def test_a_failing_rank_does_not_wait_at_the_barrier(
     def explode(*args, **kwargs):
         raise RuntimeError("CUDA out of memory")
 
-    monkeypatch.setattr(train_module, "_run_epoch", explode)
+    monkeypatch.setattr(train_module, "run_epoch", explode)
 
     with pytest.raises(RuntimeError):
         train_module.train(tiny_cfg)

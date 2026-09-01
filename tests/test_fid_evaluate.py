@@ -39,9 +39,6 @@ class StubExtractor(nn.Module):
         super().__init__()
         self.dim = dim
         g = torch.Generator().manual_seed(0)
-        # A buffer, not an attribute: a bare tensor does not follow the module
-        # across `.to(device)`, which passes on a CPU-only machine and fails
-        # everywhere else.
         self.register_buffer("weight", torch.randn(image_size * image_size, dim, generator=g))
         self.seen = 0
 
@@ -55,10 +52,6 @@ def make_checkpoint(tmp_path, monkeypatch, wake):
     """Write a real checkpoint over a tiny model, and stand in for MNIST."""
 
     def build(cfg=TINY):
-        # Under tmp_path so the reference-feature cache these scores write
-        # lands with the test rather than in the repo's own data directory —
-        # where a stale entry would silently feed one test's fake images to
-        # the next.
         cfg = dataclasses.replace(cfg, data_root=tmp_path / "data")
         diffusion = build_model(cfg)
         wake(diffusion.net)
@@ -111,7 +104,6 @@ def test_accumulate_features_respects_the_limit(extractor):
     stats = accumulate_features(batches(100, 7), extractor)
     limited = accumulate_features(batches(100, 7), extractor, limit=10)
     assert stats.n == 100
-    # The batch straddling the limit is truncated, so the count lands exactly.
     assert limited.n == 10
 
 
@@ -157,8 +149,6 @@ def test_the_generated_class_mix_stays_balanced_across_batches(make_checkpoint, 
         evaluate, "get_sampler", lambda name: lambda d, n, *a, **k: torch.zeros(n, 1, 8, 8)
     )
 
-    # 26 images in batches of 4 over 4 classes: restarting the cycle each batch
-    # would give class 0 seven samples and classes 2 and 3 six each.
     list(
         evaluate.generate_images(
             diffusion,
@@ -172,7 +162,6 @@ def test_the_generated_class_mix_stays_balanced_across_batches(make_checkpoint, 
         )
     )
     counts = torch.cat(seen).bincount(minlength=CONDITIONAL.num_classes)
-    # A continuous cycle can only ever be off by one.
     assert counts.max() - counts.min() <= 1
 
 
@@ -214,8 +203,7 @@ def test_fid_for_checkpoint_returns_a_result(checkpoint, extractor):
     assert result.feature_dim == extractor.dim
     assert result.num_steps == 2
     assert result.used_ema is True
-    assert result.guidance is None  # unconditional checkpoint
-    # Both sides went through the extractor.
+    assert result.guidance is None
     assert extractor.seen == 16
 
 
@@ -234,8 +222,6 @@ def test_seed_changes_the_samples(checkpoint, extractor):
 
 
 def test_scoring_against_itself_is_near_zero(extractor):
-    # Sanity check on the plumbing rather than the model: the same images down
-    # both sides must score zero.
     images = [torch.randn(8, 1, 8, 8).clamp(-1, 1) for _ in range(3)]
     a = accumulate_features(iter(images), extractor)
     b = accumulate_features(iter(images), extractor)
@@ -316,8 +302,6 @@ def test_result_format_stays_quiet_when_well_sampled():
     assert "warning" not in result.format()
     assert "guidance" not in result.format()
     assert "rescale" not in result.format()
-    # fp32 is the default, so it earns no line: a report that named it on every
-    # score would be saying nothing on almost all of them.
     assert "fp32" not in result.format()
 
 
@@ -335,17 +319,10 @@ def test_result_format_names_a_non_default_precision():
         used_ema=False,
         sample_precision="fp16",
     )
-    # It moves the score like the sampler and the spacing do, so a report that
-    # left it out would invite a comparison that is not one.
     assert "fp16" in result.format()
 
 
 def test_the_precision_the_samples_were_drawn_at_is_recorded(checkpoint, extractor):
-    # Asked for half precision on a CPU, which cannot run it. The result has to
-    # record what was used and not what was requested, or a sweep comparing
-    # scores by their recorded settings would be comparing the wrong ones.
-    # device is pinned rather than left to resolve: this asserts the fallback,
-    # and on a machine with a GPU the default would not take it.
     result = fid_for_checkpoint(
         checkpoint,
         num_images=4,
@@ -401,8 +378,6 @@ def test_precision_and_recall_are_reported_as_fractions(checkpoint, extractor):
 
 
 def test_retaining_features_does_not_move_the_fid(checkpoint):
-    # The two paths accumulate the same moments, so asking for KID must not
-    # quietly change the headline number a sweep is comparing.
     plain = fid_for_checkpoint(
         checkpoint, num_images=8, num_steps=2, extractor=StubExtractor(), progress=False
     )
@@ -421,8 +396,6 @@ def test_retaining_features_does_not_move_the_fid(checkpoint):
 
 
 def test_the_kid_score_does_not_depend_on_how_many_batches_sampling_drew(checkpoint):
-    # Seeded from the run's seed rather than the global RNG, which sampling has
-    # advanced by an amount that depends on the batch size.
     scores = [
         fid_for_checkpoint(
             checkpoint,
@@ -442,8 +415,6 @@ def test_the_kid_score_does_not_depend_on_how_many_batches_sampling_drew(checkpo
 
 
 def test_an_undersampled_score_points_at_the_metric_that_is_not(checkpoint, extractor):
-    # Fewer images than the extractor has features, so the covariance is
-    # singular and the FID is biased by an amount that depends on the count.
     result = fid_for_checkpoint(
         checkpoint, num_images=4, num_steps=2, extractor=extractor, progress=False
     )
@@ -503,7 +474,6 @@ def test_the_spatial_and_classifier_metrics_are_absent_unless_asked_for(checkpoi
     )
     assert result.sfid is None
     assert result.inception_score is None
-    # Line-wise, since pytest's tmp_path carries the test's own name.
     lines = result.format().splitlines()
     assert not any(line.startswith(("sfid", "inception score")) for line in lines)
 
@@ -519,7 +489,6 @@ def test_sfid_is_reported_beside_the_fid(checkpoint, headed_extractor):
     )
     assert result.sfid is not None
     assert result.sfid >= 0.0
-    # Line-wise, since pytest's tmp_path carries the test's own name.
     assert any(line.startswith("sfid") for line in result.format().splitlines())
 
 
@@ -560,13 +529,9 @@ def test_the_extra_heads_ride_along_on_one_pass(checkpoint, headed_extractor):
         sfid=True,
         inception_score=True,
         is_splits=2,
-        # The first score cached the pooled reference half; the second needs
-        # the spatial one too, so it re-runs the real side. Off, to compare
-        # like with like.
         cache=False,
     )
     assert headed_extractor.seen == seen_plain
-    # And the FID itself is untouched by the company it now keeps.
     assert everything.fid == pytest.approx(plain.fid)
 
 
@@ -586,7 +551,6 @@ def test_the_spatial_reference_half_is_cached_under_its_own_key(checkpoint, head
     cache_dir = next(p for p in checkpoint.parent.rglob(CACHE_DIRNAME) if p.is_dir())
     entries = {p.name for p in cache_dir.iterdir()}
     assert any(name.endswith("_spatial.pt") for name in entries)
-    # The pooled entry is still there beside it rather than overwritten.
     assert any(not name.endswith("_spatial.pt") for name in entries)
 
     headed_extractor.seen = 0

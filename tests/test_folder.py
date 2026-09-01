@@ -46,8 +46,6 @@ def classed(tmp_path):
 
 
 def test_folder_is_a_name_a_config_may_give_but_not_a_registry_entry():
-    # It has no fixed spec to look up, so the lookup says where to get one
-    # rather than reporting the name as unknown.
     assert FOLDER_DATASET in dataset_names()
     with pytest.raises(ValueError, match=r"no fixed spec.*folder_spec"):
         dataset_spec(FOLDER_DATASET)
@@ -66,7 +64,6 @@ def test_subdirectories_become_classes_numbered_by_sorted_name(classed):
 
     assert scan.classes == ["cats", "dogs", "emus"]
     assert scan.num_classes == 3
-    # Every class contributes, and the label is its directory's index.
     pairs = zip(scan.paths, scan.labels, strict=True)
     assert {label: path.parent.name for path, label in pairs} == {0: "cats", 1: "dogs", 2: "emus"}
 
@@ -79,9 +76,6 @@ def test_loose_images_beside_class_directories_are_rejected(classed):
 
 
 def test_a_hidden_file_beside_class_directories_is_not_a_loose_image(classed):
-    # A folder copied off a Mac carries a `._name.png` sidecar per image, and
-    # the walk already skips dot-entries — so counting one as a loose image
-    # would reject a perfectly ordinary class layout.
     _write(classed / "._cats0.png")
 
     scan = scan_folder(classed, holdout=0.0)
@@ -100,9 +94,6 @@ def test_the_two_splits_partition_the_directory(flat):
 
 
 def test_adding_an_image_moves_only_that_image_between_splits(flat):
-    # The split is a hash of each path, not a cut through a sorted list: an
-    # index-based split would move every image after the insertion point, and
-    # quietly promote already-scored images into the training set.
     before = set(scan_folder(flat, train=False, holdout=0.5).paths)
     added = _write(flat / "img999.png")
     after = set(scan_folder(flat, train=False, holdout=0.5).paths)
@@ -112,9 +103,6 @@ def test_adding_an_image_moves_only_that_image_between_splits(flat):
 
 
 def test_the_split_is_the_same_on_every_platform(flat):
-    # Keyed on the POSIX relative path, so a run on Windows scores the same
-    # images a run on Linux does — and a cached FID keyed on the split stays
-    # valid across both.
     held_out = sorted(path.name for path in scan_folder(flat, train=False, holdout=0.5).paths)
 
     assert held_out == [
@@ -145,8 +133,6 @@ def test_explicit_split_directories_are_used_verbatim(tmp_path):
     for index in range(3):
         _write(root / "test" / "a" / f"{index}.png")
 
-    # A holdout that would otherwise cut the training split in half is ignored:
-    # the directory already says what the splits are.
     assert len(scan_folder(root, train=True, holdout=0.5).paths) == 12
     assert len(scan_folder(root, train=False, holdout=0.5).paths) == 3
 
@@ -160,8 +146,6 @@ def test_val_is_accepted_in_place_of_test(tmp_path):
 
 
 def test_a_train_directory_without_a_held_out_one_is_an_error(tmp_path):
-    # Falling back to the hash split here would score the held-out loss on the
-    # training images and never say so.
     root = tmp_path / "split"
     _write(root / "train" / "a.png")
 
@@ -172,7 +156,6 @@ def test_a_train_directory_without_a_held_out_one_is_an_error(tmp_path):
 def test_non_images_and_hidden_directories_are_not_training_data(flat):
     (flat / "notes.txt").write_text("not an image")
     _write(flat / ".cache" / "hidden.png")
-    # What `fid` leaves behind in the dataset root once it has run.
     (flat / "fid_cache").mkdir()
     (flat / "fid_cache" / "stats.pt").write_bytes(b"not an image")
 
@@ -206,8 +189,6 @@ def test_a_class_count_that_does_not_match_the_directory_is_caught_at_load(class
 
 
 def test_an_unconditional_run_does_not_have_to_match_the_layout(classed):
-    # Same as num_classes=None on MNIST: the labels are still read and still
-    # ignored, so class directories are no obstacle to unconditional training.
     dataset = load_folder(
         classed,
         train=True,
@@ -222,8 +203,6 @@ def test_an_unconditional_run_does_not_have_to_match_the_layout(classed):
 
 @pytest.mark.parametrize("channels", [1, 3])
 def test_images_are_converted_to_the_declared_channel_count(tmp_path, channels):
-    # A directory of photographs is rarely uniform, and the U-Net's input width
-    # is fixed by the config rather than by whatever the last file happened to be.
     root = tmp_path / "mixed"
     _write(root / "grey.png", mode="L")
     _write(root / "rgb.png", mode="RGB")
@@ -243,8 +222,6 @@ def test_images_are_converted_to_the_declared_channel_count(tmp_path, channels):
 
 
 def test_oblong_images_are_cropped_to_square(tmp_path):
-    # Resize takes a single length to mean the short side, so without the crop
-    # a 4:3 photo stays 4:3 and no two images in the batch share a shape.
     root = tmp_path / "photos"
     for index, size in enumerate([(96, 72), (72, 96), (40, 40)]):
         _write(root / f"{index}.png", size=size)
@@ -258,14 +235,11 @@ def test_oblong_images_are_cropped_to_square(tmp_path):
 
 
 def test_the_packaged_datasets_do_not_crop():
-    # Already square, so the crop would be a no-op on every image.
     assert not dataset_spec("mnist").crop
     assert folder_spec().crop
 
 
 def test_a_folder_config_resolves_without_touching_the_disk():
-    # The point of declaring rather than detecting: a checkpoint trained on a
-    # folder has to stay loadable, and samplable, where the images never were.
     cfg = TrainConfig(dataset=FOLDER_DATASET, data_root="nowhere-at-all", folder_channels=1)
     spec = cfg.dataset_spec()
 
@@ -289,9 +263,6 @@ def test_the_config_carries_the_folder_settings_into_the_spec():
 
 
 def test_the_folder_channel_count_is_tied_to_the_weights():
-    # It is the U-Net's input and output width, so a --resume that changes it
-    # has to be refused with the other architecture fields rather than reaching
-    # load_state_dict as a size mismatch.
     assert "folder_channels" in ARCHITECTURE_FIELDS
 
 
@@ -309,8 +280,6 @@ def test_the_folder_settings_are_checked_while_the_config_is_read(field, value, 
 
 
 def test_a_folder_run_trains_end_to_end(tmp_path, classed):
-    # The whole path in one: scan, split, load, train an epoch, score the
-    # held-out split and write a checkpoint that samples without the images.
     from tinydiffusion.sampling import sample_from_checkpoint
     from tinydiffusion.training.train import train
 
@@ -345,8 +314,6 @@ def test_a_folder_run_trains_end_to_end(tmp_path, classed):
     checkpoint = tmp_path / "ckpt" / "last.pt"
     assert checkpoint.is_file()
 
-    # The images go away, and the checkpoint still samples: nothing downstream
-    # of training needs the directory the run was named after.
     shutil.rmtree(classed)
     grid = sample_from_checkpoint(
         checkpoint, tmp_path / "gen.png", num_images=2, num_steps=2, device="cpu"
