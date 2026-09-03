@@ -569,3 +569,21 @@ def test_an_extractor_without_the_extra_heads_says_so(checkpoint, extractor):
             progress=False,
             sfid=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ({"folder_channels": 1}, {"folder_channels": 3}),
+        ({"folder_holdout": 0.1}, {"folder_holdout": 0.2}),
+    ],
+)
+def test_folder_reference_sets_are_cached_by_what_defines_them(a, b):
+    """Two folder configs reading the same directory differently must not share a cache entry."""
+    from tinydiffusion.metrics.evaluate import reference_dataset_id
+
+    base = dataclasses.replace(TINY, dataset="folder")
+    assert reference_dataset_id(dataclasses.replace(base, **a)) != reference_dataset_id(
+        dataclasses.replace(base, **b)
+    )
+    assert reference_dataset_id(TINY) == TINY.dataset

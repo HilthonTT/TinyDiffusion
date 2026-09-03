@@ -73,6 +73,15 @@ class InterruptGuard:
         """Record that an interrupt arrived."""
         self._requested = True
 
+    def clear(self) -> None:
+        """Drop a pending interrupt without asking about it.
+
+        For the ranks of a distributed run that saw the Ctrl+C but left the
+        decision to the main rank: once that decision has been shared, every
+        rank's flag must go down, or the next check re-raises the question.
+        """
+        self._requested = False
+
     def resolve(self, *, prompt: Callable[[str], str] = input) -> InterruptChoice:
         """Ask the user whether to cancel, and whether to checkpoint first.
 

@@ -535,6 +535,77 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Inception network behind every metric now sees input scaled the way its
+  weights were trained on. torchvision's ported Google weights expect images
+  in [-1, 1], and with weights loaded torchvision converts ImageNet-normalised
+  input to that itself — unless `transform_input=False` is passed, which it
+  was. The body of the network was seeing one channel shifted by about -1.1
+  and stretched about 2.2x, and every reading the metrics take — the pooled
+  features behind FID, KID and precision/recall, the spatial map behind sFID,
+  the class probabilities behind IS — came from that mis-scaled pass. The
+  cache format is bumped, so every `fid_cache` entry is recomputed.
+
+- Reference statistics for a `folder` dataset are cached under the settings
+  that define the set. The key held only the dataset name, and every folder
+  is named `folder`; a run with `folder_channels = 1` on a directory a
+  `folder_channels = 3` run had already scored read the RGB statistics back
+  as its own, and a changed `folder_holdout` scored against a different split
+  under the same name. The channel count and holdout fraction are in the key.
+
+- `full_fp16` works under DDP. The network was wrapped for DDP before it was
+  converted to half, and DDP types its gradient buckets from the parameters it
+  is handed, so the first backward failed the reducer's dtype check. The
+  wrapper is built after the checkpoint is restored and the conversion done,
+  which also means DDP's own parameter broadcast carries the restored weights.
+
+- A Ctrl+C under DDP is asked about once. The signal reaches every rank, but
+  only the main rank resolved it, so the others kept the flag up and the same
+  question came back at every aligned batch for the rest of the run once the
+  answer was "continue". Every rank clears its flag once the decision is
+  shared.
+
+- A resumed distributed run keeps its per-rank random streams. The
+  checkpoint's RNG state — the main rank's — was installed on every rank, so
+  after a resume all ranks drew the same noise and timesteps for different
+  images. Only the main rank replays it now.
+
+- A resume that could not take the checkpoint's optimiser moments — a changed
+  `full_fp16` — no longer spends its first step at a learning rate of zero.
+  The schedule's step count was restored but the rate it implies lives in the
+  optimiser's own state, so the param groups sat at the step-0 warmup value
+  until the first `sched.step()`, which comes after the first optimiser step.
+
+- A `--axis` value can carry a comma. `channel_mult=[1,2],[1,2,4]` was split
+  on every comma before it was read, and the fragments crashed the config
+  validator with a traceback. The whole list is read as one TOML array first,
+  and only bare words fall back to splitting.
+
+- Quitting the TUI while a run is live stops the run. The training worker is
+  a plain thread the interpreter joins on the way out, so `q` restored the
+  terminal and then sat there, silently training to the last epoch. A quit
+  while running now asks the loop to stop and leaves once it has.
+
+- Restarting a run in the TUI starts its charts afresh, rather than drawing
+  the new run as a continuation of the old one's curve and keeping its best
+  validation loss on the stats panel until overwritten. The elapsed tile
+  freezes when a run ends instead of counting on forever.
+
+- The server answers a non-zero `eta` on a checkpoint that samples with a
+  deterministic solver with a 400, where it used to be caught inside the
+  render as a 500 — after taking an inflight slot. With a small
+  `--keep-images`, two concurrent renders can no longer prune each other's
+  freshly written file. `/api/status` reports memory for the serving device
+  rather than device 0.
+
+- Building a schedule from betas that live on a GPU no longer raises: the
+  leading one for `alphabar_prev` is created on the betas' own device.
+
+- The metrics logger closes the backends it has already opened when a later
+  one fails to construct, rather than leaking the JSONL file handle and the
+  TensorBoard writer. The real-image dataloader in `fid` releases its worker
+  processes once the reference features are read, rather than holding them
+  through the whole sampling phase.
+
 - A training run that raises now leaves its process group before it unwinds.
   The `barrier` and `destroy_process_group` at the end of `train` sat on the
   success path, so any exception in the loop — a CUDA OOM being the likely one

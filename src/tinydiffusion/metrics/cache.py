@@ -61,7 +61,7 @@ __all__ = [
 CACHE_DIRNAME = "fid_cache"
 """Subdirectory of the dataset root the cached statistics live in."""
 
-_FORMAT = 1
+_FORMAT = 2
 """Payload version. A file written by a different one is recomputed, not read."""
 
 

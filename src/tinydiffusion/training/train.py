@@ -46,6 +46,7 @@ from tinydiffusion.training.setup import (
     parameter_sets,
     resolve_precision,
     restore_run,
+    wrap_network,
 )
 from tinydiffusion.utils.fp16 import model_params_to_master_params
 from tinydiffusion.utils.seed import seed_everything
@@ -113,7 +114,7 @@ def train(
     precision = resolve_precision(cfg, say)
     configure_backends(cfg, precision.device_type)
 
-    diffusion, ema, train_net, ddp = build_network(cfg, group, precision, say)
+    diffusion, ema = build_network(cfg, group)
     model_params, master_params, step_params = parameter_sets(
         diffusion, full_fp16=precision.full_fp16
     )
@@ -167,11 +168,17 @@ def train(
             sched=sched,
             full_fp16=precision.full_fp16,
             say=say,
+            restore_rng=group.is_main,
         )
 
     if master_params is not None:
         model_params_to_master_params(model_params, master_params)
         cast(UNet, diffusion.net).convert_to_fp16()
+
+    # Only now, with the weights restored and in their final dtype, is the
+    # network ready to be wrapped for the step: DDP types its buckets from
+    # what it is handed.
+    train_net, ddp = wrap_network(diffusion.net, cfg, group, precision, say)
 
     held_out = validation_batches(cfg)
 

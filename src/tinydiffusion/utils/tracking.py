@@ -11,6 +11,7 @@ per-epoch mean of a quantity that moves as much as the diffusion loss is what
 actually shows a trend.
 """
 
+import contextlib
 import json
 import math
 import time
@@ -436,33 +437,41 @@ class RunLogger:
                 package behind it is not installed.
         """
         backends: list[LoggerBackend] = []
-        if console:
-            backends.append(ConsoleBackend())
-        if jsonl:
-            backends.append(JsonlBackend(log_dir / METRICS_FILENAME))
-        if tensorboard:
-            try:
-                backends.append(TensorBoardBackend(log_dir / "tb"))
-            except ImportError as exc:
-                raise RuntimeError(
-                    "tensorboard logging needs the 'tracking' extra: "
-                    "pip install 'tinydiffusion[tracking]'"
-                ) from exc
-        if wandb:
-            try:
-                backends.append(
-                    WandbBackend(
-                        log_dir,
-                        project=wandb_project,
-                        name=log_dir.name,
-                        config=wandb_config,
+        try:
+            if console:
+                backends.append(ConsoleBackend())
+            if jsonl:
+                backends.append(JsonlBackend(log_dir / METRICS_FILENAME))
+            if tensorboard:
+                try:
+                    backends.append(TensorBoardBackend(log_dir / "tb"))
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "tensorboard logging needs the 'tracking' extra: "
+                        "pip install 'tinydiffusion[tracking]'"
+                    ) from exc
+            if wandb:
+                try:
+                    backends.append(
+                        WandbBackend(
+                            log_dir,
+                            project=wandb_project,
+                            name=log_dir.name,
+                            config=wandb_config,
+                        )
                     )
-                )
-            except ImportError as exc:
-                raise RuntimeError(
-                    "wandb logging needs the 'tracking' extra: "
-                    "pip install 'tinydiffusion[tracking]'"
-                ) from exc
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "wandb logging needs the 'tracking' extra: "
+                        "pip install 'tinydiffusion[tracking]'"
+                    ) from exc
+        except BaseException:
+            # A backend that fails to build must not leak the ones already
+            # open: the JSONL file handle and the TensorBoard writer.
+            for backend in backends:
+                with contextlib.suppress(Exception):
+                    backend.close()
+            raise
         backends.extend(extra)
         return cls(backends)
 

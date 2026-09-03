@@ -723,3 +723,26 @@ def test_main_reports_a_missing_interpolate_checkpoint(capsys, tmp_path):
 def test_karras_spacing_is_offered_everywhere_a_spacing_is(command):
     args = build_parser().parse_args([command, "--checkpoint", "m.pt", "--spacing", "karras"])
     assert args.spacing == "karras"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("lr=1e-4,2e-4", ("lr", [1e-4, 2e-4])),
+        ("channel_mult=[1,2],[1,2,4]", ("channel_mult", [[1, 2], [1, 2, 4]])),
+        ("lr_schedule=cosine,linear", ("lr_schedule", ["cosine", "linear"])),
+        ('sampler="ddim","heun"', ("sampler", ["ddim", "heun"])),
+    ],
+)
+def test_an_axis_reads_its_values_as_toml(raw, expected):
+    from tinydiffusion.cli.options import sweep_axis
+
+    assert sweep_axis(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["lr", "=1,2", "lr=", "lr=,"])
+def test_a_malformed_axis_is_an_argument_error(raw):
+    from tinydiffusion.cli.options import sweep_axis
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        sweep_axis(raw)

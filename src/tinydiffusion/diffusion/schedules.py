@@ -57,7 +57,7 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
 
     alpha_t = 1.0 - betas
     alphabar_t = torch.cumprod(alpha_t, dim=0)
-    alphabar_prev = torch.cat([torch.ones(1), alphabar_t[:-1]])
+    alphabar_prev = torch.cat([alphabar_t.new_ones(1), alphabar_t[:-1]])
 
     posterior_var = betas * (1.0 - alphabar_prev) / (1.0 - alphabar_t)
 
@@ -135,5 +135,5 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
     sqrt_ab = floor + (sqrt_ab - last) * ((first - floor) / (first - last))
 
     alphabar = sqrt_ab.square()
-    alphas = alphabar / torch.cat([torch.ones(1, dtype=alphabar.dtype), alphabar[:-1]])
+    alphas = alphabar / torch.cat([alphabar.new_ones(1), alphabar[:-1]])
     return 1.0 - alphas

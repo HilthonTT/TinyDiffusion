@@ -40,6 +40,7 @@ __all__ = [
     "resolve_precision",
     "restore_run",
     "share_timestep_sampler",
+    "wrap_network",
 ]
 
 
@@ -204,32 +205,20 @@ def configure_backends(cfg: TrainConfig, device_type: str) -> None:
     enable_tf32()
 
 
-def build_network(
-    cfg: TrainConfig, group: Distributed, precision: Precision, say: Callable[[str], None]
-) -> tuple[Diffusion, EMA, nn.Module, DistributedDataParallel | None]:
-    """Build the process, its EMA, and the module the training step calls.
+def build_network(cfg: TrainConfig, group: Distributed) -> tuple[Diffusion, EMA]:
+    """Build the process and its EMA.
 
-    Everything that comes back shares one set of parameters. ``diffusion.net``
-    is the canonical network — what the checkpoint, the EMA and every sampler
-    read — while the module the loop actually calls may be a DDP wrapper, a
-    compiled wrapper, or both. Keeping them apart is what stops a compiled or
-    distributed run writing checkpoints whose keys all carry a ``_orig_mod.``
-    or ``module.`` prefix.
-
-    The order here is load-bearing throughout, and each step says why.
+    ``diffusion.net`` is the canonical network — what the checkpoint, the EMA
+    and every sampler read. The module the loop actually calls comes from
+    :func:`wrap_network`, and only once the weights are in their final form.
 
     Args:
         cfg: run configuration.
-        group: the training group. Outside one, no DDP wrapper is built.
-        precision: the resolved precision, for the device index DDP wants.
-        say: where the compile fallback notice goes.
+        group: the training group, for the per-rank seed.
 
     Returns:
-        ``(diffusion, ema, train_net, ddp)``. `ddp` is None outside a group,
-        and comes back separately from `train_net` because ``no_sync`` is a DDP
-        method that compiling would put a wrapper in front of.
+        ``(diffusion, ema)``, sharing one set of parameters.
     """
-    device_type = precision.device_type
     diffusion = build_model(cfg).to(cfg.device)
     share_timestep_sampler(diffusion, group)
     if group.enabled:
@@ -239,12 +228,47 @@ def build_network(
     if cfg.channels_last:
         diffusion.net.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
+    return diffusion, ema
 
-    train_net: nn.Module = diffusion.net
+
+def wrap_network(
+    net: nn.Module,
+    cfg: TrainConfig,
+    group: Distributed,
+    precision: Precision,
+    say: Callable[[str], None],
+) -> tuple[nn.Module, DistributedDataParallel | None]:
+    """Wrap the network in whatever the training step calls.
+
+    That may be a DDP wrapper, a compiled wrapper, or both. Keeping them apart
+    from the canonical network is what stops a compiled or distributed run
+    writing checkpoints whose keys all carry a ``_orig_mod.`` or ``module.``
+    prefix.
+
+    Call this after the checkpoint is restored and after any float16
+    conversion: DDP sizes and types its gradient buckets from the parameters
+    it is handed, so a network converted to half *after* wrapping produces
+    gradients the reducer rejects. Wrapping last also means DDP's own
+    parameter broadcast carries the restored weights to every rank.
+
+    Args:
+        net: the canonical network.
+        cfg: run configuration.
+        group: the training group. Outside one, no DDP wrapper is built.
+        precision: the resolved precision, for the device index DDP wants.
+        say: where the compile fallback notice goes.
+
+    Returns:
+        ``(train_net, ddp)``. `ddp` is None outside a group, and comes back
+        separately from `train_net` because ``no_sync`` is a DDP method that
+        compiling would put a wrapper in front of.
+    """
+    device_type = precision.device_type
+    train_net: nn.Module = net
     ddp: DistributedDataParallel | None = None
     if group.enabled:
         ddp = DistributedDataParallel(
-            diffusion.net,
+            net,
             device_ids=[group.local_rank] if device_type == "cuda" else None,
             output_device=group.local_rank if device_type == "cuda" else None,
             find_unused_parameters=False,
@@ -258,7 +282,7 @@ def build_network(
             "compile is on but Triton is not installed, so the CUDA backend cannot build "
             "kernels; training eagerly instead (pip install triton-windows on Windows)"
         )
-    return diffusion, ema, train_net, ddp
+    return train_net, ddp
 
 
 def parameter_sets(
@@ -294,6 +318,7 @@ def restore_run(
     sched: LRScheduler,
     full_fp16: bool,
     say: Callable[[str], None],
+    restore_rng: bool = True,
 ) -> tuple[int, float | None]:
     """Put a checkpoint's state back into a run that is ready to receive it.
 
@@ -314,6 +339,11 @@ def restore_run(
         full_fp16: whether *this* run keeps a float32 master copy. A checkpoint
             that disagrees cannot hand its optimiser moments over.
         say: where the resume notices go.
+        restore_rng: whether to put the checkpoint's RNG state back. The state
+            is the main rank's, so a distributed run passes False on every
+            other rank and leaves those on their own per-rank streams; copying
+            one rank's state to all of them would make every rank draw the
+            same noise and timesteps for different images.
 
     Returns:
         ``(start_epoch, best_val)``: the epoch to resume at, and the lowest
@@ -334,8 +364,15 @@ def restore_run(
             f"this checkpoint was trained with full_fp16={was_full_fp16}, which lays the "
             f"optimiser state out differently; resuming with fresh AdamW moments"
         )
+    # The schedule's step count is restored, but only the optimiser's own
+    # state carries the learning rate it had reached. Without that state the
+    # param groups still hold the schedule's step-0 value — zero under any
+    # warmup — until the first ``sched.step()``, which comes after the first
+    # optimiser step. Put the rate the schedule is at into the groups now.
+    for param_group, lr in zip(optim.param_groups, sched.get_last_lr(), strict=True):
+        param_group["lr"] = lr
     best_val: float | None = ckpt.get("best_val")
-    replayed = restore_rng_state(ckpt)
+    replayed = restore_rng_state(ckpt) if restore_rng else True
     say(f"resumed from {resume}, {epochs_phrase(start_epoch)} already done")
     if not replayed:
         say("this checkpoint stores no RNG state, so the random stream restarts at the seed")

@@ -477,6 +477,9 @@ class _StubGuard:
     def resolve(self):
         return InterruptChoice(stop=True, save=True)
 
+    def clear(self):
+        pass
+
 
 @pytest.fixture
 def interrupt_after(monkeypatch):
@@ -1163,3 +1166,72 @@ def test_a_failing_rank_does_not_wait_at_the_barrier(
         train_module.train(tiny_cfg)
 
     assert "barrier" not in teardown_calls
+
+
+def test_a_resume_with_fresh_moments_starts_at_the_schedule_lr(tiny_cfg, fake_loader, tmp_path):
+    """Without the optimiser's own state the param groups hold the step-0 rate.
+
+    Under any warmup that is zero, and the first optimiser step after the
+    resume would be wasted. ``restore_run`` must put the schedule's current
+    rate into the groups itself.
+    """
+    cfg = dataclasses.replace(tiny_cfg, lr_warmup=8)
+    train_module.train(cfg)
+
+    diffusion = model_module.build_model(cfg)
+    ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
+    optim = torch.optim.AdamW(diffusion.parameters(), lr=cfg.lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        optim, lr_lambda=lambda step: lr_module._warmup_lr(step, cfg.lr_warmup)
+    )
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    assert optim.param_groups[0]["lr"] == 0.0
+
+    ckpt = ckpt_module.read_checkpoint(cfg.ckpt_dir / "last.pt")
+    train_setup.restore_run(
+        ckpt,
+        resume=cfg.ckpt_dir / "last.pt",
+        diffusion=diffusion,
+        ema=ema,
+        optim=optim,
+        scaler=scaler,
+        sched=sched,
+        full_fp16=True,  # disagrees with the checkpoint, so the moments are not loaded
+        say=lambda _message: None,
+    )
+
+    assert optim.param_groups[0]["lr"] == pytest.approx(cfg.lr * 4 / 8)
+    assert optim.param_groups[0]["lr"] == pytest.approx(sched.get_last_lr()[0])
+
+
+def test_only_the_main_rank_replays_the_checkpoint_rng(tiny_cfg, tmp_path):
+    """Copying rank 0's stream to every rank would make them all draw the same noise."""
+    path = _checkpoint(tmp_path, tiny_cfg)
+    ckpt = ckpt_module.read_checkpoint(path)
+    assert ckpt.get("rng")
+
+    def restore(restore_rng):
+        diffusion = model_module.build_model(tiny_cfg)
+        ema = EMA(diffusion.net, decay=0.9, warmup=0)
+        optim = torch.optim.AdamW(diffusion.parameters(), lr=tiny_cfg.lr)
+        sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=lambda _step: 1.0)
+        scaler = torch.amp.GradScaler("cpu", enabled=False)
+        torch.manual_seed(1234)
+        train_setup.restore_run(
+            ckpt,
+            resume=path,
+            diffusion=diffusion,
+            ema=ema,
+            optim=optim,
+            scaler=scaler,
+            sched=sched,
+            full_fp16=False,
+            say=lambda _message: None,
+            restore_rng=restore_rng,
+        )
+        return torch.rand(4)
+
+    torch.manual_seed(1234)
+    own_stream = torch.rand(4)
+    assert not torch.equal(restore(True), own_stream)
+    assert torch.equal(restore(False), own_stream)

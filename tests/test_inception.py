@@ -109,3 +109,13 @@ def test_the_classifier_survives_being_moved_aside(untrained):
     """It is the head FID discards and the Inception Score needs."""
     assert untrained.net.fc.__class__.__name__ == "Identity"
     assert untrained.classifier.out_features == INCEPTION_CLASSES
+
+
+def test_the_network_rescales_imagenet_input_to_what_its_weights_expect(untrained):
+    """torchvision's ported Inception weights were trained on [-1, 1] input.
+
+    ``transform_input`` is what turns the ImageNet-normalised batch from
+    ``preprocess`` into that convention; without it every feature the metrics
+    read comes from a mis-scaled forward pass.
+    """
+    assert untrained.net.transform_input is True

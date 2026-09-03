@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -737,5 +738,68 @@ def test_the_theme_picker_survives_being_scrolled_through(cfg):
             await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_a_fresh_start_forgets_the_previous_run(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        app.apply_plan(plan_for(cfg))
+        app.apply_epoch(0, {"train/loss": 0.9, "val/loss": 0.8, "train/loss_q0": 1.0})
+        await pilot.pause()
+        assert app.train_loss.values and app.val_loss.values
+        assert app.plan is not None
+
+        app.reset_run_state()
+        await pilot.pause()
+        assert app.train_loss.values == []
+        assert app.val_loss.values == []
+        assert app.plan is None
+        assert "best" not in text_of(app.query_one("#stats"))
+        assert text_of(app.query_one("#tile-val")).strip().endswith("-")
+        assert "waiting" in text_of(app.query_one(QuartileBars))
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_quitting_a_live_run_stops_it_first(cfg):
+    class Observer:
+        stopped = False
+
+        def request_stop(self):
+            self.stopped = True
+
+    async def steps(pilot):
+        app = pilot.app
+        exits = []
+        app.exit = lambda *args, **kwargs: exits.append(True)
+        app.running = True
+        app.observer = Observer()
+        app._started = time.monotonic()
+
+        app.action_quit()
+        await pilot.pause()
+        assert app.observer.stopped
+        assert exits == []
+
+        app.training_ended(TrainingEnded(None))
+        await pilot.pause()
+        assert exits == [True]
+
+    drive(TinyDiffusionApp(cfg), steps)
+
+
+def test_elapsed_freezes_when_the_run_ends(cfg):
+    async def steps(pilot):
+        app = pilot.app
+        app.running = True
+        app.observer = None
+        app._started = time.monotonic() - 100.0
+        assert app.elapsed_seconds() >= 100.0
+        app.training_ended(TrainingEnded(None))
+        frozen = app.elapsed_seconds()
+        await pilot.pause(0.05)
+        assert app.elapsed_seconds() == frozen
 
     drive(TinyDiffusionApp(cfg), steps)

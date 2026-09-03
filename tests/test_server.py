@@ -459,3 +459,25 @@ def test_a_slot_is_released_when_a_render_fails(make_config, monkeypatch):
 
     assert first.status_code == 500
     assert second.status_code == 200
+
+
+def test_a_non_zero_eta_is_refused_before_admission_on_a_deterministic_sampler(make_config):
+    """The solver would reject it anyway, but inside render — as a 500, holding a slot."""
+    service = SamplerService(make_config(dataclasses.replace(TINY, sampler="dpmpp")))
+    with pytest.raises(ValueError, match="deterministic"):
+        service.plan(num_images=1, steps=2, eta=0.5)
+    service.plan(num_images=1, steps=2, eta=0.0)
+
+
+def test_the_sweep_spares_the_file_a_render_is_about_to_return(make_config):
+    """Two concurrent renders each prune after writing; neither may take the other's file."""
+    service = SamplerService(make_config(image_ttl=0, keep_images=1))
+    older = service.image_dir / f"{0:032x}.png"
+    newer = service.image_dir / f"{1:032x}.png"
+    older.write_bytes(b"")
+    newer.write_bytes(b"")
+    _stale(older, 10)
+
+    assert service.prune_images(keep_path=older) == 0
+    assert older.exists()
+    assert newer.exists()

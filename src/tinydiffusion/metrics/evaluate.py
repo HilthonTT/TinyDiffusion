@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from tinydiffusion.data.datasets import image_dataloader
+from tinydiffusion.data.datasets import FOLDER_DATASET, image_dataloader
 from tinydiffusion.diffusion.ddim import DEFAULT_SPACING
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
@@ -395,6 +395,26 @@ def generate_images(
 
 
 @torch.no_grad()
+def reference_dataset_id(cfg: TrainConfig) -> str:
+    """The dataset name a reference set is cached under.
+
+    For a registered dataset that is its name. A folder dataset's reference
+    images depend on how the folder is read as well: the channel count changes
+    the features, and the holdout fraction changes which files fall in each
+    split. Both go into the name, or a run with different settings on the same
+    folder would read the other's statistics back as its own.
+
+    Args:
+        cfg: the checkpoint's training configuration.
+
+    Returns:
+        A name safe to use in a cache filename.
+    """
+    if cfg.dataset == FOLDER_DATASET:
+        return f"{cfg.dataset}-c{cfg.folder_channels}-h{cfg.folder_holdout:g}"
+    return cfg.dataset
+
+
 def fid_for_checkpoint(
     checkpoint: Path,
     *,
@@ -541,9 +561,10 @@ def fid_for_checkpoint(
         extractor = extractor.to(cfg.device)
 
     root = data_root if data_root is not None else cfg.data_root
+    cache_dataset = reference_dataset_id(cfg)
     cache_path = reference_stats_path(
         root,
-        dataset=cfg.dataset,
+        dataset=cache_dataset,
         split=split,
         num_images=num_images,
         image_size=cfg.image_size,
@@ -551,7 +572,7 @@ def fid_for_checkpoint(
     )
     features_path = reference_features_path(
         root,
-        dataset=cfg.dataset,
+        dataset=cache_dataset,
         split=split,
         num_images=num_images,
         image_size=cfg.image_size,
@@ -559,7 +580,7 @@ def fid_for_checkpoint(
     )
     spatial_path = spatial_stats_path(
         root,
-        dataset=cfg.dataset,
+        dataset=cache_dataset,
         split=split,
         num_images=num_images,
         image_size=cfg.image_size,
@@ -605,6 +626,9 @@ def fid_for_checkpoint(
             stats=real_sink,
             limit=num_images,
         )
+        # The loader's workers persist for as long as the loader does; let
+        # them go now rather than keep them alive through the sampling phase.
+        del real_batches, loader
         real_bank = real_sink if isinstance(real_sink, FeatureBank) else None
         real = real_sink.stats if isinstance(real_sink, FeatureBank) else real_sink
         if cache:

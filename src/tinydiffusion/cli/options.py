@@ -113,10 +113,32 @@ def sweep_axis(value: str) -> tuple[str, list[Any]]:
     name = name.strip()
     if not sep or not name:
         raise argparse.ArgumentTypeError(f"expected field=value[,value...], got {value!r}")
-    values = [toml_value(part.strip()) for part in raw.split(",") if part.strip()]
+    values = _axis_values(raw)
     if not values:
         raise argparse.ArgumentTypeError(f"axis {name!r} has no values: {value!r}")
     return name, values
+
+
+def _axis_values(raw: str) -> list[Any]:
+    """Split the right-hand side of an axis into its values.
+
+    The whole list is first read as one TOML array, which is what lets a
+    value carry a comma of its own: ``[1,2],[1,2,4]`` is two arrays, not five
+    fragments. Only when that fails — bare words like ``cosine,linear``, which
+    TOML will not read unquoted — does it fall back to splitting on commas
+    and reading each piece as ``--set`` would.
+
+    Args:
+        raw: the text after the ``=``.
+
+    Returns:
+        The values, in the order given.
+    """
+    try:
+        parsed = tomllib.loads(f"value = [{raw}]")["value"]
+    except tomllib.TOMLDecodeError:
+        return [toml_value(part.strip()) for part in raw.split(",") if part.strip()]
+    return list(parsed)
 
 
 def add_precision_argument(parser: argparse.ArgumentParser) -> None:

@@ -349,6 +349,7 @@ def run_epoch(
                     with tqdm.external_write_mode():
                         choice = interrupts.resolve()
                 choice = cast(InterruptChoice, broadcast_object(choice, run.group))
+                interrupts.clear()
                 if not choice.stop:
                     continue
                 if choice.save:

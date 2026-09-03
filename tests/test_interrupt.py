@@ -108,3 +108,11 @@ def test_second_interrupt_while_asking_aborts(tty):
         guard.request()
         with pytest.raises(KeyboardInterrupt):
             guard.resolve(prompt=interrupting)
+
+
+def test_clear_drops_a_pending_interrupt_without_asking():
+    guard = InterruptGuard()
+    guard.request()
+    assert guard.requested
+    guard.clear()
+    assert not guard.requested

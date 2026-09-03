@@ -122,7 +122,10 @@ class InceptionFeatures(nn.Module):
         except ImportError as exc:  # pragma: no cover
             raise ImportError("computing FID needs torchvision installed") from exc
 
-        net = inception_v3(weights=weights, transform_input=False, init_weights=False)
+        # torchvision's ported Google weights expect input scaled to [-1, 1];
+        # transform_input=True maps ImageNet-normalised input to that convention,
+        # which is what torchvision itself does whenever weights are loaded.
+        net = inception_v3(weights=weights, transform_input=True, init_weights=False)
         self.classifier = net.fc
         net.fc = nn.Identity()
         net.eval()

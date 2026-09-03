@@ -236,6 +236,11 @@ class SamplerService:
             )
         if not 0.0 <= eta <= 1.0:
             raise ValueError(f"eta must lie in [0, 1], got {eta}")
+        if eta != 0.0 and self._cfg.sampler != "ddim":
+            raise ValueError(
+                f"this checkpoint samples with {self._cfg.sampler}, a deterministic "
+                f"solver, so eta must be 0, got {eta}"
+            )
         num_steps = steps if steps is not None else self._cfg.sample_steps
         if not 1 <= num_steps <= self._cfg.num_timesteps:
             raise ValueError(f"steps must lie in [1, {self._cfg.num_timesteps}], got {num_steps}")
@@ -304,10 +309,10 @@ class SamplerService:
             path,
             nrow=grid_width(plan.num_images, self._cfg.num_classes, plan.labels),
         )
-        self.prune_images()
+        self.prune_images(keep_path=path)
         return path
 
-    def prune_images(self) -> int:
+    def prune_images(self, *, keep_path: Path | None = None) -> int:
         """Delete rendered PNGs past their age or count limit.
 
         Called after each render, because nothing else ever removes these
@@ -339,6 +344,9 @@ class SamplerService:
             doomed |= {path for mtime, path in entries if now - mtime > ttl}
         if keep and len(entries) > keep:
             doomed |= {path for _, path in entries[: len(entries) - keep]}
+        # Concurrent renders each prune after writing; with a small keep count
+        # one of them would otherwise delete the file another is returning.
+        doomed.discard(keep_path)
 
         removed = 0
         for path in doomed:
@@ -356,11 +364,12 @@ class SamplerService:
             A JSON-serialisable mapping.
         """
         memory: dict[str, object] = {}
-        if torch.cuda.is_available() and torch.device(self._cfg.device).type == "cuda":
+        device = torch.device(self._cfg.device)
+        if torch.cuda.is_available() and device.type == "cuda":
             memory = {
-                "allocated_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
-                "reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
-                "name": torch.cuda.get_device_name(torch.device(self._cfg.device)),
+                "allocated_gb": round(torch.cuda.memory_allocated(device) / 1024**3, 2),
+                "reserved_gb": round(torch.cuda.memory_reserved(device) / 1024**3, 2),
+                "name": torch.cuda.get_device_name(device),
             }
         return {
             "checkpoint": str(self.config.checkpoint),

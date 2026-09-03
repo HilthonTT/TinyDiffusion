@@ -455,6 +455,11 @@ class QuartileBars(Static):
         self._values = list(values)
         self.redraw()
 
+    def clear(self) -> None:
+        """Forget the held quartiles, back to the waiting text."""
+        self._values = []
+        self.update("waiting for the first epoch")
+
     def on_resize(self) -> None:
         """Redraw: the bars are scaled to the width available."""
         if self._values:

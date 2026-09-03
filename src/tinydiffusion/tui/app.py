@@ -145,6 +145,8 @@ class TinyDiffusionApp(App[None]):
         self.plan: TrainPlan | None = None
         self._stats: dict[str, str] = {}
         self._started: float | None = None
+        self._ended: float | None = None
+        self._quitting = False
         self._restart = False
 
     def compose(self) -> ComposeResult:
@@ -243,10 +245,31 @@ class TinyDiffusionApp(App[None]):
             return
         self.running = True
         self._started = time.monotonic()
+        self._ended = None
         self.observer = TuiObserver(self)
+        self.reset_run_state()
         self.query_one(StatusBar).state = "running"
         self.log_line("[b green]starting[/b green]")
         self.train_worker()
+
+    def reset_run_state(self) -> None:
+        """Forget the previous run's numbers, so a restart charts only its own.
+
+        Every widget that accumulates over a run is emptied: the loss series,
+        the stats table, the plan, the headline tiles and the quartile bars.
+        Without this a restart draws the new run as a continuation of the old
+        one's curve, and keeps its best-val row until it is overwritten.
+        """
+        self.train_loss = Series()
+        self.val_loss = Series()
+        self.plan = None
+        self._stats = {}
+        self.query_one("#plan", Static).update(self.plan_text())
+        for tile_id in ("tile-loss", "tile-val", "tile-rate", "tile-eta", "tile-elapsed"):
+            self.tile(tile_id, "-")
+        self.query_one(QuartileBars).clear()
+        self.refresh_stats()
+        self.refresh_chart()
 
     def action_stop(self) -> None:
         """Ask the run to stop at the next batch boundary, checkpointing as it goes."""
@@ -269,6 +292,24 @@ class TinyDiffusionApp(App[None]):
             return
         self._restart = True
         self.action_stop()
+
+    def action_quit(self) -> None:  # type: ignore[override]
+        """Leave the dashboard, stopping a live run first.
+
+        The training worker is a plain thread that only checks for a stop at
+        batch boundaries, and the interpreter joins it on the way out. Quitting
+        with a run live would restore the terminal and then sit there, silently
+        training to the last epoch. So a quit while running asks the loop to
+        stop and leaves once it has; a second ``q`` while stopping is ignored
+        rather than allowed to hang.
+        """
+        if self.running and self.observer is not None:
+            if not self._quitting:
+                self._quitting = True
+                self.log_line("[yellow]stopping the run before quitting…[/yellow]")
+                self.action_stop()
+            return
+        self.exit()
 
     def action_toggle_log(self) -> None:
         """Show or hide the log pane, for when the pictures matter more."""
@@ -371,6 +412,8 @@ class TinyDiffusionApp(App[None]):
         """
         self.running = False
         self.observer = None
+        self._ended = time.monotonic()
+        self.tick()
         status = self.query_one(StatusBar)
         if message.error is not None:
             status.state = "failed"
@@ -381,6 +424,9 @@ class TinyDiffusionApp(App[None]):
             status.state = "done"
             self.log_line("[b green]training finished[/b green]")
             self.notify("training finished")
+        if self._quitting:
+            self.exit()
+            return
         if self._restart:
             self._restart = False
             self.action_start()
@@ -486,10 +532,16 @@ class TinyDiffusionApp(App[None]):
     def tick(self) -> None:
         """Once a second: move the clock-driven numbers on."""
         if self._started is not None:
-            elapsed = duration(time.monotonic() - self._started)
-            self.tile("tile-elapsed", elapsed)
+            self.tile("tile-elapsed", duration(self.elapsed_seconds()))
             if self.running:
                 self.refresh_stats()
+
+    def elapsed_seconds(self) -> float:
+        """How long the current or latest run took, frozen once it has ended."""
+        if self._started is None:
+            return 0.0
+        end = self._ended if self._ended is not None else time.monotonic()
+        return end - self._started
 
     def tile(self, tile_id: str, value: str) -> None:
         """Set one of the headline tiles.
@@ -523,7 +575,7 @@ class TinyDiffusionApp(App[None]):
         """Redraw the stats panel from whatever is currently known."""
         rows = list(self._stats.items())
         if self._started is not None:
-            rows.append(("elapsed", duration(time.monotonic() - self._started)))
+            rows.append(("elapsed", duration(self.elapsed_seconds())))
         if not rows:
             return
         self.query_one("#stats", Static).update(two_columns(rows))
