@@ -1,7 +1,6 @@
 """Building blocks shared by the UNet: normalisation, ResBlocks, attention, resampling."""
 
 from collections.abc import Callable
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -38,7 +37,7 @@ def _checkpointed(
         Whatever `body` returns.
     """
     if use_checkpoint and torch.is_grad_enabled():
-        return cast(torch.Tensor, checkpoint(body, *args, use_reentrant=False))
+        return checkpoint(body, *args, use_reentrant=False)
     return body(*args)
 
 

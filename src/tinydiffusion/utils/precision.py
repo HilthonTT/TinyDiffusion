@@ -140,7 +140,7 @@ class Autocast(nn.Module):
 
     def __init__(self, net: nn.Module, device_type: str, dtype: torch.dtype) -> None:
         super().__init__()
-        self.net = net.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
+        self.net = net.to(memory_format=torch.channels_last)
         self.device_type = device_type
         self.dtype = dtype
         self.train(net.training)

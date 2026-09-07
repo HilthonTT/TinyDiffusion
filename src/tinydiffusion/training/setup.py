@@ -226,7 +226,7 @@ def build_network(cfg: TrainConfig, group: Distributed) -> tuple[Diffusion, EMA]
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.seed + group.rank)
     if cfg.channels_last:
-        diffusion.net.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
+        diffusion.net.to(memory_format=torch.channels_last)
     ema = EMA(diffusion.net, decay=cfg.ema_decay, warmup=cfg.ema_warmup)
     return diffusion, ema
 
