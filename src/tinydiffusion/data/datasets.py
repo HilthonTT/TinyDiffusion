@@ -15,13 +15,13 @@ config by :func:`folder_spec` rather than looked up. See
 :mod:`tinydiffusion.data.folder`.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sized
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, RandomSampler
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
 
@@ -340,7 +340,8 @@ def image_dataloader(
             over ``1/num_replicas`` of the data.
         rank: this process's index in that split. Required alongside
             `num_replicas` and ignored without it.
-        seed: base seed for the distributed shuffle. Combined with the epoch
+        seed: base seed for the distributed shuffle, and for the worker seeds
+            when `generator` drives an undivided shuffle. Combined with the epoch
             that :func:`set_loader_epoch` sets, so sharded batch order is a
             function of ``(seed, epoch)`` exactly as `generator` makes it for
             the undivided loader.
@@ -379,6 +380,15 @@ def image_dataloader(
             seed=seed,
             drop_last=wants_drop_last,
         )
+        wants_shuffle = False
+    elif wants_shuffle and generator is not None:
+        # The shuffle gets the caller's generator to itself. Handed to the
+        # DataLoader, it would also feed the base seed each new iterator draws,
+        # and with persistent workers only the first epoch a process runs
+        # builds one: a resumed run's first permutation would then come one
+        # draw later than a straight run's for that epoch.
+        loader_kwargs["sampler"] = RandomSampler(cast(Sized, dataset), generator=generator)
+        generator = torch.Generator().manual_seed(seed)
         wants_shuffle = False
 
     return DataLoader(

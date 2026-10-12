@@ -65,6 +65,9 @@ def validation_batches(cfg: TrainConfig) -> list[tuple[torch.Tensor, torch.Tenso
         num_workers=0,
         shuffle=False,
         drop_last=False,
+        # Iterating draws a base seed from the generator, the global one if
+        # none is given; that would move a resumed run's restored RNG.
+        generator=torch.Generator(),
     )
     batches: list[tuple[torch.Tensor, torch.Tensor]] = []
     for index, (x, y) in enumerate(loader):
@@ -109,6 +112,7 @@ def reference_batch(cfg: TrainConfig) -> tuple[torch.Tensor | None, torch.Tensor
         num_workers=0,
         shuffle=False,
         drop_last=False,
+        generator=torch.Generator(),  # Keep the global RNG out of it, as above.
     )
     for x, y in loader:
         return x[: cfg.num_samples], y[: cfg.num_samples] if cfg.num_classes is not None else None

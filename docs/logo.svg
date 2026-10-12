@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 300" width="580" height="150" role="img" aria-label="TinyDiffusion">
+  <title>TinyDiffusion</title>
+  <style>
+    .word { font-family: 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 132px; letter-spacing: -3px; }
+    .tiny { font-weight: 300; fill: #8b8a9b; }
+    .diff { font-weight: 700; fill: url(#word); }
+  </style>
+  <defs>
+    <linearGradient id="word" x1="0" x2="1">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="0.55" stop-color="#db2777"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="300" height="300" rx="64" fill="#0f0d1a"/>
+  <rect x="22.0" y="48.0" width="22" height="22" rx="5" fill="#8738e0" fill-opacity="0.27"/>
+  <rect x="48.0" y="48.0" width="22" height="22" rx="5" fill="#9136d3" fill-opacity="0.79"/>
+  <rect x="74.0" y="48.0" width="22" height="22" rx="5" fill="#9c34c6" fill-opacity="0.78"/>
+  <rect x="100.0" y="48.0" width="22" height="22" rx="5" fill="#a632b9" fill-opacity="0.53"/>
+  <rect x="126.0" y="48.0" width="22" height="22" rx="5" fill="#b12fab" fill-opacity="0.87"/>
+  <rect x="152.0" y="48.0" width="22" height="22" rx="5" fill="#bb2d9e" fill-opacity="1.0"/>
+  <rect x="178.0" y="48.0" width="22" height="22" rx="5" fill="#c62b91" fill-opacity="0.76"/>
+  <rect x="204.0" y="48.0" width="22" height="22" rx="5" fill="#d02984" fill-opacity="0.98"/>
+  <rect x="230.0" y="48.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="1.0"/>
+  <rect x="48.0" y="74.0" width="22" height="22" rx="5" fill="#9c34c6" fill-opacity="0.55"/>
+  <rect x="74.0" y="74.0" width="22" height="22" rx="5" fill="#a632b9" fill-opacity="0.29"/>
+  <rect x="100.0" y="74.0" width="22" height="22" rx="5" fill="#b12fab" fill-opacity="0.9"/>
+  <rect x="126.0" y="74.0" width="22" height="22" rx="5" fill="#bb2d9e" fill-opacity="0.91"/>
+  <rect x="152.0" y="74.0" width="22" height="22" rx="5" fill="#c62b91" fill-opacity="0.88"/>
+  <rect x="178.0" y="74.0" width="22" height="22" rx="5" fill="#d02984" fill-opacity="0.57"/>
+  <rect x="204.0" y="74.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="0.97"/>
+  <rect x="230.0" y="74.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="1.0"/>
+  <rect x="126.0" y="100.0" width="22" height="22" rx="5" fill="#c62b91" fill-opacity="0.31"/>
+  <rect x="178.0" y="100.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="0.96"/>
+  <rect x="204.0" y="100.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="1.0"/>
+  <rect x="126.0" y="126.0" width="22" height="22" rx="5" fill="#d02984" fill-opacity="0.39"/>
+  <rect x="152.0" y="126.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="0.59"/>
+  <rect x="178.0" y="126.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="1.0"/>
+  <rect x="22.0" y="152.0" width="22" height="22" rx="5" fill="#b12fab" fill-opacity="0.4"/>
+  <rect x="100.0" y="152.0" width="22" height="22" rx="5" fill="#d02984" fill-opacity="0.21"/>
+  <rect x="126.0" y="152.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="0.82"/>
+  <rect x="152.0" y="152.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="1.0"/>
+  <rect x="100.0" y="178.0" width="22" height="22" rx="5" fill="#db2777" fill-opacity="0.45"/>
+  <rect x="126.0" y="178.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="0.72"/>
+  <rect x="22.0" y="204.0" width="22" height="22" rx="5" fill="#c62b91" fill-opacity="0.34"/>
+  <rect x="100.0" y="204.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="0.78"/>
+  <rect x="126.0" y="204.0" width="22" height="22" rx="5" fill="#e1415f" fill-opacity="1.0"/>
+  <rect x="100.0" y="230.0" width="22" height="22" rx="5" fill="#e1415f" fill-opacity="0.78"/>
+  <rect x="126.0" y="230.0" width="22" height="22" rx="5" fill="#e44f53" fill-opacity="0.82"/>
+  <rect x="48.0" y="256.0" width="22" height="22" rx="5" fill="#de346b" fill-opacity="0.31"/>
+  <rect x="100.0" y="256.0" width="22" height="22" rx="5" fill="#e44f53" fill-opacity="0.36"/>
+  <text class="word" x="340" y="196"><tspan class="tiny">Tiny</tspan><tspan class="diff">Diffusion</tspan></text>
+</svg>

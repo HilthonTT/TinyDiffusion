@@ -541,6 +541,14 @@ def fid_for_checkpoint(
         raise ValueError(f"num_images must be at least 2 for a covariance, got {num_images}")
     if split not in ("test", "train"):
         raise ValueError(f"unknown split {split!r}, expected 'test' or 'train'")
+    # Checked here rather than left to the scorers, which only run once every
+    # sample has been drawn.
+    if kid and kid_subsets < 1:
+        raise ValueError(f"kid_subsets must be at least 1, got {kid_subsets}")
+    if kid and kid_subset_size < 2:
+        raise ValueError(f"kid_subset_size must be at least 2, got {kid_subset_size}")
+    if inception_score and not 1 <= is_splits <= num_images:
+        raise ValueError(f"cannot split {num_images} samples into {is_splits} chunks")
 
     diffusion, ema, cfg = load_for_sampling(checkpoint, device)
     net = ema.module if use_ema else diffusion.net

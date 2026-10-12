@@ -43,6 +43,13 @@ __all__ = [
     "sweep_summary",
 ]
 
+DONE_FILENAME = ".sweep-done"
+"""Written into a point's log directory once its training returns.
+
+The metrics file alone cannot say a point finished: it is created when training
+starts, so a point that crashed or was interrupted has one too.
+"""
+
 DIRECTORY_FIELDS = ("log_dir", "ckpt_dir", "out_dir")
 """Config fields the sweep sets itself, and so cannot be swept over.
 
@@ -157,8 +164,9 @@ def sweep_points(
 
     Raises:
         ValueError: if an axis names one of :data:`DIRECTORY_FIELDS`, names no
-            config field, offers no values, or repeats a field; or if a
-            combination is not a valid config.
+            config field, offers no values, or repeats a field; if two
+            combinations would share a directory; or if a combination is not a
+            valid config.
     """
     seen: set[str] = set()
     known = {f.name for f in dataclasses.fields(TrainConfig)}
@@ -181,6 +189,11 @@ def sweep_points(
     for combination in itertools.product(*(values for _, values in axes)):
         overrides = dict(zip(fields, combination, strict=True))
         name = point_name(overrides)
+        if any(point.name == name for point in points):
+            raise ValueError(
+                f"two points would share the directory {name!r}; an axis repeats a "
+                "value, or two values differ only in characters a path cannot hold"
+            )
         directory = root / name
         config = TrainConfig.from_mapping(
             {
@@ -230,10 +243,11 @@ def run_sweep(
         points: the grid, from :func:`sweep_points`.
         train: what to run for each point. Injected rather than imported so a
             test need not train anything.
-        skip_existing: leave a point alone if its log directory already holds
-            metrics. This is what makes a sweep resumable after an interrupt,
-            and it reads the existing numbers rather than pretending the point
-            did not happen.
+        skip_existing: leave a point alone if it already finished, which is
+            what makes a sweep resumable after an interrupt. A point that was
+            cut short is trained again rather than reported from its partial
+            metrics. A finished point's existing numbers are read rather than
+            pretending it did not happen.
         say: where progress lines go.
 
     Yields:
@@ -246,7 +260,7 @@ def run_sweep(
     """
     for index, point in enumerate(points, start=1):
         prefix = f"[{index}/{len(points)}] {point.name}"
-        if skip_existing and (point.log_dir / METRICS_FILENAME).exists():
+        if skip_existing and (point.log_dir / DONE_FILENAME).exists():
             say(f"{prefix}: already run, skipping")
             best, epochs = _best_val_loss(point.log_dir)
             yield SweepRun(point=point, best_val_loss=best, epochs=epochs)
@@ -263,6 +277,8 @@ def run_sweep(
             yield SweepRun(point=point, error=exc)
             continue
 
+        point.log_dir.mkdir(parents=True, exist_ok=True)
+        (point.log_dir / DONE_FILENAME).touch()
         best, epochs = _best_val_loss(point.log_dir)
         yield SweepRun(point=point, best_val_loss=best, epochs=epochs)
 

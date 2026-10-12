@@ -199,6 +199,8 @@ def test_too_many_steps_are_refused(client):
         {"guidance": -1.0},
         {"guidance_rescale": 1.5},
         {"guidance_rescale": -0.5},
+        {"seed": 2**64},
+        {"seed": -(2**63) - 1},
     ],
 )
 def test_the_schema_rejects_impossible_requests(client, payload):

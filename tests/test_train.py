@@ -202,7 +202,11 @@ def shuffling_loader(monkeypatch):
             return -(-len(images) // self.batch_size)
 
     _patch_loader(
-        monkeypatch, lambda *a, batch_size=4, generator=None, **k: Loader(batch_size, generator)
+        monkeypatch,
+        # The fixed reads pass a generator too, but only the training loader shuffles.
+        lambda *a, batch_size=4, generator=None, shuffle=None, **k: Loader(
+            batch_size, None if shuffle is False else generator
+        ),
     )
     return images, labels
 
@@ -508,6 +512,49 @@ def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loade
     assert not torch.equal(complete["model"][key], partial["model"][key])
 
 
+def test_an_interrupt_saves_the_counters_the_replayed_epoch_starts_from(
+    tiny_cfg, fake_loader, interrupt_after
+):
+    """The resume replays the whole epoch, so it must not count its batches twice.
+
+    Saved with the counters as they stood mid-epoch, a cosine schedule reached
+    zero that many steps before the end of the resumed run.
+    """
+    interrupt_after(2)
+    train_module.train(tiny_cfg)
+
+    complete = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
+    partial = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT)
+    assert partial["epoch"] == complete["epoch"]
+    assert partial["sched"]["last_epoch"] == complete["sched"]["last_epoch"]
+    assert partial["ema_step"] == complete["ema_step"]
+    assert partial["optim"]["param_groups"][0]["lr"] == pytest.approx(
+        complete["optim"]["param_groups"][0]["lr"]
+    )
+
+
+def test_checkpoint_paths_use_forward_slashes(tiny_cfg, fake_loader):
+    """A checkpoint written on Windows has to resume on Linux too."""
+    train_module.train(dataclasses.replace(tiny_cfg, num_epochs=1))
+    config = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)["config"]
+    assert config["log_dir"] == tiny_cfg.log_dir.as_posix()
+    assert "\\" not in config["ckpt_dir"]
+
+
+def test_reading_the_held_out_slice_leaves_the_global_rng_alone(tiny_cfg, monkeypatch):
+    """A resume restores the RNG before this runs; drawing from it would undo that."""
+    from tinydiffusion.data import datasets as datasets_module
+
+    images = [(torch.zeros(1, 16, 16), 0) for _ in range(4)]
+    monkeypatch.setattr(datasets_module, "image_dataset", lambda *a, **k: images)
+    torch.manual_seed(0)
+    expected = torch.rand(1)
+    torch.manual_seed(0)
+    train_module.validation_batches(tiny_cfg)
+    train_module.reference_batch(dataclasses.replace(tiny_cfg, sample_every=1))
+    assert torch.equal(torch.rand(1), expected)
+
+
 def test_an_interrupt_in_the_first_epoch_writes_no_last(tiny_cfg, fake_loader, interrupt_after):
     interrupt_after(1)
     train_module.train(tiny_cfg)
@@ -599,8 +646,10 @@ def shuffle_seeds(monkeypatch):
         def __len__(self):
             return len(batches)
 
-    def loader(*a, generator=None, **k):
-        return RecordingLoader(generator) if generator is not None else batches
+    def loader(*a, generator=None, shuffle=None, **k):
+        if generator is None or shuffle is False:
+            return batches
+        return RecordingLoader(generator)
 
     _patch_loader(monkeypatch, loader)
     return seeds

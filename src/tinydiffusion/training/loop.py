@@ -237,6 +237,27 @@ class EpochOutcome(NamedTuple):
     quartile_counts: torch.Tensor
 
 
+def rewind_to_epoch_start(run: Run, sched_state: dict[str, object], ema_step: int) -> None:
+    """Put the step counters back where the epoch began, ahead of a mid-epoch save.
+
+    :data:`~tinydiffusion.training.checkpoints.INTERRUPTED_CHECKPOINT` is saved
+    under the previous epoch's number and resumed by replaying this epoch from
+    its first batch. Left as they are, the LR schedule and the EMA warmup would
+    count the batches already run here a second time, and a cosine schedule
+    would reach zero that many steps before the run ends. Only called on the
+    way out, since the run does not go on from here.
+
+    Args:
+        run: the assembled run state.
+        sched_state: the scheduler's state when the epoch started.
+        ema_step: the EMA's step count when the epoch started.
+    """
+    run.sched.load_state_dict(sched_state)
+    for group, lr in zip(run.optim.param_groups, run.sched.get_last_lr(), strict=True):
+        group["lr"] = lr
+    run.ema.step = ema_step
+
+
 def run_epoch(
     run: Run,
     loader: DataLoader[tuple[torch.Tensor, int]],
@@ -273,6 +294,8 @@ def run_epoch(
     epoch_start = time.perf_counter()
     images = 0
     cancelled = False
+    sched_at_start = run.sched.state_dict()
+    ema_step_at_start = run.ema.step
     pending: list[dict[str, torch.Tensor | float]] = []
     quartile_sums = torch.zeros(4, device=cfg.device)
     quartile_counts = torch.zeros(4, device=cfg.device)
@@ -321,6 +344,7 @@ def run_epoch(
                     )
                 if stopping:
                     if run.group.is_main:
+                        rewind_to_epoch_start(run, sched_at_start, ema_step_at_start)
                         save_and_report(
                             cfg,
                             epoch=epoch - 1,
@@ -354,6 +378,7 @@ def run_epoch(
                     continue
                 if choice.save:
                     if run.group.is_main:
+                        rewind_to_epoch_start(run, sched_at_start, ema_step_at_start)
                         save_and_report(
                             cfg,
                             epoch=epoch - 1,

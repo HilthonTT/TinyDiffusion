@@ -570,8 +570,8 @@ def _add_sweep(subparsers: Subparsers) -> None:
     sweep.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Leave a point alone if its directory already holds metrics, which "
-        "is how an interrupted sweep is resumed without redoing what finished.",
+        help="Leave a point alone if it already finished, which is how an "
+        "interrupted sweep is resumed without redoing what finished.",
     )
     sweep.add_argument("--seed", type=int, help="Random seed, overriding the config.")
     sweep.add_argument("--device", help="Device to train on, e.g. 'cuda' or 'cpu'.")

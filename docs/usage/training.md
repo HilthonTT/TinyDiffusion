@@ -224,7 +224,7 @@ directory names:
 | `--set` | — | Override a field for every point, repeatable |
 | `--out-root` | `runs/sweep` | Directory the points are created under |
 | `--dry-run` | off | Print the grid without training anything |
-| `--skip-existing` | off | Leave a point alone if its directory already holds metrics |
+| `--skip-existing` | off | Leave a point alone if it already finished |
 | `--seed` | the config's | Random seed |
 | `--device` | the config's | `cuda`, `cpu`, … |
 | `--epochs` | the config's | Epochs per point |
@@ -237,9 +237,10 @@ Three things worth knowing:
   memory is a fact about that point, and losing five good runs to it would be
   the wrong trade; the failure is reported in the summary and the sweep exits
   non-zero. `Ctrl+C` is different — that ends the sweep, not the point.
-- **`--skip-existing` resumes it.** A point whose directory already holds
-  `metrics.jsonl` is left alone and its existing numbers read, so an interrupted
-  sweep continues rather than restarting. Axes over `log_dir`, `ckpt_dir` or
+- **`--skip-existing` resumes it.** A point that finished (its log directory
+  holds a `.sweep-done` marker) is left alone and its existing numbers read, so
+  an interrupted sweep continues rather than restarting. A point that was cut
+  short is trained again from scratch. Axes over `log_dir`, `ckpt_dir` or
   `out_dir` are refused: those are the thing the sweep is setting.
 
 ### Stopping a run early

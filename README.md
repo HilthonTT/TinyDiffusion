@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="TinyDiffusion" width="480">
+</p>
+
 # TinyDiffusion
 
 [![CI](https://github.com/HilthonTT/TinyDiffusion/actions/workflows/ci.yml/badge.svg)](https://github.com/HilthonTT/TinyDiffusion/actions/workflows/ci.yml)

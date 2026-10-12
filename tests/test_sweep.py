@@ -3,6 +3,7 @@ import json
 import pytest
 
 from tinydiffusion.sweep import (
+    DONE_FILENAME,
     SweepRun,
     point_name,
     run_sweep,
@@ -88,6 +89,13 @@ def test_a_repeated_axis_is_refused(tmp_path):
         sweep_points(BASE, [("lr", [1e-4]), ("lr", [2e-4])], tmp_path)
 
 
+@pytest.mark.parametrize("values", [[1e-4, 0.0001], ["a/b", "a:b"]])
+def test_points_that_would_share_a_directory_are_refused(tmp_path, values):
+    field = "lr" if isinstance(values[0], float) else "data_root"
+    with pytest.raises(ValueError, match="share the directory"):
+        sweep_points(BASE, [(field, values)], tmp_path)
+
+
 def test_an_untrainable_combination_fails_at_expansion(tmp_path):
     """Better than discovering it after the points before it have run."""
     with pytest.raises(ValueError, match="guidance"):
@@ -154,12 +162,35 @@ def test_skip_existing_leaves_a_finished_point_alone(tmp_path):
     """What makes an interrupted sweep resumable rather than restartable."""
     points = sweep_points(BASE, [("lr", [1e-4, 2e-4])], tmp_path)
     write_metrics(points[0].log_dir, {"val/loss": 0.25})
+    (points[0].log_dir / DONE_FILENAME).touch()
 
     trained = []
     runs = list(run_sweep(points, train=trained.append, skip_existing=True, say=lambda _: None))
 
     assert [cfg.lr for cfg in trained] == [2e-4]
     assert runs[0].best_val_loss == pytest.approx(0.25)
+
+
+def test_skip_existing_retrains_a_point_that_was_cut_short(tmp_path):
+    """Metrics are written from the first epoch, so they do not mean finished."""
+    points = sweep_points(BASE, [("lr", [1e-4])], tmp_path)
+    write_metrics(points[0].log_dir, {"val/loss": 0.9})
+
+    trained = []
+    list(run_sweep(points, train=trained.append, skip_existing=True, say=lambda _: None))
+    assert len(trained) == 1
+
+
+def test_a_point_that_trains_is_marked_finished(tmp_path):
+    points = sweep_points(BASE, [("lr", [1e-4, 2e-4])], tmp_path)
+
+    def train(cfg):
+        if cfg.lr == 2e-4:
+            raise RuntimeError("out of memory")
+
+    list(run_sweep(points, train=train, say=lambda _: None))
+    assert (points[0].log_dir / DONE_FILENAME).exists()
+    assert not (points[1].log_dir / DONE_FILENAME).exists()
 
 
 def test_skip_existing_is_off_by_default(tmp_path):

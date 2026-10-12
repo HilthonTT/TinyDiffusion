@@ -49,7 +49,8 @@ class SampleRequest(BaseModel):
     guidance_rescale: float | None = Field(default=None, ge=0.0, le=1.0)
     steps: int | None = Field(default=None, ge=1)
     eta: float = Field(default=0.0, ge=0.0, le=1.0)
-    seed: int | None = None
+    # The range torch.Generator.manual_seed accepts; past it, it overflows.
+    seed: int | None = Field(default=None, ge=-(2**63), le=2**64 - 1)
 
 
 class SampleResponse(BaseModel):

@@ -139,7 +139,11 @@ def save_checkpoint(
             "optim": optim.state_dict(),
             "scaler": scaler.state_dict(),
             "sched": sched.state_dict() if sched is not None else None,
-            "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
+            "config": {
+                # POSIX separators, so a checkpoint written on Windows resumes elsewhere.
+                k: v.as_posix() if isinstance(v, Path) else v
+                for k, v in asdict(cfg).items()
+            },
             "best_val": best_val,
             "rng": rng_state(),
         },

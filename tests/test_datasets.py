@@ -79,6 +79,31 @@ def test_the_training_split_shuffles_and_drops_the_ragged_batch(fake_dataset):
     assert sum(x.shape[0] for x, _ in loader) == 8
 
 
+def test_a_resumed_run_shuffles_like_a_straight_one_with_persistent_workers(monkeypatch):
+    """Reseeding per epoch has to give the same order however many epochs ran.
+
+    With persistent workers, only the first epoch a process runs builds an
+    iterator, and building one draws a base seed. Drawn from the shuffle's own
+    generator, that put a resumed run's permutation one draw off.
+    """
+    monkeypatch.setattr(
+        datasets_module, "image_dataset", lambda *a, **k: [(torch.zeros(1), i) for i in range(10)]
+    )
+
+    def orders(start, epochs=3):
+        rng = torch.Generator()
+        loader = datasets_module.image_dataloader(
+            MNIST, train=True, batch_size=10, num_workers=2, generator=rng, pin_memory=False
+        )
+        seen = {}
+        for epoch in range(start, epochs):
+            rng.manual_seed(1000 + epoch)
+            seen[epoch] = next(iter(loader))[1].tolist()
+        return seen
+
+    assert orders(start=0)[2] == orders(start=2)[2]
+
+
 def test_scoring_can_keep_every_image_in_order(fake_dataset):
     loader = datasets_module.image_dataloader(
         MNIST, train=True, batch_size=4, num_workers=0, shuffle=False, drop_last=False

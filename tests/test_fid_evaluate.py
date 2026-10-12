@@ -259,6 +259,25 @@ def test_too_few_images_is_rejected(checkpoint, extractor):
         fid_for_checkpoint(checkpoint, num_images=1, extractor=extractor, progress=False)
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"kid": True, "kid_subsets": 0},
+        {"kid": True, "kid_subset_size": 1},
+        {"inception_score": True, "is_splits": 0},
+        {"inception_score": True, "num_images": 4, "is_splits": 5},
+    ],
+)
+def test_impossible_extra_metric_options_fail_before_any_sampling(tmp_path, options):
+    """Caught up front, not after every sample has been drawn and thrown away.
+
+    The checkpoint does not exist, so reaching the point of loading it would
+    raise something else entirely.
+    """
+    with pytest.raises(ValueError):
+        fid_for_checkpoint(tmp_path / "missing.pt", progress=False, **options)
+
+
 def test_unknown_split_is_rejected(checkpoint, extractor):
     with pytest.raises(ValueError, match="unknown split"):
         fid_for_checkpoint(checkpoint, split="valid", extractor=extractor, progress=False)
