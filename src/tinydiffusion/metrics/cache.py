@@ -12,10 +12,13 @@ see :meth:`~tinydiffusion.metrics.fid.FeatureStats.state_dict` — so a restored
 set is indistinguishable from a freshly computed one, including for
 :meth:`~tinydiffusion.metrics.fid.FeatureStats.merge`.
 
-Every input that moves the statistics is in the filename, which is what makes a
-stale entry impossible rather than merely unlikely: change the resolution or
-the extractor and the key changes with it. A file that cannot be read, or that
-does not describe what its name claims, is treated as absent and recomputed.
+Every setting a caller chooses is in the filename: change the resolution, the
+split, the image count or the extractor's class and the key changes with it. A
+file that cannot be read, or that does not describe what its name claims, is
+treated as absent and recomputed. What the key cannot see is a change under
+the same settings — different weights behind the same extractor class, a folder
+dataset whose files changed, a change to how features are read. The last is
+what :data:`_FORMAT` is bumped for; the first two need the cache deleted.
 
 An entry is not small: the second moment is ``dim x dim`` in float64, so
 Inception's 2048 features come to about 33 MB however many images went into it.
@@ -61,8 +64,13 @@ __all__ = [
 CACHE_DIRNAME = "fid_cache"
 """Subdirectory of the dataset root the cached statistics live in."""
 
-_FORMAT = 2
-"""Payload version. A file written by a different one is recomputed, not read."""
+_FORMAT = 3
+"""Payload version. A file written by a different one is recomputed, not read.
+
+3: sFID's spatial features moved from ``Mixed_6e`` to ``Mixed_6d.branch1x1``,
+the layer Nash et al. define it on, so every cached spatial entry before it
+describes the wrong feature map.
+"""
 
 
 def extractor_id(extractor: FeatureExtractor) -> str:

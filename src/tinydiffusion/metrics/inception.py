@@ -38,10 +38,15 @@ SFID_CHANNELS = 7
 """Intermediate channels sFID keeps.
 
 Nash et al. 2021 (https://arxiv.org/abs/2103.03841) take the first seven
-channels of the mixed 6/conv feature map rather than all 768, which is what
+channels of the mixed_6/conv feature map rather than all 768, which is what
 keeps the feature width comparable to FID's 2048 and the covariance the same
 size of problem. Seven is theirs; there is nothing special about the number
 beyond the width it lands on.
+
+In the TensorFlow graph that name comes from, ``mixed`` through ``mixed_7``
+are torchvision's ``Mixed_5b`` through ``Mixed_6e`` in order, so ``mixed_6``
+is ``Mixed_6d`` and its ``conv`` is the block's 1x1 branch, ``branch1x1``. One
+block later, ``Mixed_6e``, is a different feature map of the same shape.
 """
 
 SFID_SPATIAL = 17
@@ -184,9 +189,10 @@ class InceptionFeatures(nn.Module):
     def analyse(self, images: torch.Tensor) -> InceptionOutputs:
         """Run one pass and return every reading the metrics take from it.
 
-        The spatial map is captured with a forward hook on the block that
-        produces it rather than by re-implementing Inception's forward, which
-        would be a copy of torchvision's to keep in step with torchvision's.
+        The spatial map is captured with a forward hook on the layer that
+        produces it — ``Mixed_6d.branch1x1``, see :data:`SFID_CHANNELS` —
+        rather than by re-implementing Inception's forward, which would be a
+        copy of torchvision's to keep in step with torchvision's.
 
         Args:
             images: ``(B, C, H, W)`` in [-1, 1].
@@ -196,7 +202,7 @@ class InceptionFeatures(nn.Module):
             probabilities, all for the same images in the same order.
         """
         captured: list[torch.Tensor] = []
-        handle = self.net.Mixed_6e.register_forward_hook(
+        handle = self.net.Mixed_6d.branch1x1.register_forward_hook(
             lambda _module, _inputs, output: captured.append(output)
         )
         try:

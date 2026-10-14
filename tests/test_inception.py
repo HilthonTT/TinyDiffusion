@@ -5,7 +5,9 @@ from tinydiffusion.metrics.inception import (
     INCEPTION_CLASSES,
     INCEPTION_DIM,
     INCEPTION_SIZE,
+    SFID_CHANNELS,
     SFID_DIM,
+    SFID_SPATIAL,
     FeatureExtractor,
     InceptionFeatures,
 )
@@ -98,11 +100,25 @@ def test_the_spatial_head_keeps_geometry_the_pooled_one_averages_away(untrained)
     assert spatial_shift > pooled_shift
 
 
+def test_the_spatial_features_are_read_where_nash_et_al_define_them(untrained):
+    """mixed_6/conv in the TF graph is torchvision's Mixed_6d.branch1x1."""
+    seen = []
+    handle = untrained.net.Mixed_6d.branch1x1.register_forward_hook(
+        lambda _m, _i, output: seen.append(output)
+    )
+    try:
+        out = untrained.analyse(torch.rand(2, 1, 8, 8) * 2 - 1)
+    finally:
+        handle.remove()
+    assert seen[0].shape[-2:] == (SFID_SPATIAL, SFID_SPATIAL)
+    assert torch.equal(out.spatial, seen[0][:, :SFID_CHANNELS].flatten(1))
+
+
 def test_analyse_leaves_no_hook_behind(untrained):
     """A hook left registered would append to a dead list on the next call."""
     untrained.analyse(torch.zeros(1, 1, 8, 8))
     untrained.analyse(torch.zeros(1, 1, 8, 8))
-    assert not untrained.net.Mixed_6e._forward_hooks
+    assert not untrained.net.Mixed_6d.branch1x1._forward_hooks
 
 
 def test_the_classifier_survives_being_moved_aside(untrained):
