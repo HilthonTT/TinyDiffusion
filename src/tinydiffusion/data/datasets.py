@@ -432,3 +432,21 @@ def denormalize(x: torch.Tensor) -> torch.Tensor:
         The same shape, clamped to [0, 1].
     """
     return (x + 1.0).div(2.0).clamp(0.0, 1.0)
+
+
+def quantize(x: torch.Tensor) -> torch.Tensor:
+    """Round model-space images to the nearest 8-bit level, staying in [-1, 1].
+
+    A real image reaches the model as ``u / 127.5 - 1`` for some integer pixel
+    ``u`` in 0..255; this snaps a sample onto the same grid. Anything scored
+    against real images should go through here first, or the two sides differ
+    in a way no image file ever would. The rounding matches what
+    :func:`torchvision.utils.save_image` does when writing a PNG.
+
+    Args:
+        x: tensor of any shape produced by the sampler.
+
+    Returns:
+        The same shape, clamped to [-1, 1] and on the 256-level grid.
+    """
+    return ((x + 1.0) * 127.5).round().clamp(0.0, 255.0).div(127.5).sub(1.0)

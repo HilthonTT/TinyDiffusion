@@ -10,6 +10,7 @@ from tinydiffusion.data import (
     dataset_spec,
     denormalize,
     image_transform,
+    quantize,
 )
 from tinydiffusion.data import datasets as datasets_module
 
@@ -135,3 +136,17 @@ def test_denormalize_inverts_the_transform():
 def test_denormalize_clamps_out_of_range_samples():
     out = denormalize(torch.tensor([-4.0, 4.0]))
     assert torch.equal(out, torch.tensor([0.0, 1.0]))
+
+
+def test_quantize_lands_on_the_grid_real_images_are_decoded_onto():
+    # What ToTensor + Normalize make of every 8-bit pixel value.
+    levels = torch.arange(256, dtype=torch.float32) / 255.0 * 2.0 - 1.0
+    noisy = levels + torch.empty_like(levels).uniform_(-0.003, 0.003)
+    assert torch.allclose(quantize(noisy), levels, atol=1e-6)
+
+
+def test_quantize_matches_what_a_saved_png_holds():
+    x = torch.rand(1, 3, 8, 8) * 2.2 - 1.1
+    # save_image's own conversion: scale to 0..255, add 0.5, clamp, truncate.
+    saved = denormalize(x).mul(255).add(0.5).clamp(0, 255).to(torch.uint8)
+    assert torch.allclose(quantize(x), saved.float() / 127.5 - 1.0, atol=1e-6)

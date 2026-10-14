@@ -12,6 +12,7 @@ from tinydiffusion.data.datasets import (
     image_dataloader,
     image_dataset,
     image_transform,
+    quantize,
     set_loader_epoch,
 )
 from tinydiffusion.data.folder import (
@@ -38,6 +39,7 @@ __all__ = [
     "image_dataset",
     "image_transform",
     "load_folder",
+    "quantize",
     "scan_folder",
     "set_loader_epoch",
 ]

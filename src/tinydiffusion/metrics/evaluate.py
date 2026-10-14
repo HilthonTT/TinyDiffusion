@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from tinydiffusion.data.datasets import FOLDER_DATASET, image_dataloader
+from tinydiffusion.data.datasets import FOLDER_DATASET, image_dataloader, quantize
 from tinydiffusion.diffusion.ddim import DEFAULT_SPACING
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
@@ -364,7 +364,8 @@ def generate_images(
             :data:`~tinydiffusion.diffusion.ddim.SPACINGS`.
 
     Yields:
-        ``(b, C, image_size, image_size)`` batches in [-1, 1].
+        ``(b, C, image_size, image_size)`` batches in [-1, 1], rounded to the
+        256 levels an 8-bit image can hold.
     """
     draw = get_sampler(sampler)
     produced = 0
@@ -375,21 +376,26 @@ def generate_images(
             if cfg.num_classes is None
             else torch.arange(produced, produced + batch, device=cfg.device) % cfg.num_classes
         )
-        yield draw(
-            diffusion,
-            batch,
-            (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
-            cfg.device,
-            num_steps=num_steps,
-            eta=eta,
-            model=conditioned(
-                net,
-                y,
-                num_classes=cfg.num_classes,
-                scale=guidance,
-                rescale=guidance_rescale,
-            ),
-            spacing=spacing,
+        # Quantized, because the reference side is decoded from 8-bit images:
+        # scoring raw floats against it would measure a difference no saved
+        # sample has.
+        yield quantize(
+            draw(
+                diffusion,
+                batch,
+                (cfg.dataset_spec().channels, cfg.image_size, cfg.image_size),
+                cfg.device,
+                num_steps=num_steps,
+                eta=eta,
+                model=conditioned(
+                    net,
+                    y,
+                    num_classes=cfg.num_classes,
+                    scale=guidance,
+                    rescale=guidance_rescale,
+                ),
+                spacing=spacing,
+            )
         )
         produced += batch
 

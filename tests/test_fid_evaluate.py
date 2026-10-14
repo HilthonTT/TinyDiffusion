@@ -132,6 +132,9 @@ def test_generate_images_yields_exactly_what_was_asked(checkpoint, extractor):
     )
     assert [b.shape[0] for b in produced] == [3, 3, 1]
     assert all(b.shape[1:] == (1, cfg.image_size, cfg.image_size) for b in produced)
+    # Rounded to 8-bit levels, like the real images they are scored against.
+    levels = torch.cat(produced).add(1.0).mul(127.5)
+    assert torch.allclose(levels, levels.round(), atol=1e-4)
 
 
 def test_the_generated_class_mix_stays_balanced_across_batches(make_checkpoint, monkeypatch):
