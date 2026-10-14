@@ -1,6 +1,7 @@
 import argparse
 import builtins
 import dataclasses
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +29,20 @@ def test_the_version_flag_prints_the_version(capsys):
         build_parser().parse_args(["--version"])
     assert exit_info.value.code == 0
     assert capsys.readouterr().out.strip() == f"tinydiffusion {__version__}"
+
+
+@pytest.mark.parametrize("module", ["tinydiffusion", "tinydiffusion.cli"])
+def test_the_package_runs_as_a_module(module):
+    # scripts/run.sh and run.ps1 launch `-m tinydiffusion.cli`, and torchrun
+    # needs `-m tinydiffusion`; neither path goes through the console script.
+    result = subprocess.run(
+        [sys.executable, "-m", module, "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"tinydiffusion {__version__}"
 
 
 def test_the_short_version_flag_matches():
