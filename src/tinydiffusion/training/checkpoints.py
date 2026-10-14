@@ -11,6 +11,7 @@ Everything here is loop-free, so sampling, evaluation and the server can read a
 checkpoint without importing :mod:`tinydiffusion.training.train`.
 """
 
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ __all__ = [
     "LAST_CHECKPOINT",
     "check_resume_compatible",
     "config_from_checkpoint",
+    "copy_checkpoint",
     "load_checkpoint",
     "read_checkpoint",
     "restore_checkpoint",
@@ -150,6 +152,27 @@ def save_checkpoint(
         tmp,
     )
     tmp.replace(path)
+
+
+def copy_checkpoint(source: Path, dest: Path) -> None:
+    """Copy a checkpoint so that `dest` is only ever whole or untouched.
+
+    Copied beside `dest` first and renamed over it, the way
+    :func:`save_checkpoint` writes: a crash mid-copy straight onto ``best.pt``
+    would leave a truncated file under the name people sample from, and
+    nothing would rewrite it until the next new best.
+
+    Args:
+        source: the checkpoint to copy.
+        dest: where it should end up.
+    """
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        shutil.copy2(source, tmp)
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def rng_state() -> dict[str, Any]:

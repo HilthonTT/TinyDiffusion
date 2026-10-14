@@ -6,7 +6,6 @@ grid in particular is worth drawing on its own, after the fact, from a
 checkpoint.
 """
 
-import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -19,7 +18,11 @@ from tinydiffusion.data.datasets import denormalize
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
 from tinydiffusion.diffusion.samplers import get_sampler
-from tinydiffusion.training.checkpoints import INTERRUPTED_CHECKPOINT, save_checkpoint
+from tinydiffusion.training.checkpoints import (
+    INTERRUPTED_CHECKPOINT,
+    copy_checkpoint,
+    save_checkpoint,
+)
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.plan import epochs_phrase
@@ -48,7 +51,7 @@ def snapshot_epoch(ckpt_dir: Path, source: Path, *, epoch: int, keep: int) -> No
     """
     if keep <= 0 or not source.is_file():
         return
-    shutil.copy2(source, ckpt_dir / f"epoch_{epoch + 1:04d}.pt")
+    copy_checkpoint(source, ckpt_dir / f"epoch_{epoch + 1:04d}.pt")
     snapshots = sorted(ckpt_dir.glob("epoch_*.pt"))
     for stale in snapshots[: max(len(snapshots) - keep, 0)]:
         stale.unlink(missing_ok=True)

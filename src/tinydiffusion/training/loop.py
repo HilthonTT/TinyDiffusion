@@ -7,7 +7,6 @@ here takes one of those and does a batch, an epoch, or the bookkeeping that
 follows one.
 """
 
-import shutil
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
@@ -33,6 +32,7 @@ from tinydiffusion.training.artifacts import (
 from tinydiffusion.training.checkpoints import (
     BEST_CHECKPOINT,
     LAST_CHECKPOINT,
+    copy_checkpoint,
     save_checkpoint,
 )
 from tinydiffusion.training.config import TrainConfig
@@ -551,5 +551,5 @@ def finish_epoch(
 
     if new_best is not None and cfg.keep_best:
         best = cfg.ckpt_dir / BEST_CHECKPOINT
-        shutil.copy2(last, best)
+        copy_checkpoint(last, best)
         run.say(f"val/loss {new_best:.5f} is a new best; wrote {best}")

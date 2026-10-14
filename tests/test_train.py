@@ -3,6 +3,7 @@ import dataclasses
 import importlib
 import json
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -533,6 +534,33 @@ def test_an_interrupt_saves_the_counters_the_replayed_epoch_starts_from(
     assert partial["optim"]["param_groups"][0]["lr"] == pytest.approx(
         complete["optim"]["param_groups"][0]["lr"]
     )
+
+
+def test_a_failed_copy_leaves_the_old_best_intact(tmp_path, monkeypatch):
+    """A kill mid-copy must not leave a truncated best.pt behind."""
+    source, dest = tmp_path / "last.pt", tmp_path / "best.pt"
+    source.write_bytes(b"new weights")
+    dest.write_bytes(b"old weights")
+
+    def half_copy(src, dst):
+        Path(dst).write_bytes(b"new")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ckpt_module.shutil, "copy2", half_copy)
+    with pytest.raises(KeyboardInterrupt):
+        ckpt_module.copy_checkpoint(source, dest)
+
+    assert dest.read_bytes() == b"old weights"
+    assert set(tmp_path.iterdir()) == {source, dest}  # and no stray .tmp
+
+
+def test_copy_checkpoint_replaces_the_destination(tmp_path):
+    source, dest = tmp_path / "last.pt", tmp_path / "best.pt"
+    source.write_bytes(b"new weights")
+    dest.write_bytes(b"old weights")
+    ckpt_module.copy_checkpoint(source, dest)
+    assert dest.read_bytes() == b"new weights"
+    assert set(tmp_path.iterdir()) == {source, dest}
 
 
 def test_checkpoint_paths_use_forward_slashes(tiny_cfg, fake_loader):
