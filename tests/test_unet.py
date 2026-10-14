@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from tinydiffusion.models.blocks import ResBlock
+from tinydiffusion.models.blocks import ResBlock, SelfAttention
 from tinydiffusion.models.unet import UNet
 
 
@@ -164,3 +164,22 @@ def test_checkpointing_is_inert_without_a_backward_pass(wake):
 def test_a_checkpointed_net_loads_an_uncheckpointed_state_dict(wake):
     plain, checkpointed = _checkpointing_pair(wake, dropout=0.0)
     assert plain.state_dict().keys() == checkpointed.state_dict().keys()
+
+
+def test_self_attention_matches_attention_written_out():
+    """The layout q/k/v are built in is a speed choice; the maths must not move."""
+    torch.manual_seed(0)
+    attn = SelfAttention(16, num_heads=4).eval()
+    torch.nn.init.normal_(attn.proj.weight)  # zero-initialised, which would hide everything
+    x = torch.randn(2, 16, 5, 3)
+
+    b, c, h, w = x.shape
+    d = c // attn.num_heads
+    qkv = attn.qkv(attn.norm(x)).reshape(b, 3, attn.num_heads, d, h * w)
+    q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # (B, heads, d, HW)
+    weights = torch.softmax(torch.einsum("bndi,bndj->bnij", q, k) / d**0.5, dim=-1)
+    out = torch.einsum("bnij,bndj->bndi", weights, v).reshape(b, c, h, w)
+    expected = x + attn.proj(out)
+
+    with torch.no_grad():
+        assert torch.allclose(attn(x), expected, atol=1e-5)

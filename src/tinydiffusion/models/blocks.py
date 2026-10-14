@@ -207,7 +207,11 @@ class SelfAttention(nn.Module):
         b, c, h, w = x.shape
         qkv = self.qkv(self.norm(x))
         qkv = qkv.reshape(b, 3, self.num_heads, c // self.num_heads, h * w)
-        q, k, v = (t.transpose(-2, -1) for t in qkv.unbind(1))
+        # (3, B, heads, HW, d), materialised: transposed views have a last-dim
+        # stride of HW rather than 1, which both fused SDPA kernels refuse, so
+        # attention quietly fell back to the unfused math path. The copy costs
+        # far less than that fallback did.
+        q, k, v = qkv.permute(1, 0, 2, 4, 3).contiguous().unbind(0)
         out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(-2, -1).reshape(b, c, h, w)
         return x + self.proj(out)
