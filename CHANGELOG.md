@@ -535,6 +535,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Generated images are rounded to 8-bit levels before FID, sFID, KID,
+  precision/recall and the Inception Score see them. The real images are
+  decoded from 8-bit files, so scoring the sampler's raw floats against them
+  measured a difference no saved sample has. **Every score moves**; ones taken
+  before this are not comparable with ones taken after, and RESULTS.md has
+  been re-scored.
+- sFID reads `Mixed_6d.branch1x1`, the layer Nash et al. define it on (the TF
+  graph's `mixed_6/conv`), rather than `Mixed_6e`, one block later. The FID
+  cache format is bumped, so cached spatial statistics from the wrong layer are
+  recomputed rather than reused.
+- The wrapper scripts work again. `scripts/run.sh` and `run.ps1` — and so every
+  script under `scripts/` — launch `python -m tinydiffusion.cli`, which stopped
+  working when `cli` became a package with no `__main__.py`. A test now runs
+  both `-m` entry points.
+- Ctrl+C during a `sweep` stops the sweep instead of marking the interrupted
+  point finished. The deferred interrupt handler made a cancelled `train()`
+  return exactly like a finished one, so the sweep wrote `.sweep-done` for the
+  half-trained point — skipped by every later `--skip-existing` — and moved on
+  to the next. `train()` now raises `TrainingCancelled`, a `KeyboardInterrupt`,
+  once its checkpoint is saved; `tinydiffusion train` exits 130 for it, and the
+  TUI treats it as a normal stop.
+- Gradient accumulation under DDP no longer all-reduces every micro-batch. Only
+  the backward was inside `no_sync()`, but DDP arms the reducer in the forward,
+  so the gradients were right and the communication was `grad_accum` times
+  what it should have been.
+- A multi-GPU run on a fresh machine no longer has every rank download the
+  dataset into the same directory at once. Local rank 0 downloads while the
+  other ranks on that machine wait at a barrier.
+- `best.pt` and the `epoch_*.pt` snapshots are copied to a temporary file and
+  renamed into place, as `last.pt` already was. A crash mid-copy used to leave a
+  truncated `best.pt` — the checkpoint people sample from.
+- CI's lint job checked `uv.lock` after `uv sync --no-sources` had rewritten it,
+  so the check always failed. Every job now checks the committed lockfile
+  before syncing.
+
 - The Inception network behind every metric now sees input scaled the way its
   weights were trained on. torchvision's ported Google weights expect images
   in [-1, 1], and with weights loaded torchvision converts ImageNet-normalised
@@ -623,6 +658,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server is busy rather than a 503.
 
 ### Changed
+
+- Self-attention builds q, k and v contiguously, so PyTorch's fused SDPA
+  kernels accept them. The transposed views it used before have a last-dim
+  stride of H*W, which both fused backends refuse, so attention always ran on
+  the unfused math path. The attention block's forward is about 27% faster on
+  an RTX 5060 under bf16 autocast; the output is unchanged, and checkpoints
+  load as before.
+- `docs/usage/install.md` and `docs/INSTALL.md`, which had drifted apart, are
+  merged into `docs/INSTALL.md`. The docs no longer claim `--no-sources` gives a
+  CPU-only install everywhere: it only changes where the Windows wheels come
+  from, and PyPI's Linux torch bundles CUDA regardless. A section on
+  installing from PyPI notes that `configs/` is not part of the wheel.
+- The evaluation docs and RESULTS.md stop overstating what the numbers mean:
+  the KID spread is over overlapping subsets of one sample pool, not a
+  standard error; precision and recall depend on the sample count; the class
+  prior mismatch is not a constant offset; the cache key does not see changed
+  weights or a changed folder dataset; and none of IS, precision or recall is
+  the published variant.
 
 - USAGE.md is now an index over nine pages under `docs/usage/`, one per topic:
   installing, running the CLI, training and checkpoints, metrics and logging,

@@ -81,7 +81,7 @@ costs nothing.
 | `--device` | auto | `cuda`, `cpu`, … |
 | `--precision` | `fp32` | `fp32`, `tf32`, `fp16` or `bf16`; see [Half precision](sampling.md#half-precision) |
 
-Two things to know before exposing it:
+Three things to know before exposing it:
 
 - **There is no authentication**, which is why the default bind is loopback
   rather than `0.0.0.0`. Generating an image is seconds of GPU time on request,

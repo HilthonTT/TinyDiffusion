@@ -81,8 +81,8 @@ Or hand the sweep to `sweep`, which gives each point its own directory:
 
 **Using a GPU:** `uv sync` installs a CUDA build of PyTorch on Windows and
 Linux, so an NVIDIA GPU is picked up automatically, and training falls back to
-the CPU when none is visible — its first line says which it chose. Add
-`--no-sources` for a CPU-only environment. For scale, one MNIST epoch is about
+the CPU when none is visible — its first line says which it chose. For scale,
+one MNIST epoch is about
 1.8 minutes on an RTX 5060 and 29 on a CPU. See
 [docs/INSTALL.md](docs/INSTALL.md) for verification and troubleshooting.
 

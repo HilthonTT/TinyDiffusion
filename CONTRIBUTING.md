@@ -17,14 +17,16 @@ uv run pre-commit install
 ```
 
 `uv sync` installs a CUDA build of PyTorch on Windows and Linux, and a CPU one
-on macOS. For a CPU-only environment anywhere — which is what CI uses — ignore
-the PyTorch index pinned in `pyproject.toml`:
+on macOS. CI adds `--no-sources`, which skips the PyTorch index pinned in
+`pyproject.toml` — on Windows that means PyPI's CPU wheel; on Linux and macOS
+it changes nothing:
 
 ```bash
 uv sync --all-extras --dev --no-sources
 ```
 
-See [docs/INSTALL.md](docs/INSTALL.md) for the details, and for checking that
+`--no-sources` rewrites `uv.lock`, so don't commit the lockfile after running
+it. See [docs/INSTALL.md](docs/INSTALL.md) for the details, and for checking that
 the wheel supports your card. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 maps the codebase and suggests an order to read it in.
 

@@ -75,8 +75,9 @@ dev = [
 # which is what a machine with a GPU wants. `explicit = true` keeps every other
 # package coming from PyPI.
 #
-# CI opts out with `--no-sources`, which ignores this table: hosted runners
-# have no GPU, and the CUDA wheels are gigabytes.
+# CI opts out with `--no-sources`, which ignores this table, so the Windows
+# runner gets PyPI's CPU wheel rather than gigabytes of CUDA it has no GPU for.
+# It does not make Linux CPU-only: PyPI's Linux wheel bundles CUDA regardless.
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"

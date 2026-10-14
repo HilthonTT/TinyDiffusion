@@ -41,7 +41,7 @@ using `.venv`; that race is a common way to get here.
 **Training says `device cpu` on a machine with a GPU**
 The installed torch is a CPU-only build — usually the result of a sync that
 passed `--no-sources`. Re-run `uv sync --all-extras --dev` without it, then see
-[Using a GPU](install.md#using-a-gpu) to confirm.
+[Using a GPU](../INSTALL.md#using-a-gpu) to confirm.
 
 **`no CUDA device visible, falling back to CPU`**
 `--device cuda` was asked for but torch cannot see a GPU. The run continues on
@@ -53,4 +53,4 @@ allocates a batch at once.
 
 **Windows: the install step takes minutes and disk usage doubles**
 uv's cache is on a different drive from `.venv/`. See
-[uv's cache and your disk](install.md#uvs-cache-and-your-disk).
+[uv's cache and your disk](../INSTALL.md#uvs-cache-and-your-disk).

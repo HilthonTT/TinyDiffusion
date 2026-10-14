@@ -258,7 +258,9 @@ resume with: tinydiffusion train --resume checkpoints/interrupted.pt
 Answering `n` to the first question resumes training where it left off. A
 second `Ctrl+C` while the questions are on screen quits immediately, and a run
 without a terminal attached — a CI job, a `nohup`ed script — saves and exits
-without asking.
+without asking. A run stopped either way exits with status 130, like any
+interrupted command, so `train && sample` does not go on to sample a run that
+never finished.
 
 The save goes to `interrupted.pt`, never over `last.pt`. An interrupt lands
 mid-epoch, so its weights are a few batches *worse* than the ones the previous

@@ -8,13 +8,27 @@ full, the checkpoint it was taken from is named, and the seed is fixed. Where a
 run was cut short of what its config asks for, the table says so rather than
 implying the config's number.
 
+> **Not comparable with published numbers.** The scores here are for comparing
+> this project's checkpoints with each other. Four things make them differ from
+> what a paper would report for the same samples:
+>
+> - FID and KID use torchvision's Inception-v3 weights, not the
+>   `pt_inception-2015-12-05` weights pytorch-fid and clean-fid port from the
+>   original TensorFlow graph.
+> - The Inception Score reads torchvision's 1000-class head, not the TF graph's
+>   1008 logits.
+> - Precision and recall are measured in Inception's pooled features, not the
+>   VGG-16 features Kynkäänniemi et al. used.
+> - MNIST is scored at 32x32, upsampled from its native 28x28, because that is
+>   the resolution the model trains at.
+
 ## The machine
 
 | | |
 | --- | --- |
 | GPU | NVIDIA GeForce RTX 5060 Laptop (8 GB) |
 | Platform | Windows 11, build 26200 |
-| PyTorch | 2.13.0+cu132 |
+| PyTorch | 2.13.0+cu132 for training, 2.14.1+cu132 for the scores below |
 | Python | 3.14.7 |
 
 One GPU. Every multi-GPU claim in [USAGE.md](docs/usage/configuration.md#training-on-several-gpus)
@@ -46,20 +60,28 @@ tinydiffusion fid --checkpoint runs/results-mnist/checkpoints/best.pt \
 
 | Metric | Value |
 | --- | --- |
-| FID | **15.194** |
-| KID | **0.00573 ± 0.00055** (100 subsets of 1000) |
-| Precision | 0.669 |
-| Recall | 0.634 |
+| FID | **16.837** |
+| KID | **0.00696 ± 0.00068** (100 subsets of 1000) |
+| Precision | 0.678 |
+| Recall | 0.642 |
 
 5000 generated against 5000 real training images, EMA weights, 50 DDIM steps on
 uniform spacing, guidance 2.0, seed 0.
+
+Re-scored after generated images started being rounded to 8-bit levels before
+scoring, as the real images always were. The same checkpoint and command
+scored FID 15.194, KID 0.00573 ± 0.00055, precision 0.669 and recall 0.634
+before, when unrounded samples were compared against rounded real images;
+these are the ones to compare against.
 
 Reading them together: precision and recall are close, so at 8 epochs the model
 is neither collapsed onto a few clean digits nor spraying coverage it cannot
 render — it is simply not finished. The FID is dominated by that, and by the
 5000-image sample count, which carries real bias of its own. KID does not, which
-is why it is quoted alongside; the ± is a spread over subsets, so two
-checkpoints under a point of FID apart can still be told from noise.
+is why it is quoted alongside. Its ± is the spread over 100 overlapping subsets
+of the same 5000 samples: a measure of how settled the number is, not a
+standard error, and it cannot be converted into FID points. Telling two
+checkpoints apart needs each scored at a few seeds.
 
 ### Training curve
 

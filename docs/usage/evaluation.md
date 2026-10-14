@@ -21,16 +21,22 @@ noise-prediction loss over the 10k held-out MNIST test split:
 
 ```
 checkpoints/last.pt | test split | 10000 images | ema weights
-loss 0.09984
-
+loss 0.04090
      t     loss
-     0   0.39324
-    40   0.06916
-    80   0.04649
-   119   0.03946
-   159   0.03071
-   199   0.02001
+     0   0.22958
+   111   0.05195
+   222   0.03407
+   333   0.02588
+   444   0.02083
+   555   0.01712
+   666   0.01393
+   777   0.01011
+   888   0.00455
+   999   0.00104
 ```
+
+Ten timesteps spread evenly over MNIST's 1000-step schedule, which is what
+`--timesteps` defaults to.
 
 The training loss is drawn at a *random* timestep per image, so it is far too
 noisy to compare two checkpoints with. This pins the timesteps to a fixed grid
@@ -144,7 +150,7 @@ fid 18.472
 ```
 
 The Inception weights (~100 MB) download on first use into the usual torch hub
-cache; see [What gets downloaded, and where](install.md#what-gets-downloaded-and-where).
+cache; see [What gets downloaded, and where](../INSTALL.md#what-gets-downloaded-and-where).
 
 ### KID, when 10,000 samples is too many
 
@@ -180,11 +186,15 @@ The warning is about the FID on the line above it, and not about the KID: at
 2,000 images the first number is mostly reporting its own sample count and the
 second is not. Without `--kid` the report says so and points here.
 
-The spread is the useful part. It is how much one subset of 1,000 images
-disagrees with another, so two checkpoints whose KIDs differ by less than it
-have not been told apart — which is exactly the judgement a bare FID invites
-you to get wrong. Hold `--kid-subset-size` fixed across the checkpoints you
-compare, since the spread is a spread over subsets of that size.
+The spread is how much one subset of 1,000 images disagrees with another,
+with every subset drawn from the same pool of samples. That makes it a guide to
+how settled the number is, not a standard error and not a test between two
+checkpoints: the subsets overlap, and none of them sees a different draw from
+the model. Two checkpoints whose KIDs differ by less than it have certainly not
+been told apart; differing by more is not proof that they have. For a real
+error bar, score each checkpoint at a few `--seed` values and compare the
+spread of those. Hold `--kid-subset-size` fixed across the checkpoints you
+compare, since the spread depends on it.
 
 This is the metric to reach for during a run, where 10,000 samples through the
 full sampling chain is a long wait for one number.
@@ -222,8 +232,12 @@ image count.
 --kid is unbiased at this count and does not have that problem.
 ```
 
-Both fractions are honest at this count — it is the FID above them the warning
-is about. The two flags combine, and at these counts they usually should.
+The warning is about the FID above them, not about these. They do depend on
+the count in their own way, though: each real and generated image's
+neighbourhood is the distance to its k-th nearest neighbour, which shrinks as
+the sample grows, so precision and recall are only comparable at the same
+`--num-images` and `--neighbours`. The two flags combine, and at these
+counts they usually should.
 
 Guidance moves them in opposite directions, which is the clearest thing either
 number does: sweeping `--guidance` and watching precision climb while recall
@@ -243,7 +257,9 @@ well on a metric that cannot see the arrangement.
 
 sFID (Nash et al. 2021) is the same distance taken in an *unpooled* reading of
 the same network: the first seven channels of an intermediate Inception feature
-map, kept spatially, for 7 x 17 x 17 = 2023 dimensions against FID's 2048. It
+map — the `mixed_6/conv` layer the paper names, which in torchvision is
+`Mixed_6d.branch1x1` — kept spatially, for 7 x 17 x 17 = 2023 dimensions
+against FID's 2048. It
 rides along on the Inception pass FID is already making, so it costs almost no
 time:
 
@@ -314,10 +330,15 @@ done
 Only the first of those pays for the real half; the rest read it back and go
 straight to generating.
 
-Everything that moves the statistics is part of the entry's name, so changing
-`--split`, `--num-images`, `image_size` or the feature network is a miss rather
-than a stale read, and a file that cannot be read is treated as absent. Nothing
-you can do to the cache changes a score — only how long it takes.
+The entry's name covers the settings you choose — `--split`, `--num-images`,
+`image_size` and the feature network's class — so changing any of them is a
+miss rather than a stale read, and a file that cannot be read is treated as
+absent. It does **not** cover things that change underneath you: different
+Inception weights (a torchvision upgrade that changes its `DEFAULT` weights),
+images added to or removed from a folder dataset, or a scoring run under
+`--precision tf32` whose reference half later fp32 runs reuse. After any of
+those, delete the cache or pass `--no-cache` once. A release that changes how
+the features are read bumps the cache format, which invalidates every entry.
 
 An entry is about 33 MB (the covariance is 2048 x 2048 in float64, which is the
 precision the accumulation needs). Delete `<data_root>/fid_cache` whenever you
@@ -374,11 +395,20 @@ Read the number as a comparison, never as an absolute:
 - **It is not the published FID.** Those numbers come from the original
   TensorFlow Inception graph; torchvision's port differs enough to shift the
   absolute value. The ordering it induces over checkpoints is what carries over.
+  The same goes for the Inception Score, which reads torchvision's 1000-class
+  head rather than the TF graph's 1008, and for precision and recall, which are
+  measured in Inception features rather than the VGG-16 ones Kynkäänniemi et
+  al. used.
 - **A conditional model is sampled with a uniform class mix**, while real MNIST
   is not — the first 10k training images run from 8.6% (5s) to 11.3% (1s). That
-  prior mismatch adds a small constant to the score. It is identical for every
-  checkpoint scored the same way, so comparisons are unaffected; it is one more
+  prior mismatch moves the score. It is not a constant offset, since FID is not
+  additive, but it is the same mismatch for every checkpoint scored the same
+  way, so it rarely changes which of two checkpoints is better; it is one more
   reason not to read the absolute number.
+- **Generated images are rounded to 8-bit levels before scoring**, because the
+  real ones are decoded from 8-bit files. Scoring the sampler's raw floats
+  against them measures a difference no saved sample has. Scores taken before
+  this was fixed are not comparable with ones taken after.
 
 It is also slow — every score runs the full DDIM chain `--num-images` times —
 which is why it is a command you run at the end of a run rather than a metric
