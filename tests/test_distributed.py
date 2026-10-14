@@ -398,6 +398,30 @@ def test_sharding_needs_a_rank(synthetic_dataset, tmp_path):
         image_dataloader(synthetic_dataset, tmp_path, num_replicas=2)
 
 
+@pytest.mark.parametrize(
+    ("group", "expected"),
+    [
+        (Distributed(), []),
+        (Distributed(enabled=True, rank=0, local_rank=0, world_size=2), ["download", "barrier"]),
+        (Distributed(enabled=True, rank=1, local_rank=1, world_size=2), ["barrier"]),
+        # A second machine's first process has its own disk to fill.
+        (Distributed(enabled=True, rank=2, local_rank=0, world_size=4), ["download", "barrier"]),
+    ],
+)
+def test_one_process_per_machine_downloads_and_the_rest_wait(monkeypatch, group, expected):
+    """Every rank downloading at once races to write the same archive."""
+    from tinydiffusion.training import train as train_module
+    from tinydiffusion.training.config import TrainConfig
+
+    calls = []
+    monkeypatch.setattr(train_module, "image_dataset", lambda *a, **k: calls.append("download"))
+    monkeypatch.setattr(train_module, "barrier", lambda g: calls.append("barrier"))
+
+    train_module.download_once(TrainConfig(dataset="mnist"), group)
+
+    assert calls == expected
+
+
 @pytest.mark.parametrize(("batch", "synced"), [(0, False), (1, True)])
 def test_accumulating_micro_batches_run_their_forward_inside_no_sync(batch, synced):
     """DDP decides at forward time whether the backward will all-reduce.

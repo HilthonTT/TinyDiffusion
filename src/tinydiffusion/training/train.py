@@ -20,14 +20,14 @@ from typing import Any, cast
 
 import torch
 
-from tinydiffusion.data.datasets import image_dataloader, set_loader_epoch
+from tinydiffusion.data.datasets import image_dataloader, image_dataset, set_loader_epoch
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.models.unet import UNet
 from tinydiffusion.training.artifacts import save_samples
 from tinydiffusion.training.batches import epoch_seed, reference_batch, validation_batches
 from tinydiffusion.training.checkpoints import check_resume_compatible, read_checkpoint
 from tinydiffusion.training.config import TrainConfig
-from tinydiffusion.training.distributed import barrier
+from tinydiffusion.training.distributed import Distributed, barrier
 from tinydiffusion.training.distributed import (
     setup as distributed_setup,
 )
@@ -61,6 +61,31 @@ __all__ = [
     "train",
     "validation_batches",
 ]
+
+
+def download_once(cfg: TrainConfig, group: Distributed) -> None:
+    """Fetch the dataset on one rank per machine while the others wait.
+
+    Every rank builds its own loaders, and each would otherwise download a
+    missing dataset into the same directory at the same time — racing to write
+    one archive, which on a fresh machine fails the checksum or corrupts it.
+    Once local rank 0 has it, the rest find the files already in place.
+
+    Local rather than global rank 0, so a node with its own disk gets its own
+    copy. A single process skips straight to its loaders, which download as
+    they always have.
+
+    Args:
+        cfg: run configuration, for the dataset and where it lives.
+        group: the training group.
+    """
+    if not group.enabled:
+        return
+    if group.local_rank == 0:
+        # The training split alone: torchvision's datasets fetch every split's
+        # files in the one download, so this leaves nothing for the others.
+        image_dataset(cfg.dataset_spec(), cfg.data_root, train=True, image_size=cfg.image_size)
+    barrier(group)
 
 
 def train(
@@ -130,6 +155,7 @@ def train(
         ckpt = read_checkpoint(resume, device=cfg.device)
         check_resume_compatible(ckpt, cfg, path=resume)
 
+    download_once(cfg, group)
     loader_rng = torch.Generator()
     loader = image_dataloader(
         spec,
