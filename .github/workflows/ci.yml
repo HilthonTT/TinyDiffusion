@@ -16,10 +16,10 @@ permissions:
   contents: read
 
 env:
-  # Keep CI on CPU wheels: the CUDA builds are multi-GB and useless on hosted
-  # runners. `--no-sources` in .github/actions/setup is what does it — it
-  # ignores the [tool.uv.sources] table that points Windows at PyTorch's CUDA
-  # index — and UV_TORCH_BACKEND covers anything reaching for the pip interface.
+  # `--no-sources` in .github/actions/setup skips the [tool.uv.sources] table
+  # that points Windows at PyTorch's CUDA index, so the Windows runner gets
+  # PyPI's CPU wheel. Linux runners still get PyPI's CUDA-bundling wheel; it
+  # runs without a GPU, only larger. UV_TORCH_BACKEND covers `uv pip` alone.
   UV_TORCH_BACKEND: cpu
   FORCE_COLOR: "1"
 
@@ -31,11 +31,6 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup
-
-      # The sync can't use `--locked` (see the setup action), so this is what
-      # catches a pyproject.toml edited without re-running `uv lock`.
-      - name: Check uv.lock is up to date
-        run: uv lock --check
 
       - name: Ruff format check
         run: uv run ruff format --check .

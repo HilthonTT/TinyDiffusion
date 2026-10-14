@@ -23,16 +23,24 @@ runs:
         enable-cache: true
         cache-dependency-glob: "uv.lock"
 
+    # Before the sync, because the sync rewrites uv.lock: `--no-sources`
+    # resolves without the Windows CUDA entries, so a check run afterwards is
+    # checking the rewritten file rather than the committed one, and fails.
+    - name: Check uv.lock is up to date
+      shell: bash
+      run: uv lock --check
+
     - name: Install dependencies
       shell: bash
       env:
         PYTHON_VERSION: ${{ inputs.python-version }}
         EXTRAS: ${{ inputs.extras }}
       # `--no-sources` ignores the [tool.uv.sources] table that points Windows
-      # at PyTorch's CUDA index: hosted runners have no GPU, and those wheels
-      # are gigabytes. It also means `--locked` can't be used here — without the
-      # sources the resolution differs from uv.lock by design — so the lockfile
-      # is checked separately, in the lint job.
+      # at PyTorch's CUDA index, so the Windows runner gets PyPI's CPU wheel
+      # (Linux still gets PyPI's CUDA-bundling one; see docs/INSTALL.md). It
+      # also means `--locked` can't be used here — without the sources the
+      # resolution differs from uv.lock by design — which is why the lockfile
+      # is checked on its own in the step above.
       run: |
         set -euo pipefail
         args=(--dev --no-sources)
