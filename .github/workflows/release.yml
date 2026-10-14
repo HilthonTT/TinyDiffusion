@@ -8,22 +8,18 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build distribution
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-      - run: uv build
-      - uses: actions/upload-artifact@v7
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
+  # The full CI suite, against the tagged commit. Tags aren't pushes to main, so
+  # nothing else guarantees CI ever ran on exactly what is about to be published,
+  # and a PyPI version can't be replaced once it's up. CI's build job also
+  # uploads the `dist` artifact the jobs below publish, so what reaches PyPI is
+  # the exact sdist and wheel that passed `twine check`, not a second build.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: ci
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -39,7 +35,7 @@ jobs:
 
   github-release:
     name: Create GitHub release
-    needs: build
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write

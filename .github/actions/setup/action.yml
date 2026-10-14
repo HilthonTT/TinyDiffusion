@@ -1,0 +1,47 @@
+name: Set up uv and the project
+description: >-
+  Install uv with its cache and sync the project's CPU dependencies. Every CI
+  job goes through here, so the Python version, the cache key and the sync
+  flags are decided in one place rather than once per job.
+
+inputs:
+  python-version:
+    description: >-
+      Python to sync against. Empty means the repo's .python-version, which is
+      what every job wants unless it is deliberately testing another version.
+    default: ""
+  extras:
+    description: "'all' installs every optional extra; 'none' gives a base install."
+    default: "all"
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        EXTRAS: ${{ inputs.extras }}
+      # `--no-sources` ignores the [tool.uv.sources] table that points Windows
+      # at PyTorch's CUDA index: hosted runners have no GPU, and those wheels
+      # are gigabytes. It also means `--locked` can't be used here — without the
+      # sources the resolution differs from uv.lock by design — so the lockfile
+      # is checked separately, in the lint job.
+      run: |
+        set -euo pipefail
+        args=(--dev --no-sources)
+        case "$EXTRAS" in
+          all) args+=(--all-extras) ;;
+          none) ;;
+          *) echo "::error::extras must be 'all' or 'none', got '$EXTRAS'"; exit 1 ;;
+        esac
+        if [[ -n "$PYTHON_VERSION" ]]; then
+          args+=(--python "$PYTHON_VERSION")
+        fi
+        uv sync "${args[@]}"
