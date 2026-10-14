@@ -11,6 +11,7 @@ from tinydiffusion.sweep import (
     sweep_summary,
 )
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.training.interrupt import TrainingCancelled
 from tinydiffusion.utils.tracking import METRICS_FILENAME
 
 BASE = TrainConfig(num_epochs=1, device="cpu")
@@ -134,6 +135,26 @@ def test_an_interrupt_ends_the_sweep_rather_than_one_point(tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         list(run_sweep(points, train=train, say=lambda _: None))
+
+
+def test_a_cancelled_point_is_not_marked_done(tmp_path):
+    """Ctrl+C inside train() is deferred, so it surfaces as TrainingCancelled.
+
+    Marked done, the half-trained point would be skipped by every later
+    `--skip-existing` run, and the sweep would carry on to the next one.
+    """
+    points = sweep_points(BASE, [("lr", [1e-4, 2e-4])], tmp_path)
+    trained = []
+
+    def train(cfg):
+        trained.append(cfg.lr)
+        raise TrainingCancelled(model=None)
+
+    with pytest.raises(KeyboardInterrupt):
+        list(run_sweep(points, train=train, say=lambda _: None))
+
+    assert trained == [1e-4]
+    assert not (points[0].log_dir / DONE_FILENAME).exists()
 
 
 def test_a_finished_point_reports_its_best_validation_loss(tmp_path):

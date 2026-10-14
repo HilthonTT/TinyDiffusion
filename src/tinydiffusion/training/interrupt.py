@@ -12,8 +12,31 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import FrameType
+from typing import Any
 
-__all__ = ["InterruptChoice", "InterruptGuard", "interrupt_guard"]
+__all__ = ["InterruptChoice", "InterruptGuard", "TrainingCancelled", "interrupt_guard"]
+
+
+class TrainingCancelled(KeyboardInterrupt):
+    """A run that stopped early because someone asked it to.
+
+    Raised by :func:`~tinydiffusion.training.train.train` once it has finished
+    tidying up — the resumable checkpoint, if one was wanted, is already on
+    disk. The deferred Ctrl+C handler swallows the real interrupt, so without
+    this a cancelled run would return exactly like a finished one, and a caller
+    running several (a sweep) would carry on as if it had completed.
+
+    A :class:`KeyboardInterrupt` because that is what it stands in for: every
+    caller that already treats Ctrl+C as "stop everything" keeps doing so.
+
+    Attributes:
+        model: the model as it stood when the run stopped, EMA weights swapped
+            in, for a caller that wants it anyway.
+    """
+
+    def __init__(self, model: Any) -> None:
+        super().__init__("training cancelled")
+        self.model = model
 
 
 @dataclass(frozen=True)

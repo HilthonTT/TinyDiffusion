@@ -21,7 +21,7 @@ from tinydiffusion.training import setup as train_setup
 from tinydiffusion.training import train as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
-from tinydiffusion.training.interrupt import InterruptChoice
+from tinydiffusion.training.interrupt import InterruptChoice, TrainingCancelled
 from tinydiffusion.utils.tracking import METRICS_FILENAME
 
 
@@ -499,7 +499,8 @@ def interrupt_after(monkeypatch):
 
 def test_an_interrupt_saves_beside_last_rather_than_over_it(tiny_cfg, fake_loader, interrupt_after):
     interrupt_after(2)
-    train_module.train(tiny_cfg)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg)
 
     last = tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT
     interrupted = tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT
@@ -521,7 +522,8 @@ def test_an_interrupt_saves_the_counters_the_replayed_epoch_starts_from(
     zero that many steps before the end of the resumed run.
     """
     interrupt_after(2)
-    train_module.train(tiny_cfg)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg)
 
     complete = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
     partial = ckpt_module.read_checkpoint(tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT)
@@ -557,7 +559,8 @@ def test_reading_the_held_out_slice_leaves_the_global_rng_alone(tiny_cfg, monkey
 
 def test_an_interrupt_in_the_first_epoch_writes_no_last(tiny_cfg, fake_loader, interrupt_after):
     interrupt_after(1)
-    train_module.train(tiny_cfg)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg)
 
     assert not (tiny_cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT).exists()
     assert (tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT).exists()
@@ -567,7 +570,8 @@ def test_the_interrupt_message_points_at_the_file_it_wrote(
     tiny_cfg, fake_loader, interrupt_after, capsys
 ):
     interrupt_after(1)
-    train_module.train(tiny_cfg)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg)
     expected = tiny_cfg.ckpt_dir / ckpt_module.INTERRUPTED_CHECKPOINT
     assert f"--resume {expected}" in capsys.readouterr().out
 

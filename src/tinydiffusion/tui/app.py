@@ -25,6 +25,7 @@ from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, ProgressBar, RichLog, Static
 
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.training.interrupt import TrainingCancelled
 from tinydiffusion.training.observer import BatchProgress, TrainPlan
 from tinydiffusion.training.train import train
 from tinydiffusion.tui.format import duration, epoch_summary, run_eta, two_columns
@@ -398,6 +399,8 @@ class TinyDiffusionApp(App[None]):
         error: BaseException | None = None
         try:
             train(self.cfg, self.resume, observer=self.observer)
+        except TrainingCancelled:
+            pass  # a stop the user asked for is a normal end, not a failure
         except Exception as exc:
             error = exc
         with contextlib.suppress(RuntimeError):  # pragma: no cover

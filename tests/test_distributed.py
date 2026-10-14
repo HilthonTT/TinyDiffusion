@@ -573,6 +573,7 @@ OBSERVER_WORKER = textwrap.dedent(
 
     from tinydiffusion.data.datasets import DATASETS, DatasetSpec
     from tinydiffusion.training.config import TrainConfig
+    from tinydiffusion.training.interrupt import TrainingCancelled
     from tinydiffusion.training.train import train
 
     out = Path(sys.argv[1])
@@ -639,7 +640,10 @@ OBSERVER_WORKER = textwrap.dedent(
         log_dir=out / f'runs_{rank}',
     )
 
-    train(cfg, observer=Watcher(asks=rank == 0))
+    try:
+        train(cfg, observer=Watcher(asks=rank == 0))
+    except TrainingCancelled:
+        pass
     (out / f'done_{rank}.json').write_text(json.dumps({'rank': rank}))
     """
 )

@@ -6,6 +6,7 @@ import torch
 from tinydiffusion.training import train as train_module
 from tinydiffusion.training.checkpoints import INTERRUPTED_CHECKPOINT
 from tinydiffusion.training.config import TrainConfig
+from tinydiffusion.training.interrupt import TrainingCancelled
 from tinydiffusion.training.observer import BatchProgress, TrainObserver, TrainPlan
 
 
@@ -191,7 +192,8 @@ def test_save_samples_hands_back_the_path_it_wrote(tiny_cfg, fake_loader):
 
 def test_a_watcher_can_stop_the_run(tiny_cfg, fake_loader):
     observer = Recorder(stop_after=1)
-    train_module.train(tiny_cfg, observer=observer)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg, observer=observer)
 
     assert [step for step, _ in observer.epochs] == [0]
     assert observer.batches[-1].epoch == 0
@@ -199,7 +201,8 @@ def test_a_watcher_can_stop_the_run(tiny_cfg, fake_loader):
 
 def test_stopping_leaves_a_resumable_checkpoint(tiny_cfg, fake_loader):
     observer = Recorder(stop_after=1)
-    train_module.train(tiny_cfg, observer=observer)
+    with pytest.raises(TrainingCancelled):
+        train_module.train(tiny_cfg, observer=observer)
 
     interrupted = tiny_cfg.ckpt_dir / INTERRUPTED_CHECKPOINT
     assert interrupted.is_file()

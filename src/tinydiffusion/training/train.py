@@ -34,7 +34,7 @@ from tinydiffusion.training.distributed import (
 from tinydiffusion.training.distributed import (
     shutdown as distributed_shutdown,
 )
-from tinydiffusion.training.interrupt import interrupt_guard
+from tinydiffusion.training.interrupt import TrainingCancelled, interrupt_guard
 from tinydiffusion.training.loop import Run, finish_epoch, log_epoch, run_epoch, score_epoch
 from tinydiffusion.training.lr import lr_factor
 from tinydiffusion.training.observer import TrainObserver
@@ -95,10 +95,12 @@ def train(
             None leaves all three exactly as they were.
 
     Returns:
-        The trained model, with EMA weights already swapped in. A run cancelled
-        part way through returns the model as it stood at that point.
+        The trained model, with EMA weights already swapped in.
 
     Raises:
+        TrainingCancelled: if the run was stopped early — by Ctrl+C or by the
+            observer — after everything a finished run does on the way out.
+            It carries the model as it stood at that point.
         ValueError: if `resume` names a checkpoint trained with a different
             model than `cfg` describes.
     """
@@ -234,6 +236,7 @@ def train(
         say=say,
     )
 
+    cancelled = False
     try:
         with logger, interrupt_guard() as interrupts:
             for epoch in range(start_epoch, cfg.num_epochs):
@@ -264,6 +267,7 @@ def train(
                 logger.flush(step=epoch)
 
                 if outcome.cancelled:
+                    cancelled = True
                     break
 
                 finish_epoch(
@@ -284,6 +288,8 @@ def train(
         barrier(group)
     finally:
         distributed_shutdown()
+    if cancelled:
+        raise TrainingCancelled(diffusion)
     return diffusion
 
 
