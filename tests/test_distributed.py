@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +31,7 @@ from tinydiffusion.data.datasets import (
     set_loader_epoch,
 )
 from tinydiffusion.training import distributed as dist_module
+from tinydiffusion.training import loop as loop_module
 from tinydiffusion.training.checkpoints import INTERRUPTED_CHECKPOINT
 from tinydiffusion.training.distributed import Distributed
 from tinydiffusion.utils.tracking import METRICS_FILENAME
@@ -394,6 +396,57 @@ def test_the_shard_is_a_function_of_seed_and_epoch(synthetic_dataset, tmp_path):
 def test_sharding_needs_a_rank(synthetic_dataset, tmp_path):
     with pytest.raises(ValueError, match="rank"):
         image_dataloader(synthetic_dataset, tmp_path, num_replicas=2)
+
+
+@pytest.mark.parametrize(("batch", "synced"), [(0, False), (1, True)])
+def test_accumulating_micro_batches_run_their_forward_inside_no_sync(batch, synced):
+    """DDP decides at forward time whether the backward will all-reduce.
+
+    Wrapping only the backward in no_sync leaves the reducer already armed by
+    the forward, so every micro-batch synchronised and accumulation saved no
+    communication at all. Only the group's last micro-batch may sync.
+    """
+    seen = []
+
+    class FakeDDP:
+        inside = False
+
+        @contextlib.contextmanager
+        def no_sync(self):
+            FakeDDP.inside = True
+            try:
+                yield
+            finally:
+                FakeDDP.inside = False
+
+    weight = torch.nn.Parameter(torch.ones(1))
+
+    def loss_terms(x, model):
+        seen.append(not FakeDDP.inside)
+        return SimpleNamespace(loss=(weight * x).sum())
+
+    run = SimpleNamespace(
+        cfg=SimpleNamespace(
+            device="cpu", channels_last=False, num_classes=None, grad_accum=2, grad_clip=0.0
+        ),
+        group=Distributed(),
+        precision=SimpleNamespace(autocast=contextlib.nullcontext),
+        diffusion=SimpleNamespace(loss_terms=loss_terms, net=torch.nn.Linear(1, 1)),
+        ema=SimpleNamespace(update=lambda *a: None),
+        train_net=torch.nn.Identity(),
+        ddp=FakeDDP(),
+        optim=torch.optim.SGD([weight], lr=0.1),
+        sched=SimpleNamespace(step=lambda: None),
+        scaler=torch.amp.GradScaler("cpu", enabled=False),
+        model_params=[weight],
+        master_params=None,
+        step_params=[weight],
+        say=lambda _: None,
+    )
+
+    loop_module.train_step(run, torch.ones(2, 1), torch.zeros(2), batch=batch, num_batches=2)
+
+    assert seen == [synced]
 
 
 WORKER = textwrap.dedent(

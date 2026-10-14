@@ -170,14 +170,16 @@ def train_step(
         run.optim.zero_grad(set_to_none=True)
         if run.master_params is not None:
             zero_grad(run.model_params)
-    with run.precision.autocast():
-        terms = run.diffusion.loss_terms(x, model=model)
-    loss = terms.loss
-
+    # The forward has to be inside no_sync too, not just the backward: DDP
+    # decides whether the coming backward all-reduces when the forward runs.
+    # With only the backward wrapped, every micro-batch still synchronised.
     sync: AbstractContextManager[None] = nullcontext()
     if run.ddp is not None and not applies:
         sync = run.ddp.no_sync()
     with sync:
+        with run.precision.autocast():
+            terms = run.diffusion.loss_terms(x, model=model)
+        loss = terms.loss
         run.scaler.scale(loss / group_size).backward()  # type: ignore[no-untyped-call]
 
     grad_norm: torch.Tensor | None = None
