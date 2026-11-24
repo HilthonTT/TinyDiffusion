@@ -541,6 +541,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Pillow, which decodes every image the folder dataset reads — and the new one
   carries none. Pillow is now a declared dependency (`pillow>=13.0`); it was
   imported directly but only ever arrived through torchvision.
+- CI audits `uv.lock` against the advisory databases on every run, pins every
+  action to a commit SHA, and checks out without persisting the token.
 
 ### Fixed
 
