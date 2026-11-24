@@ -251,3 +251,10 @@ def test_the_summary_puts_the_unranked_at_the_bottom(tmp_path):
 
 def test_an_empty_sweep_says_so():
     assert sweep_summary([]) == "no points to run"
+
+
+@pytest.mark.parametrize("values", [["DDIM", "ddim"], ["x", "x."]])
+def test_points_that_collide_on_a_case_insensitive_filesystem_are_refused(tmp_path, values):
+    """Windows and macOS would put both of these in one directory."""
+    with pytest.raises(ValueError, match="share the directory"):
+        sweep_points(BASE, [("data_root", values)], tmp_path)

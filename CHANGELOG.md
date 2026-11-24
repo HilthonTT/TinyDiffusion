@@ -574,6 +574,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files, so adding or replacing images no longer serves stale statistics.
   Corrupt cache files are treated as absent instead of raising or allocating a
   huge tensor, and the Inception extractor stays in eval mode under `.train()`.
+- Sweep points whose directory names differ only by case or trailing dots are
+  caught as duplicates. `--set` and `--axis` values can no longer splice a
+  second TOML key in and silently drop the rest of the value.
+
 - Generated images are rounded to 8-bit levels before FID, sFID, KID,
   precision/recall and the Inception Score see them. The real images are
   decoded from 8-bit files, so scoring the sampler's raw floats against them

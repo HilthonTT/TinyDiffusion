@@ -87,10 +87,8 @@ def toml_value(raw: str) -> Any:
         :meth:`~tinydiffusion.training.config.TrainConfig.from_mapping` then
         coerces to whatever the field holds.
     """
-    try:
-        return tomllib.loads(f"value = {raw}")["value"]
-    except tomllib.TOMLDecodeError:
-        return raw
+    parsed = _parse_single(f"value = {raw}")
+    return raw if parsed is None else parsed
 
 
 def sweep_axis(value: str) -> tuple[str, list[Any]]:
@@ -134,11 +132,35 @@ def _axis_values(raw: str) -> list[Any]:
     Returns:
         The values, in the order given.
     """
-    try:
-        parsed = tomllib.loads(f"value = [{raw}]")["value"]
-    except tomllib.TOMLDecodeError:
+    parsed = _parse_single(f"value = [{raw}]")
+    if parsed is None:
         return [toml_value(part.strip()) for part in raw.split(",") if part.strip()]
     return list(parsed)
+
+
+def _parse_single(document: str) -> Any | None:
+    """Parse a one-key TOML document, or return None if it is anything else.
+
+    The raw text is spliced into the document, so a value carrying a newline
+    or a closing ``]`` can end the array early and start a key of its own:
+    ``1e-4]``, a newline, then ``x = [2`` parses cleanly as ``[1e-4]`` and
+    silently drops the rest. Accepting only a document whose sole key is ``value`` means such
+    input falls back to being read as plain text instead.
+
+    Args:
+        document: ``value = <raw>``.
+
+    Returns:
+        The value of ``value``, or None if the document does not parse or
+        defines any other key.
+    """
+    try:
+        table = tomllib.loads(document)
+    except tomllib.TOMLDecodeError:
+        return None
+    if table.keys() != {"value"}:
+        return None
+    return table["value"]
 
 
 def add_precision_argument(parser: argparse.ArgumentParser) -> None:
