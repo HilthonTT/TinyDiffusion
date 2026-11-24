@@ -15,10 +15,12 @@ set is indistinguishable from a freshly computed one, including for
 Every setting a caller chooses is in the filename: change the resolution, the
 split, the image count or the extractor's class and the key changes with it. A
 file that cannot be read, or that does not describe what its name claims, is
-treated as absent and recomputed. What the key cannot see is a change under
-the same settings — different weights behind the same extractor class, a folder
-dataset whose files changed, a change to how features are read. The last is
-what :data:`_FORMAT` is bumped for; the first two need the cache deleted.
+treated as absent and recomputed. A folder dataset's name carries a fingerprint
+of its files (see :func:`~tinydiffusion.metrics.evaluate.reference_dataset_id`),
+so editing the folder keys a new entry. What the key cannot see is a change
+under the same settings — different weights behind the same extractor class, a
+change to how features are read. The last is what :data:`_FORMAT` is bumped
+for; the first needs the cache deleted.
 
 An entry is not small: the second moment is ``dim x dim`` in float64, so
 Inception's 2048 features come to about 33 MB however many images went into it.

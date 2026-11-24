@@ -194,6 +194,10 @@ class FeatureBank:
             features = state["features"]
         except KeyError as exc:
             raise ValueError(f"feature bank is missing {exc} key") from None
+        except TypeError, ValueError:
+            raise ValueError("feature bank has a non-integer dim or n") from None
+        if not isinstance(features, torch.Tensor):
+            raise ValueError("feature bank must hold a tensor under 'features'")
         if n < 0:
             raise ValueError(f"feature count must not be negative, got {n}")
         if features.shape != (n, dim):

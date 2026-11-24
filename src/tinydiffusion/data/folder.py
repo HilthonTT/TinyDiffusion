@@ -57,6 +57,7 @@ __all__ = [
     "FolderScan",
     "ImageFolderDataset",
     "ImageTransform",
+    "folder_fingerprint",
     "load_folder",
     "scan_folder",
 ]
@@ -353,6 +354,34 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
         labels = [label for _, label in wanted]
 
     return FolderScan(paths, labels, names, scan_root)
+
+
+def folder_fingerprint(scan: FolderScan) -> str:
+    """A short digest of exactly which files a scan found, and their versions.
+
+    The packaged datasets never change under their name, so a cache keyed on
+    the name is keyed on the content. A folder does change — images are added,
+    removed, re-exported — and anything cached from it, the FID reference
+    statistics above all, has to be keyed on what was actually read, or a later
+    score is quietly taken against the directory as it used to be.
+
+    Each image contributes its path below the scanned root, its label, its size
+    and its modification time. That is a ``stat`` per file rather than a read,
+    so it stays cheap next to the Inception pass it guards, and a file replaced
+    in place gets a new mtime even when its size happens not to change.
+
+    Args:
+        scan: the result of :func:`scan_folder`.
+
+    Returns:
+        16 hex characters, the same on every platform for the same files.
+    """
+    digest = hashlib.blake2b(digest_size=8)
+    for path, label in zip(scan.paths, scan.labels, strict=True):
+        info = path.stat()
+        relative = path.relative_to(scan.root).as_posix()
+        digest.update(f"{relative}\0{label}\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
 
 
 def _check_pixel_budget(image: Image.Image, path: Path) -> None:

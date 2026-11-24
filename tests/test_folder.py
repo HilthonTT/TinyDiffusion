@@ -415,3 +415,17 @@ def test_sixteen_bit_greyscale_is_rescaled_rather_than_clipped(tmp_path, channel
     assert image.mean().item() == pytest.approx(0.0, abs=0.02)
     assert image.min().item() == pytest.approx(-1.0)
     assert image.max().item() == pytest.approx(1.0)
+
+
+def test_the_fingerprint_follows_the_files_a_split_holds(flat):
+    from tinydiffusion.data.folder import folder_fingerprint
+
+    before = folder_fingerprint(scan_folder(flat, holdout=0.0))
+    assert folder_fingerprint(scan_folder(flat, holdout=0.0)) == before
+
+    _write(flat / "img999.png")
+    added = folder_fingerprint(scan_folder(flat, holdout=0.0))
+    assert added != before
+
+    _write(flat / "img000.png", size=(48, 48))
+    assert folder_fingerprint(scan_folder(flat, holdout=0.0)) != added

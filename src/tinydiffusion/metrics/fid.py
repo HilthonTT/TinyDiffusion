@@ -190,14 +190,21 @@ class FeatureStats:
             total, outer = state["sum"], state["outer"]
         except KeyError as exc:
             raise ValueError(f"feature statistics are missing {exc} key") from None
-        stats = cls(dim, device=device)
-        if total.shape != (dim,) or outer.shape != (dim, dim):
+        except TypeError, ValueError:
+            raise ValueError("feature statistics have a non-integer dim or n") from None
+        if not isinstance(total, torch.Tensor) or not isinstance(outer, torch.Tensor):
+            raise ValueError("feature statistics must hold tensors under 'sum' and 'outer'")
+        # Checked before anything is allocated: `dim` comes from a file, and an
+        # accumulator sized by a corrupt one is a (dim, dim) float64 allocation
+        # that can run to terabytes before the shape test below ever runs.
+        if dim <= 0 or total.shape != (dim,) or outer.shape != (dim, dim):
             raise ValueError(
                 f"feature statistics for dim={dim} must hold ({dim},) and ({dim}, {dim}) "
                 f"tensors, got {tuple(total.shape)} and {tuple(outer.shape)}"
             )
         if n < 0:
             raise ValueError(f"feature count must not be negative, got {n}")
+        stats = cls(dim, device=device)
         stats.n = n
         stats.sum = total.to(device=stats.device, dtype=torch.float64)
         stats.outer = outer.to(device=stats.device, dtype=torch.float64)

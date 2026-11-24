@@ -556,6 +556,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - 16-bit greyscale images are rescaled to 8 bits rather than clipped to white.
+- A folder dataset's FID reference cache is keyed on a fingerprint of its
+  files, so adding or replacing images no longer serves stale statistics.
+  Corrupt cache files are treated as absent instead of raising or allocating a
+  huge tensor, and the Inception extractor stays in eval mode under `.train()`.
 - Generated images are rounded to 8-bit levels before FID, sFID, KID,
   precision/recall and the Inception Score see them. The real images are
   decoded from 8-bit files, so scoring the sampler's raw floats against them

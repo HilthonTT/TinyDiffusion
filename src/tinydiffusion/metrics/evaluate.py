@@ -18,6 +18,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from tinydiffusion.data.datasets import FOLDER_DATASET, image_dataloader, quantize
+from tinydiffusion.data.folder import folder_fingerprint, scan_folder
 from tinydiffusion.diffusion.ddim import DEFAULT_SPACING
 from tinydiffusion.diffusion.gaussian_diffusion import Diffusion
 from tinydiffusion.diffusion.guidance import conditioned
@@ -400,8 +401,9 @@ def generate_images(
         produced += batch
 
 
-@torch.no_grad()
-def reference_dataset_id(cfg: TrainConfig) -> str:
+def reference_dataset_id(
+    cfg: TrainConfig, *, root: Path | None = None, split: str = "train"
+) -> str:
     """The dataset name a reference set is cached under.
 
     For a registered dataset that is its name. A folder dataset's reference
@@ -410,14 +412,32 @@ def reference_dataset_id(cfg: TrainConfig) -> str:
     split. Both go into the name, or a run with different settings on the same
     folder would read the other's statistics back as its own.
 
+    And unlike a registered dataset, a folder's *contents* change under the
+    same name. Given the directory, the name also carries a fingerprint of the
+    files the split holds — see
+    :func:`~tinydiffusion.data.folder.folder_fingerprint` — so adding,
+    removing or replacing an image keys a fresh entry instead of serving the
+    statistics of the directory as it used to be.
+
     Args:
         cfg: the checkpoint's training configuration.
+        root: the dataset directory, or None to leave the fingerprint out.
+            Only consulted for a folder dataset.
+        split: ``"train"`` or ``"test"``, the split the fingerprint covers.
 
     Returns:
         A name safe to use in a cache filename.
+
+    Raises:
+        ValueError: if `root` is given for a folder dataset and cannot be
+            scanned — the same error loading it would raise.
     """
     if cfg.dataset == FOLDER_DATASET:
-        return f"{cfg.dataset}-c{cfg.folder_channels}-h{cfg.folder_holdout:g}"
+        name = f"{cfg.dataset}-c{cfg.folder_channels}-h{cfg.folder_holdout:g}"
+        if root is not None:
+            scan = scan_folder(root, train=split == "train", holdout=cfg.folder_holdout)
+            name = f"{name}-{folder_fingerprint(scan)}"
+        return name
     return cfg.dataset
 
 
@@ -575,7 +595,8 @@ def fid_for_checkpoint(
         extractor = extractor.to(cfg.device)
 
     root = data_root if data_root is not None else cfg.data_root
-    cache_dataset = reference_dataset_id(cfg)
+    # The fingerprint costs a scan of the directory, which only a cache lookup needs.
+    cache_dataset = reference_dataset_id(cfg, root=root if cache else None, split=split)
     cache_path = reference_stats_path(
         root,
         dataset=cache_dataset,

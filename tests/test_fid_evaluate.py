@@ -609,3 +609,25 @@ def test_folder_reference_sets_are_cached_by_what_defines_them(a, b):
         dataclasses.replace(base, **b)
     )
     assert reference_dataset_id(TINY) == TINY.dataset
+
+
+def test_a_folder_reference_set_is_rekeyed_when_its_files_change(tmp_path):
+    """The statistics of the directory as it was must not be served for it as it is."""
+    from PIL import Image
+
+    from tinydiffusion.metrics.evaluate import reference_dataset_id
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    for index in range(4):
+        Image.new("RGB", (8, 8)).save(root / f"img{index}.png")
+    cfg = dataclasses.replace(TINY, dataset="folder", folder_holdout=0.0)
+
+    before = reference_dataset_id(cfg, root=root, split="train")
+    assert reference_dataset_id(cfg, root=root, split="train") == before
+    assert before.startswith(reference_dataset_id(cfg))
+
+    Image.new("RGB", (8, 8), "white").save(root / "img4.png")
+    assert reference_dataset_id(cfg, root=root, split="train") != before
+    # A registered dataset does not change under its name, so needs no scan.
+    assert reference_dataset_id(TINY, root=root, split="train") == TINY.dataset
