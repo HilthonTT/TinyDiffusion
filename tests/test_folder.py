@@ -1,6 +1,7 @@
 """Training on a directory of your own images."""
 
 import shutil
+import sys
 
 import pytest
 from PIL import Image
@@ -320,3 +321,97 @@ def test_a_folder_run_trains_end_to_end(tmp_path, classed):
     )
 
     assert grid.is_file()
+
+
+def _symlink(link, target, *, directory=False):
+    """Make a symlink, or skip where the platform will not let this user."""
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create symlinks here: {exc}")
+
+
+def test_an_image_symlinked_from_outside_the_directory_is_refused(tmp_path, flat):
+    secret = _write(tmp_path / "elsewhere" / "secret.png")
+    _symlink(flat / "planted.png", secret)
+    with pytest.raises(ValueError, match="outside the dataset directory"):
+        scan_folder(flat, holdout=0.0)
+
+
+def test_a_class_directory_symlinked_from_outside_is_refused(tmp_path, classed):
+    for index in range(3):
+        _write(tmp_path / "elsewhere" / f"x{index}.png")
+    _symlink(classed / "zebras", tmp_path / "elsewhere", directory=True)
+    with pytest.raises(ValueError, match="outside the dataset directory"):
+        scan_folder(classed, holdout=0.0)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_a_class_directory_junctioned_from_outside_is_refused(tmp_path, classed):
+    """Junctions need no privilege on Windows, so they are the link a user there meets."""
+    import _winapi
+
+    for index in range(3):
+        _write(tmp_path / "elsewhere" / f"x{index}.png")
+    _winapi.CreateJunction(str(tmp_path / "elsewhere"), str(classed / "zebras"))
+    with pytest.raises(ValueError, match="outside the dataset directory"):
+        scan_folder(classed, holdout=0.0)
+
+
+def test_symlinks_that_stay_inside_the_directory_are_fine(flat):
+    _symlink(flat / "alias.png", flat / "img000.png")
+    assert len(scan_folder(flat, holdout=0.0).paths) == 21
+
+
+def test_a_dataset_root_that_is_itself_a_symlink_is_fine(tmp_path, flat):
+    link = tmp_path / "link"
+    _symlink(link, flat, directory=True)
+    assert len(scan_folder(link, holdout=0.0).paths) == 20
+
+
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+def test_an_image_over_the_pixel_limit_is_refused_before_decoding(tmp_path, monkeypatch):
+    """Pillow only warns between MAX_IMAGE_PIXELS and twice it; a bomb lives there."""
+    root = tmp_path / "bombs"
+    _write(root / "big.png", size=(40, 40))
+    dataset = load_folder(
+        root,
+        train=True,
+        channels=3,
+        num_classes=None,
+        holdout=0.0,
+        transform=image_transform(3, 32, crop=True),
+    )
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 40 * 40 - 1)
+    with pytest.raises(Image.DecompressionBombError, match=r"big\.png"):
+        dataset[0]
+
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)
+    assert dataset[0][0].shape == (3, 32, 32)
+
+
+@pytest.mark.parametrize("channels", [1, 3])
+def test_sixteen_bit_greyscale_is_rescaled_rather_than_clipped(tmp_path, channels):
+    """Pillow clips I;16 to 255 on convert, which turns a 16-bit scan white."""
+    import numpy as np
+
+    root = tmp_path / "scans"
+    root.mkdir()
+    ramp = np.linspace(0, 65535, 32 * 32).reshape(32, 32).astype(np.uint16)
+    Image.fromarray(ramp).save(root / "scan.png")
+    with Image.open(root / "scan.png") as opened:
+        assert opened.mode.startswith("I")
+
+    dataset = load_folder(
+        root,
+        train=True,
+        channels=channels,
+        num_classes=None,
+        holdout=0.0,
+        transform=image_transform(channels, 32, crop=True),
+    )
+    image, _ = dataset[0]
+    # A ramp from black to white averages mid-grey; clipped, it is almost all white.
+    assert image.mean().item() == pytest.approx(0.0, abs=0.02)
+    assert image.min().item() == pytest.approx(-1.0)
+    assert image.max().item() == pytest.approx(1.0)

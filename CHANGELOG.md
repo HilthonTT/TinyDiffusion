@@ -543,6 +543,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   imported directly but only ever arrived through torchvision.
 - CI audits `uv.lock` against the advisory databases on every run, pins every
   action to a commit SHA, and checks out without persisting the token.
+- The folder dataset refuses symlinks and junctions that resolve outside the
+  data root, and rejects images over Pillow's pixel limit before decoding
+  them; between one and two times the limit, Pillow itself only warns.
 - `serve` caps request bodies at 64 KiB (413), answers non-finite numbers with
   a 422 instead of a 500 and no longer echoes request input in validation
   errors, refuses more labels than `max_images`, keeps generated images in a
@@ -552,6 +555,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- 16-bit greyscale images are rescaled to 8 bits rather than clipped to white.
 - Generated images are rounded to 8-bit levels before FID, sFID, KID,
   precision/recall and the Inception Score see them. The real images are
   decoded from 8-bit files, so scoring the sampler's raw floats against them

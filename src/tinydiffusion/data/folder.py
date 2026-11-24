@@ -46,6 +46,7 @@ import hashlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
@@ -109,9 +110,66 @@ class FolderScan:
         return len(self.classes)
 
 
-def _is_image(path: Path) -> bool:
-    """Whether `path` is a file this module will try to open."""
-    return path.suffix.lower() in IMAGE_SUFFIXES and path.is_file()
+class _Containment:
+    """Whether paths found under a dataset root really live under it.
+
+    A walk of the root follows two kinds of link without being asked to: a class
+    or split directory that is itself a symlink (``iterdir`` and ``is_dir``
+    follow it, and ``rglob`` happily starts inside it), and an image file that
+    is a symlink. Either can point anywhere — a downloaded archive is all it
+    takes to plant ``cats/x.png -> ~/.ssh/id_ed25519`` — and every file read
+    here is decoded, trained on, and summarised into a cache beside the data.
+    So whatever a path *resolves* to has to be inside the resolved root, and a
+    link that leads out is an error naming the link rather than a file quietly
+    skipped: someone who symlinked a class in from another disk should learn
+    why it was refused, and can point ``data_root`` at the real directory.
+
+    Directories are resolved once each and remembered, so the cost is an
+    ``lstat`` per image plus a resolve per directory, not a resolve per file.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.base = root.resolve()
+        self._dirs: dict[Path, bool] = {}
+
+    def _inside(self, path: Path) -> bool:
+        return path.resolve().is_relative_to(self.base)
+
+    def check(self, path: Path) -> None:
+        """Raise if `path` resolves outside the dataset root.
+
+        Args:
+            path: a file found while walking the root.
+
+        Raises:
+            ValueError: if it, or the directory holding it, leads outside.
+        """
+        parent = path.parent
+        inside = self._dirs.get(parent)
+        if inside is None:
+            inside = self._dirs[parent] = self._inside(parent)
+        if inside and path.is_symlink():
+            inside = self._inside(path)
+        if not inside:
+            raise ValueError(
+                f"{path} resolves to {path.resolve()}, outside the dataset directory "
+                f"{self.base}; links out of the dataset are refused so a planted symlink "
+                f"cannot make training read arbitrary files. Point data_root at the real "
+                f"directory, or copy the images in"
+            )
+
+
+def _is_image(path: Path, containment: _Containment | None = None) -> bool:
+    """Whether `path` is a file this module will try to open.
+
+    Raises:
+        ValueError: if `containment` is given and the image leads outside it.
+    """
+    if path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file():
+        return False
+    if containment is not None:
+        containment.check(path)
+    return True
 
 
 def _visible(path: Path, relative_to: Path) -> bool:
@@ -124,11 +182,13 @@ def _visible(path: Path, relative_to: Path) -> bool:
     return not any(part.startswith(".") for part in path.relative_to(relative_to).parts)
 
 
-def _images_under(directory: Path) -> list[Path]:
+def _images_under(directory: Path, containment: _Containment | None = None) -> list[Path]:
     """Every image anywhere under `directory`, in a platform-independent order.
 
     Args:
         directory: the tree to walk.
+        containment: the dataset root every image must resolve inside, or None
+            not to check.
 
     Returns:
         Sorted paths. Sorted by POSIX string rather than by
@@ -136,11 +196,15 @@ def _images_under(directory: Path) -> list[Path]:
         and not elsewhere — the order decides which images a truncated
         ``--num-images`` run scores, so it has to be the same on both.
     """
-    found = [path for path in directory.rglob("*") if _is_image(path) and _visible(path, directory)]
+    found = [
+        path
+        for path in directory.rglob("*")
+        if _visible(path, directory) and _is_image(path, containment)
+    ]
     return sorted(found, key=lambda path: path.as_posix())
 
 
-def _class_dirs(root: Path) -> list[Path]:
+def _class_dirs(root: Path, containment: _Containment | None = None) -> list[Path]:
     """The immediate subdirectories of `root` that hold at least one image.
 
     An empty directory, or one holding only a cache, is not a class: it would
@@ -149,12 +213,16 @@ def _class_dirs(root: Path) -> list[Path]:
 
     Args:
         root: the directory to look in.
+        containment: the dataset root every image must resolve inside.
 
     Returns:
         Sorted by name, which is what fixes the label numbering.
     """
     subdirs = (path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))
-    return sorted((path for path in subdirs if _images_under(path)), key=lambda path: path.name)
+    return sorted(
+        (path for path in subdirs if _images_under(path, containment)),
+        key=lambda path: path.name,
+    )
 
 
 def _split_root(root: Path, *, train: bool) -> Path | None:
@@ -218,8 +286,8 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
 
     Raises:
         ValueError: if the directory is missing, holds no images, mixes loose
-            images with class subdirectories, or leaves the requested split
-            empty.
+            images with class subdirectories, leaves the requested split
+            empty, or holds a symlink that leads outside it.
     """
     root = Path(root)
     if not root.is_dir():
@@ -230,12 +298,17 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
     if not 0.0 <= holdout < 1.0:
         raise ValueError(f"holdout must lie in [0, 1), got {holdout}")
 
+    containment = _Containment(root)
     explicit = _split_root(root, train=train)
     scan_root = explicit if explicit is not None else root
 
-    classes = _class_dirs(scan_root)
+    classes = _class_dirs(scan_root, containment)
     loose = sorted(
-        (path for path in scan_root.glob("*") if _is_image(path) and _visible(path, scan_root)),
+        (
+            path
+            for path in scan_root.glob("*")
+            if _visible(path, scan_root) and _is_image(path, containment)
+        ),
         key=lambda path: path.as_posix(),
     )
     if classes and loose:
@@ -250,12 +323,12 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
         paths: list[Path] = []
         labels: list[int] = []
         for label, directory in enumerate(classes):
-            found = _images_under(directory)
+            found = _images_under(directory, containment)
             paths += found
             labels += [label] * len(found)
         names = [directory.name for directory in classes]
     else:
-        paths = _images_under(scan_root)
+        paths = _images_under(scan_root, containment)
         labels = [0] * len(paths)
         names = []
 
@@ -280,6 +353,59 @@ def scan_folder(root: str | Path, *, train: bool = True, holdout: float = 0.1) -
         labels = [label for _, label in wanted]
 
     return FolderScan(paths, labels, names, scan_root)
+
+
+def _check_pixel_budget(image: Image.Image, path: Path) -> None:
+    """Refuse an image too large to decode, before decoding it.
+
+    ``Image.open`` reads only the header, and Pillow's own check there only
+    *warns* between :data:`PIL.Image.MAX_IMAGE_PIXELS` and twice that — up to
+    about 180 M pixels, over half a gigabyte of RGB per image, per dataloader
+    worker. A training image is about to be shrunk to a few hundred pixels a
+    side, so nothing legitimate needs that much and a decompression bomb does.
+    Making the warning threshold a hard limit costs no real dataset anything,
+    and still honours a caller who raised ``MAX_IMAGE_PIXELS`` or set it None.
+
+    Args:
+        image: the just-opened, not yet decoded image.
+        path: where it came from, for the message.
+
+    Raises:
+        Image.DecompressionBombError: if it has more pixels than allowed.
+    """
+    limit = Image.MAX_IMAGE_PIXELS
+    pixels = image.width * image.height
+    if limit is not None and pixels > limit:
+        raise Image.DecompressionBombError(
+            f"{path} is {image.width}x{image.height} ({pixels} pixels), over the "
+            f"{limit}-pixel limit (PIL.Image.MAX_IMAGE_PIXELS); refusing to decode it"
+        )
+
+
+_SIXTEEN_BIT_MODES = frozenset({"I", "I;16", "I;16L", "I;16B", "I;16N"})
+"""Integer modes Pillow opens a 16-bit greyscale PNG or TIFF as."""
+
+
+def _to_8bit(image: Image.Image) -> Image.Image:
+    """Bring a 16-bit greyscale image into 8-bit range before it is converted.
+
+    Pillow's ``convert("L")`` and ``convert("RGB")`` from these modes *clip*
+    rather than rescale, so every value above 255 — all but the darkest
+    1/256th of the range — comes out white, and a folder of 16-bit scans
+    trains on near-blank images without a word. Dividing by 257 maps 0..65535
+    onto 0..255 exactly.
+
+    Args:
+        image: a decoded image in any mode.
+
+    Returns:
+        An ``L`` image for the 16-bit modes; anything else unchanged.
+    """
+    if image.mode not in _SIXTEEN_BIT_MODES:
+        return image
+    values = np.asarray(image, dtype=np.float64)
+    scaled = np.rint(np.clip(values, 0.0, 65535.0) / 257.0).astype(np.uint8)
+    return Image.fromarray(scaled, mode="L")
 
 
 class ImageFolderDataset(Dataset[tuple[torch.Tensor, int]]):
@@ -344,8 +470,9 @@ class ImageFolderDataset(Dataset[tuple[torch.Tensor, int]]):
         """
         path = self.paths[index]
         with Image.open(path) as handle:
+            _check_pixel_budget(handle, path)
             image = ImageOps.exif_transpose(handle)
-            image = (image if image is not None else handle).convert(self._mode)
+            image = _to_8bit(image if image is not None else handle).convert(self._mode)
         return self.transform(image), self.labels[index]
 
 
