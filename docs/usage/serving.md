@@ -73,7 +73,7 @@ costs nothing.
 | `--port` | 8000 | Port to bind |
 | `--max-images` | 64 | Ceiling on `num_images` per request |
 | `--max-inflight` | 4 | Sampling requests accepted at once; the rest get a 503 |
-| `--image-dir` | a temp dir | Where PNGs are written |
+| `--image-dir` | a private temp dir, removed on shutdown | Where PNGs are written |
 | `--image-ttl` | 3600 | Seconds a PNG is kept before it is swept. 0 keeps them forever |
 | `--keep-images` | 256 | PNGs retained regardless of age, newest first. 0 for no cap |
 | `--cors-origin` | none | Origin allowed to call the API from a browser. Repeatable |

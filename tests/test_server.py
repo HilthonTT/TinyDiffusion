@@ -483,3 +483,101 @@ def test_the_sweep_spares_the_file_a_render_is_about_to_return(make_config):
     assert service.prune_images(keep_path=older) == 0
     assert older.exists()
     assert newer.exists()
+
+
+def test_a_declared_oversized_body_is_refused_unread(client):
+    from tinydiffusion.server.config import MAX_REQUEST_BYTES
+
+    r = client.post(
+        "/api/sample",
+        content=b"x" * (MAX_REQUEST_BYTES + 1),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 413
+
+
+def test_a_chunked_oversized_body_is_refused(client):
+    """No Content-Length to check up front; the body is counted as it arrives."""
+    from tinydiffusion.server.config import MAX_REQUEST_BYTES
+
+    def chunks():
+        for _ in range(MAX_REQUEST_BYTES // 1024 + 2):
+            yield b" " * 1024
+
+    r = client.post("/api/sample", content=chunks(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_a_small_request_still_passes_the_body_limit(client):
+    assert client.post("/api/sample", json={"num_images": 1, "steps": 2}).status_code == 200
+
+
+def test_more_labels_than_the_image_ceiling_are_refused(make_config):
+    with TestClient(create_app(make_config(CONDITIONAL, max_images=4))) as c:
+        r = c.post("/api/sample", json={"num_images": 1, "steps": 2, "labels": [0] * 5})
+    assert r.status_code == 400
+    assert "labels" in r.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"guidance": Infinity}',
+        b'{"guidance": NaN}',
+        b'{"eta": Infinity}',
+        b'{"guidance_rescale": -Infinity}',
+        b'{"seed": NaN}',
+    ],
+)
+def test_a_non_finite_number_is_a_422_not_a_500(make_config, body):
+    """Python's JSON parser accepts these literals; strict JSON cannot echo them back."""
+    with TestClient(create_app(make_config(CONDITIONAL)), raise_server_exceptions=False) as c:
+        r = c.post("/api/sample", content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 422
+    assert all("input" not in error for error in r.json()["detail"])
+
+
+def test_status_does_not_disclose_the_checkpoint_directory(client):
+    assert client.get("/api/status").json()["checkpoint"] == "last.pt"
+
+
+def test_a_planted_symlink_is_not_followed(client, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not serve")
+    link = tmp_path / "images" / f"{'b' * 32}.png"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        pytest.skip("this platform will not create symlinks for an unprivileged user")
+    assert client.get(f"/images/{link.name}").status_code == 404
+
+
+def test_a_nan_ttl_is_rejected():
+    """NaN compares false against every age, which would silently stop the sweep."""
+    with pytest.raises(ValueError, match="image_ttl"):
+        ServerConfig(checkpoint="m.pt", image_ttl=float("nan"))
+
+
+def test_the_default_image_dir_is_private_and_removed_at_shutdown(make_config):
+    """A fixed name under the shared temp folder could be pre-created by another user."""
+    config = dataclasses.replace(make_config(), image_dir=None)
+    first, second = SamplerService(config), SamplerService(config)
+    try:
+        assert first.image_dir != second.image_dir
+        assert first.image_dir.is_dir()
+    finally:
+        first.close()
+        second.close()
+    assert not first.image_dir.exists()
+
+    app = create_app(config)
+    with TestClient(app) as c:
+        served = app.state.service.image_dir
+        assert c.post("/api/sample", json={"num_images": 1, "steps": 2}).status_code == 200
+    assert not served.exists()
+
+
+def test_closing_leaves_a_configured_image_dir_alone(make_config):
+    service = SamplerService(make_config())
+    service.close()
+    assert service.image_dir.is_dir()

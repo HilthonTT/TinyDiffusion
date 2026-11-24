@@ -1,6 +1,7 @@
 """The checkpoint behind the API: loaded once, sampled per request."""
 
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -86,12 +87,28 @@ class SamplerService:
         self._net = apply_precision(raw_net, self.precision, self._cfg.device)
         self._lock = threading.Lock()
 
-        self.image_dir = (
-            config.image_dir
-            if config.image_dir is not None
-            else Path(tempfile.gettempdir()) / "tinydiffusion-images"
-        )
-        self.image_dir.mkdir(parents=True, exist_ok=True)
+        # The default is a fresh, private directory rather than a fixed name
+        # under the shared temp folder. Another local user can create a fixed
+        # name first and own it — then plant files or links there that this
+        # server would hand out as its own images. mkdtemp picks an unguessable
+        # name and creates it readable by this user alone.
+        self._owns_image_dir = config.image_dir is None
+        if config.image_dir is None:
+            self.image_dir = Path(tempfile.mkdtemp(prefix="tinydiffusion-images-"))
+        else:
+            self.image_dir = config.image_dir
+            self.image_dir.mkdir(parents=True, exist_ok=True)
+
+    def close(self) -> None:
+        """Release what the service holds on disk.
+
+        Removes the image directory if the service created it — a private temp
+        directory nobody else knows the name of, so nothing outside this
+        process can still want it. A directory the operator configured is left
+        alone.
+        """
+        if self._owns_image_dir:
+            shutil.rmtree(self.image_dir, ignore_errors=True)
 
     @property
     def num_classes(self) -> int | None:
@@ -227,12 +244,19 @@ class SamplerService:
 
         Raises:
             ValueError: if the request does not fit the checkpoint — too many
-                images, labels for an unconditional model, a label naming no
-                class, or an out-of-range step count, eta or rescale factor.
+                images or labels, labels for an unconditional model, a label
+                naming no class, or an out-of-range step count, eta or rescale factor.
         """
         if not 1 <= num_images <= self.config.max_images:
             raise ValueError(
                 f"num_images must lie in [1, {self.config.max_images}], got {num_images}"
+            )
+        # Labels past the image count are never used, since they are cycled
+        # over the grid. Capping them at the image ceiling keeps the range
+        # check over them bounded by the same limit as the work itself.
+        if labels is not None and len(labels) > self.config.max_images:
+            raise ValueError(
+                f"at most {self.config.max_images} labels may be given, got {len(labels)}"
             )
         if not 0.0 <= eta <= 1.0:
             raise ValueError(f"eta must lie in [0, 1], got {eta}")
@@ -372,7 +396,9 @@ class SamplerService:
                 "name": torch.cuda.get_device_name(device),
             }
         return {
-            "checkpoint": str(self.config.checkpoint),
+            # The name only: the endpoint is unauthenticated, and the full path
+            # discloses the server's directory layout and user name.
+            "checkpoint": Path(self.config.checkpoint).name,
             "dataset": self._spec.name,
             "device": self._cfg.device,
             "weights": "ema" if self.config.use_ema else "raw",

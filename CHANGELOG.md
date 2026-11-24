@@ -543,6 +543,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   imported directly but only ever arrived through torchvision.
 - CI audits `uv.lock` against the advisory databases on every run, pins every
   action to a commit SHA, and checks out without persisting the token.
+- `serve` caps request bodies at 64 KiB (413), answers non-finite numbers with
+  a 422 instead of a 500 and no longer echoes request input in validation
+  errors, refuses more labels than `max_images`, keeps generated images in a
+  private per-process directory instead of a predictable shared one, refuses
+  to serve symlinks from it, and reports only the checkpoint's file name in
+  `/api/status`.
 
 ### Fixed
 
