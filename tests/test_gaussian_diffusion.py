@@ -201,3 +201,24 @@ def test_sample_grid_writes_for_a_gaussian_diffusion(tmp_path):
     ema = EMA(diffusion.net, decay=0.9, warmup=0)
     save_samples(diffusion, ema, torch.randn(2, 1, 8, 8), cfg, 0)
     assert (tmp_path / "sample_0001.png").exists()
+
+
+@pytest.mark.parametrize("var_type", list(ModelVarType), ids=str)
+def test_a_one_step_schedule_builds_trains_and_samples(var_type):
+    """T=1 has no t=1 to borrow the clipped log-variance from; it used to index past it."""
+    learned = var_type.is_learned
+    diffusion = GaussianDiffusion(
+        _Net(out_mult=2 if learned else 1),
+        betas=torch.tensor([0.02]),
+        num_timesteps=1,
+        model_var_type=var_type,
+        loss_type=LossType.RESCALED_MSE if learned else LossType.MSE,
+    )
+    for name in ("posterior_logvar_clipped", "fixed_large_logvar"):
+        buffer = getattr(diffusion, name)
+        assert buffer.shape == (1,)
+        assert buffer.isfinite().all()
+
+    x = torch.randn(*SHAPE)
+    assert diffusion.loss_at(x, torch.zeros(SHAPE[0], dtype=torch.long)).isfinite()
+    assert diffusion.sample(SHAPE[0], SHAPE[1:], "cpu").isfinite().all()

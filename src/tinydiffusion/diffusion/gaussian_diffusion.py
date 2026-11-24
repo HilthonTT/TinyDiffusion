@@ -154,10 +154,16 @@ class GaussianDiffusion(nn.Module):
             self.register_buffer(name, buffer, persistent=False)
 
         posterior_var = self.posterior_var
-        clipped = torch.cat([posterior_var[1:2], posterior_var[1:]])
+        # The posterior variance at t=0 is exactly 0, so its log is borrowed
+        # from t=1, as improved-diffusion does. A one-step schedule has no t=1
+        # to borrow from, and slicing it out gave empty buffers that every
+        # lookup then indexed past; beta_0 is the variance that step adds, and
+        # the only other scale the schedule offers.
+        head = posterior_var[1:2] if num_timesteps > 1 else beta_t[:1]
+        clipped = torch.cat([head, posterior_var[1:]])
         self.register_buffer("posterior_logvar_clipped", clipped.log(), persistent=False)
         self.register_buffer("log_betas", beta_t.log(), persistent=False)
-        fixed_large = torch.cat([posterior_var[1:2], beta_t[1:]])
+        fixed_large = torch.cat([head, beta_t[1:]])
         self.register_buffer("fixed_large_logvar", fixed_large.log(), persistent=False)
 
     @property
