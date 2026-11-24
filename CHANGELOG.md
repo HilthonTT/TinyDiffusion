@@ -533,7 +533,50 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parameterisation choices, conditioning, sampling, EMA, DDP, and the
   metrics, plus an order to read the source in.
 
+### Security
+
+- Dependencies upgraded across the board (torch 2.15, torchvision 0.29,
+  fastapi 0.165, pydantic 2.14, Pillow 13, ruff 0.17, mypy 2.4, …). The old
+  lockfile carried 123 known advisories across eight packages — 62 of them in
+  Pillow, which decodes every image the folder dataset reads — and the new one
+  carries none. Pillow is now a declared dependency (`pillow>=13.0`); it was
+  imported directly but only ever arrived through torchvision.
+- CI audits `uv.lock` against the advisory databases on every run, pins every
+  action to a commit SHA, and checks out without persisting the token.
+- The folder dataset refuses symlinks and junctions that resolve outside the
+  data root, and rejects images over Pillow's pixel limit before decoding
+  them; between one and two times the limit, Pillow itself only warns.
+- `serve` caps request bodies at 64 KiB (413), answers non-finite numbers with
+  a 422 instead of a 500 and no longer echoes request input in validation
+  errors, refuses more labels than `max_images`, keeps generated images in a
+  private per-process directory instead of a predictable shared one, refuses
+  to serve symlinks from it, and reports only the checkpoint's file name in
+  `/api/status`.
+
 ### Fixed
+
+- Noise schedules are built in float64 and cast once at the end. In float32,
+  `1 - alpha_bar` cancelled near t=0 (coefficients off by up to 1.6e-4), cosine
+  betas were off by up to 0.14%, and a beta below float32 epsilon made the
+  first posterior variance NaN. A one-step schedule no longer crashes.
+- A NaN or infinite validation score can no longer become the best and freeze
+  `best.pt` for the rest of the run, and runs without a gradient scaler skip
+  an optimizer step whose gradient norm is non-finite instead of writing NaN
+  into AdamW's state.
+- Checkpoints are fsynced before the atomic rename, and a failed save no
+  longer leaves a `.tmp` behind. Snapshot pruning sorts epochs numerically and
+  leaves non-numbered `epoch_*.pt` files alone.
+- Config validation rejects NaN and infinity in float fields, linear betas
+  outside `0 < beta_start <= beta_end < 1`, and `num_classes <= 0` for folder
+  datasets.
+- 16-bit greyscale images are rescaled to 8 bits rather than clipped to white.
+- A folder dataset's FID reference cache is keyed on a fingerprint of its
+  files, so adding or replacing images no longer serves stale statistics.
+  Corrupt cache files are treated as absent instead of raising or allocating a
+  huge tensor, and the Inception extractor stays in eval mode under `.train()`.
+- Sweep points whose directory names differ only by case or trailing dots are
+  caught as duplicates. `--set` and `--axis` values can no longer splice a
+  second TOML key in and silently drop the rest of the value.
 
 - Generated images are rounded to 8-bit levels before FID, sFID, KID,
   precision/recall and the Inception Score see them. The real images are

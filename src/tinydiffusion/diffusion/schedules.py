@@ -27,13 +27,17 @@ def cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> torch.Tensor:
         s: small offset preventing beta from being too small near t=0.
 
     Returns:
-        1-D tensor of betas, length num_timesteps.
+        1-D float32 tensor of betas, length num_timesteps.
     """
-    steps = torch.arange(num_timesteps + 1, dtype=torch.float32) / num_timesteps
+    # Built in float64 and only then rounded, as improved-diffusion does: each
+    # beta is one minus the ratio of two neighbouring alphabars that agree to
+    # four or five digits, and in float32 that cancellation left the early
+    # betas off by up to 0.14%.
+    steps = torch.arange(num_timesteps + 1, dtype=torch.float64) / num_timesteps
     alphabar = torch.cos((steps + s) / (1 + s) * math.pi / 2) ** 2
     alphabar = alphabar / alphabar[0]
     betas = 1 - alphabar[1:] / alphabar[:-1]
-    return betas.clamp(max=0.999)
+    return betas.clamp(max=0.999).float()
 
 
 def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -47,7 +51,7 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
         betas: 1-D tensor of betas, every entry in (0, 1).
 
     Returns:
-        Mapping from buffer name to coefficient tensor.
+        Mapping from buffer name to coefficient tensor, each in `betas`'s dtype.
 
     Raises:
         ValueError: if any beta falls outside (0, 1).
@@ -55,13 +59,23 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
     if not (betas > 0).all() or not (betas < 1).all():
         raise ValueError("all betas must lie in (0, 1)")
 
+    # Everything is derived in float64 and rounded once at the end. In float32,
+    # 1 - beta already rounds beta to about seven digits of *one*, so
+    # 1 - alphabar near t=0 kept only three or four significant digits and
+    # sqrt(1 - abar), the posterior variance and the SNR were off by up to
+    # 1.6e-4. A beta below float32's epsilon was worse: 1 - beta rounded to
+    # exactly 1, alphabar_0 became 1 and the t=0 coefficients came out as
+    # 0/0 and x/0. improved-diffusion builds its schedule in float64 for the
+    # same reason.
+    dtype = betas.dtype
+    betas = betas.double()
     alpha_t = 1.0 - betas
     alphabar_t = torch.cumprod(alpha_t, dim=0)
     alphabar_prev = torch.cat([alphabar_t.new_ones(1), alphabar_t[:-1]])
 
     posterior_var = betas * (1.0 - alphabar_prev) / (1.0 - alphabar_t)
 
-    return {
+    schedule = {
         "betas": betas,
         "alpha_t": alpha_t,
         "alphabar_t": alphabar_t,
@@ -78,6 +92,7 @@ def ddpm_schedules(betas: torch.Tensor) -> dict[str, torch.Tensor]:
         "posterior_mean_ct": (1.0 - alphabar_prev) * alpha_t.sqrt() / (1.0 - alphabar_t),
         "snr": alphabar_t / (1.0 - alphabar_t),
     }
+    return {name: buffer.to(dtype) for name, buffer in schedule.items()}
 
 
 def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch.Tensor:
@@ -113,7 +128,7 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
             every practical purpose, and keeps the buffers finite.
 
     Returns:
-        1-D tensor of rescaled betas, the same length as the input.
+        1-D tensor of rescaled betas, the same length and dtype as the input.
 
     Raises:
         ValueError: if any beta falls outside (0, 1), `floor` is not in
@@ -125,6 +140,12 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
     if not 0.0 < floor < 1.0:
         raise ValueError(f"floor must lie in (0, 1), got {floor}")
 
+    # Rescaled in float64 for the reason ddpm_schedules is: recovering each
+    # beta as one minus a ratio of neighbouring alphabars cancels almost every
+    # digit near t=0, and in float32 that moved the very first beta, the one
+    # the rescale promises to hold fixed, by 0.1%.
+    dtype = betas.dtype
+    betas = betas.double()
     sqrt_ab = torch.cumprod(1.0 - betas, dim=0).sqrt()
     first, last = sqrt_ab[0].clone(), sqrt_ab[-1].clone()
     if first <= floor:
@@ -136,4 +157,4 @@ def enforce_zero_terminal_snr(betas: torch.Tensor, floor: float = 1e-4) -> torch
 
     alphabar = sqrt_ab.square()
     alphas = alphabar / torch.cat([alphabar.new_ones(1), alphabar[:-1]])
-    return 1.0 - alphas
+    return (1.0 - alphas).to(dtype)

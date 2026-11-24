@@ -189,7 +189,11 @@ def sweep_points(
     for combination in itertools.product(*(values for _, values in axes)):
         overrides = dict(zip(fields, combination, strict=True))
         name = point_name(overrides)
-        if any(point.name == name for point in points):
+        # Compared as the filesystem will see them, not as strings: Windows and
+        # macOS fold case and Windows drops trailing dots and spaces, so
+        # "sampler=DDIM" and "sampler=ddim" would otherwise be two points
+        # training into one directory.
+        if any(_directory_key(point.name) == _directory_key(name) for point in points):
             raise ValueError(
                 f"two points would share the directory {name!r}; an axis repeats a "
                 "value, or two values differ only in characters a path cannot hold"
@@ -206,6 +210,19 @@ def sweep_points(
         )
         points.append(SweepPoint(name=name, overrides=overrides, config=config))
     return points
+
+
+def _directory_key(name: str) -> str:
+    """The form under which two directory names collide on any common filesystem.
+
+    Args:
+        name: a point name.
+
+    Returns:
+        `name` case-folded and stripped of the trailing dots and spaces Windows
+        discards.
+    """
+    return name.rstrip(". ").casefold()
 
 
 def _best_val_loss(log_dir: Path) -> tuple[float | None, int]:

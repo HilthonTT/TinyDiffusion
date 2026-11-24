@@ -106,3 +106,11 @@ def test_moving_a_bank_takes_its_vectors_with_it():
     bank.update(features(4))
     assert bank.to("cpu").features.device.type == "cpu"
     assert bank.device.type == "cpu"
+
+
+@pytest.mark.parametrize(("key", "value"), [("features", [[0.0] * 6] * 2), ("n", "two")])
+def test_a_payload_of_the_wrong_types_is_refused(key, value):
+    state: dict[str, object] = {"dim": 6, "n": 2, "features": torch.zeros(2, 6)}
+    state[key] = value
+    with pytest.raises(ValueError):
+        FeatureBank.from_state_dict(state)

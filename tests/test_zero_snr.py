@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -101,3 +103,63 @@ def test_the_terminal_signal_lands_on_the_floor_it_was_given():
 def test_a_floor_above_the_schedule_leaves_nothing_to_rescale():
     with pytest.raises(ValueError, match="nothing left to rescale"):
         enforce_zero_terminal_snr(cosine_beta_schedule(T), floor=0.999999)
+
+
+def _float64_schedule(betas):
+    """The coefficients ddpm_schedules owes, derived independently in float64."""
+    b = betas.double()
+    ab = torch.cumprod(1.0 - b, dim=0)
+    ab_prev = torch.cat([ab.new_ones(1), ab[:-1]])
+    return {
+        "sqrtmab": (1.0 - ab).sqrt(),
+        "sqrt_recipm1_ab": (1.0 / ab - 1.0).sqrt(),
+        "posterior_var": b * (1.0 - ab_prev) / (1.0 - ab),
+        "snr": ab / (1.0 - ab),
+    }
+
+
+@pytest.mark.parametrize(
+    "betas",
+    [linear_beta_schedule(1e-4, 0.02, 1000), cosine_beta_schedule(1000)],
+    ids=["linear", "cosine"],
+)
+def test_the_coefficients_are_accurate_to_float32_rounding(betas):
+    """Deriving them in float32 left 1 - abar near t=0 with three or four digits."""
+    schedule = ddpm_schedules(betas)
+    for name, reference in _float64_schedule(betas).items():
+        assert schedule[name].dtype == torch.float32
+        torch.testing.assert_close(schedule[name].double(), reference, rtol=1e-6, atol=0)
+
+
+def test_a_beta_below_float32_epsilon_still_gives_finite_coefficients():
+    """In float32, 1 - 1e-8 is exactly 1, which made abar_0 = 1 and t=0 a 0/0."""
+    betas = torch.cat([torch.tensor([1e-8]), linear_beta_schedule(1e-4, 0.02, T - 1)])
+    schedule = ddpm_schedules(betas)
+    for name, buffer in schedule.items():
+        assert buffer.isfinite().all(), name
+    assert schedule["sqrtmab"][0] > 0
+
+
+def test_the_cosine_betas_match_a_float64_construction():
+    steps = torch.arange(1001, dtype=torch.float64) / 1000
+    alphabar = torch.cos((steps + 0.008) / 1.008 * math.pi / 2) ** 2
+    reference = (1 - alphabar[1:] / alphabar[:-1]).clamp(max=0.999)
+
+    betas = cosine_beta_schedule(1000)
+    assert betas.dtype == torch.float32
+    torch.testing.assert_close(betas.double(), reference, rtol=1e-6, atol=0)
+
+
+@pytest.mark.parametrize(
+    "betas",
+    [linear_beta_schedule(1e-4, 0.02, 1000), cosine_beta_schedule(1000)],
+    ids=["linear", "cosine"],
+)
+def test_the_rescale_holds_the_first_beta_to_float32_rounding(betas):
+    """In float32 the 'fixed' first beta drifted by 0.1% over a 1000-step schedule."""
+    rescaled = enforce_zero_terminal_snr(betas)
+    assert rescaled.dtype == betas.dtype
+    assert rescaled[0].item() == pytest.approx(betas[0].item(), rel=1e-6)
+    torch.testing.assert_close(
+        rescaled.double(), enforce_zero_terminal_snr(betas.double()), rtol=1e-6, atol=0
+    )

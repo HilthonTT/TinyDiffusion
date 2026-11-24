@@ -11,10 +11,11 @@ Everything here is loop-free, so sampling, evaluation and the server can read a
 checkpoint without importing :mod:`tinydiffusion.training.train`.
 """
 
+import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import torch
 from torch.optim.lr_scheduler import LRScheduler
@@ -132,26 +133,47 @@ def save_checkpoint(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
-        {
-            "epoch": epoch,
-            "model": diffusion.net.state_dict() if model_state is None else model_state,
-            "ema": ema.module.state_dict(),
-            "ema_step": ema.step,
-            "optim": optim.state_dict(),
-            "scaler": scaler.state_dict(),
-            "sched": sched.state_dict() if sched is not None else None,
-            "config": {
-                # POSIX separators, so a checkpoint written on Windows resumes elsewhere.
-                k: v.as_posix() if isinstance(v, Path) else v
-                for k, v in asdict(cfg).items()
-            },
-            "best_val": best_val,
-            "rng": rng_state(),
+    payload: dict[str, Any] = {
+        "epoch": epoch,
+        "model": diffusion.net.state_dict() if model_state is None else model_state,
+        "ema": ema.module.state_dict(),
+        "ema_step": ema.step,
+        "optim": optim.state_dict(),
+        "scaler": scaler.state_dict(),
+        "sched": sched.state_dict() if sched is not None else None,
+        "config": {
+            # POSIX separators, so a checkpoint written on Windows resumes elsewhere.
+            k: v.as_posix() if isinstance(v, Path) else v
+            for k, v in asdict(cfg).items()
         },
-        tmp,
-    )
-    tmp.replace(path)
+        "best_val": best_val,
+        "rng": rng_state(),
+    }
+    try:
+        with tmp.open("wb") as handle:
+            torch.save(payload, handle)
+            _flush_to_disk(handle)
+        tmp.replace(path)
+    except BaseException:
+        # A failed save (a full disk, a Ctrl+C) must not leave a stray
+        # half-written ``.tmp`` beside the checkpoint it was meant to replace.
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _flush_to_disk(handle: BinaryIO) -> None:
+    """Push a file's bytes to the disk before it is renamed into place.
+
+    The rename is what makes a checkpoint atomic, but only for the name: the
+    data can still be sitting in the OS cache when the rename lands, and a
+    power cut then leaves ``last.pt`` pointing at a truncated or empty file —
+    the one outcome the temporary file was meant to rule out.
+
+    Args:
+        handle: the open, writable file to flush.
+    """
+    handle.flush()
+    os.fsync(handle.fileno())
 
 
 def copy_checkpoint(source: Path, dest: Path) -> None:
@@ -169,6 +191,8 @@ def copy_checkpoint(source: Path, dest: Path) -> None:
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
         shutil.copy2(source, tmp)
+        with tmp.open("rb+") as handle:
+            _flush_to_disk(handle)
         tmp.replace(dest)
     except BaseException:
         tmp.unlink(missing_ok=True)

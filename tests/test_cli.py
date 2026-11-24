@@ -761,3 +761,14 @@ def test_a_malformed_axis_is_an_argument_error(raw):
 
     with pytest.raises(argparse.ArgumentTypeError):
         sweep_axis(raw)
+
+
+def test_axis_value_cannot_splice_in_a_second_toml_key():
+    from tinydiffusion.cli.options import sweep_axis, toml_value
+
+    # A newline and a `]` would otherwise close the array and start a new key,
+    # parsing as just [1e-4] and dropping the rest without a word.
+    name, values = sweep_axis("lr=1e-4]\nother = [2")
+    assert name == "lr"
+    assert values != [1e-4]
+    assert toml_value("1\nother = 2") == "1\nother = 2"

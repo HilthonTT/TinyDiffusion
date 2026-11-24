@@ -27,6 +27,15 @@ DEFAULT_IMAGE_TTL = 3600.0
 DEFAULT_KEEP_IMAGES = 256
 """Rendered PNGs retained regardless of age, newest first."""
 
+MAX_REQUEST_BYTES = 64 * 1024
+"""Largest request body the server will read.
+
+The biggest legitimate request is a label list a few thousand entries long, a
+few tens of kilobytes. Without a ceiling the body is read into memory whole
+before validation ever sees it, so one unauthenticated caller with a
+multi-gigabyte upload could exhaust the host's memory.
+"""
+
 
 @dataclass(slots=True)
 class ServerConfig:
@@ -56,8 +65,9 @@ class ServerConfig:
             waits for all of the others. Refusing past this point turns that
             into an answer — a 503 a client can retry or report, rather than a
             connection that eventually times out.
-        image_dir: where rendered PNGs are written, or None for a directory
-            under the system temp folder.
+        image_dir: where rendered PNGs are written, or None for a private
+            directory under the system temp folder, created fresh at startup
+            and removed at shutdown.
         cors_origins: origins allowed to call the API from a browser. Empty
             disables CORS entirely, which is right unless a web page needs it.
         image_ttl: seconds a rendered PNG survives before it is swept, or 0 to
@@ -99,7 +109,9 @@ class ServerConfig:
             raise ValueError(f"max_images must be positive, got {self.max_images}")
         if self.max_inflight < 1:
             raise ValueError(f"max_inflight must be positive, got {self.max_inflight}")
-        if self.image_ttl < 0:
+        # Spelled as a negated comparison so NaN fails it too: a NaN TTL compares
+        # false against every file age, which would silently disable sweeping.
+        if not self.image_ttl >= 0:
             raise ValueError(f"image_ttl must not be negative, got {self.image_ttl}")
         if self.keep_images < 0:
             raise ValueError(f"keep_images must not be negative, got {self.keep_images}")

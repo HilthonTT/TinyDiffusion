@@ -355,3 +355,21 @@ def test_the_two_kinds_of_entry_key_the_same_way(tmp_path):
     assert features.name == f"{stats.stem}_features.pt"
     assert spatial.name == f"{stats.stem}_spatial.pt"
     assert len({stats, features, spatial}) == 3
+
+
+def test_a_corrupt_dimension_is_rejected_before_anything_is_allocated():
+    """A (dim, dim) float64 accumulator sized by a corrupt file would be terabytes."""
+    state = stats_over(4).state_dict()
+    state["dim"] = 1 << 24
+    with pytest.raises(ValueError, match="must hold"):
+        FeatureStats.from_state_dict(state)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"), [("sum", [0.0] * 6), ("outer", 3), ("dim", "six"), ("n", None)]
+)
+def test_a_payload_of_the_wrong_types_is_rejected_as_not_ours(key, value):
+    state = dict(stats_over(4).state_dict())
+    state[key] = value
+    with pytest.raises(ValueError):
+        FeatureStats.from_state_dict(state)

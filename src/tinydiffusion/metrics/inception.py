@@ -20,7 +20,7 @@ every image on both sides of a score.
 """
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
 import torch
 import torch.nn as nn
@@ -141,6 +141,26 @@ class InceptionFeatures(nn.Module):
         std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
         self.register_buffer("mean", mean, persistent=False)
         self.register_buffer("std", std, persistent=False)
+
+    def train(self, mode: bool = True) -> Self:
+        """Keep the network in eval mode, whatever a caller asks for.
+
+        This is a measuring instrument, never trained. In training mode the
+        pooled features pass through Inception's dropout and its batch norms
+        normalise by the batch and overwrite their running statistics — every
+        score after that is taken with a different, damaged network. A blanket
+        ``model.train()`` over a container holding the extractor is all it
+        would take, so the mode is pinned here rather than trusted to callers.
+
+        Args:
+            mode: ignored for the wrapped network; recorded on this module only.
+
+        Returns:
+            This module.
+        """
+        super().train(mode)
+        self.net.eval()
+        return self
 
     def preprocess(self, images: torch.Tensor) -> torch.Tensor:
         """Bring model-space images into Inception's input convention.

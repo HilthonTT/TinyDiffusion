@@ -24,22 +24,25 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "torch>=2.13.0",
-    "torchvision>=0.24",
-    "numpy>=2.1",
-    "pydantic>=2.9",
-    "tqdm>=4.70.0",
+    "torch>=2.15",
+    "torchvision>=0.29",
+    "numpy>=2.5",
+    # Imported directly to decode user images (data/folder.py); the floor keeps
+    # installs off releases with known decoder CVEs.
+    "pillow>=13.0",
+    "pydantic>=2.14",
+    "tqdm>=4.70.1",
 ]
 
 [project.optional-dependencies]
 # Optional experiment tracking / logging backends.
-tracking = ["tensorboard>=2.18", "wandb>=0.18"]
+tracking = ["tensorboard>=2.21", "wandb>=0.31"]
 # The HTTP sampling server (`tinydiffusion serve`).
-server = ["fastapi>=0.115", "uvicorn>=0.32"]
+server = ["fastapi>=0.165", "uvicorn>=0.54"]
 # Figures from a run's metrics.jsonl (`tinydiffusion plot`).
-plots = ["matplotlib>=3.9"]
+plots = ["matplotlib>=3.11"]
 # The training dashboard (`tinydiffusion tui`).
-tui = ["textual>=6.0"]
+tui = ["textual>=8.2"]
 
 [project.urls]
 Homepage = "https://github.com/HilthonTT/TinyDiffusion"
@@ -52,14 +55,14 @@ tinydiffusion = "tinydiffusion.cli:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
-    "pytest-cov>=6.0",
+    "pytest>=9.2",
+    "pytest-cov>=7.1",
     # Starlette's TestClient is built on httpx2; the older httpx raises a
     # deprecation warning that this project's filterwarnings turns into an error.
-    "httpx2>=0.29",
-    "ruff>=0.16.3",
-    "mypy>=2.3.0",
-    "pre-commit>=4.0",
+    "httpx2>=2.16",
+    "ruff>=0.17.6",
+    "mypy>=2.4.1",
+    "pre-commit>=4.7",
 ]
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ warn_return_any = false
 # pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-minversion = "8.0"
+minversion = "9.2"
 testpaths = ["tests"]
 addopts = [
     "-ra",

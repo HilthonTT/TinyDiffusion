@@ -135,3 +135,14 @@ def test_the_network_rescales_imagenet_input_to_what_its_weights_expect(untraine
     read comes from a mis-scaled forward pass.
     """
     assert untrained.net.transform_input is True
+
+
+def test_the_extractor_cannot_be_put_into_training_mode():
+    """Training mode runs the pooled features through dropout and batch-stat norms."""
+    extractor = InceptionFeatures(weights=None)
+    extractor.train()
+    assert not extractor.net.training
+    assert not any(module.training for module in extractor.net.modules())
+
+    images = torch.rand(2, 3, 16, 16) * 2 - 1
+    assert torch.equal(extractor(images), extractor(images))
