@@ -533,6 +533,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parameterisation choices, conditioning, sampling, EMA, DDP, and the
   metrics, plus an order to read the source in.
 
+### Security
+
+- Dependencies upgraded across the board (torch 2.15, torchvision 0.29,
+  fastapi 0.165, pydantic 2.14, Pillow 13, ruff 0.17, mypy 2.4, …). The old
+  lockfile carried 123 known advisories across eight packages — 62 of them in
+  Pillow, which decodes every image the folder dataset reads — and the new one
+  carries none. Pillow is now a declared dependency (`pillow>=13.0`); it was
+  imported directly but only ever arrived through torchvision.
+
 ### Fixed
 
 - Generated images are rounded to 8-bit levels before FID, sFID, KID,
