@@ -7,6 +7,7 @@ here takes one of those and does a batch, an epoch, or the bookkeeping that
 follows one.
 """
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
@@ -191,10 +192,21 @@ def train_step(
             run.scaler.unscale_(run.optim)
             grad_norm = nn.utils.clip_grad_norm_(run.step_params, cfg.grad_clip)
 
-        scale_before = run.scaler.get_scale()
-        run.scaler.step(run.optim)
-        run.scaler.update()
-        stepped = run.scaler.get_scale() >= scale_before
+        if run.scaler.is_enabled():
+            scale_before = run.scaler.get_scale()
+            run.scaler.step(run.optim)
+            run.scaler.update()
+            stepped = run.scaler.get_scale() >= scale_before
+        else:
+            # float32 and bf16 run without a scaler, so nothing else stands
+            # between an overflowed backward pass and the weights: one inf or
+            # NaN gradient makes AdamW's moments NaN, every later step stays
+            # NaN, and the next ``last.pt`` is written from the wreck. Skip the
+            # step the way the scaler would. The norm is of all-reduced
+            # gradients, so every rank of a group reaches the same verdict.
+            stepped = grad_norm is None or bool(torch.isfinite(grad_norm))
+            if stepped:
+                run.optim.step()
         if stepped:
             if run.master_params is not None:
                 master_params_to_model_params(run.model_params, run.master_params)
@@ -481,9 +493,15 @@ def score_epoch(
     )
     logger.set(**{"val/loss": val})
     new_best: float | None = None
-    if best_val is None or val < best_val:
+    # A non-finite score is never a best, and a non-finite running best (from
+    # a checkpoint written before this check) never blocks one. Without both,
+    # one diverged epoch scoring NaN would become the best — every later
+    # ``val < nan`` is False — and ``best.pt`` would hold the diverged weights
+    # for the rest of the run.
+    if math.isfinite(val) and (best_val is None or not math.isfinite(best_val) or val < best_val):
         best_val = new_best = val
-    logger.set(**{"val/best_loss": best_val})
+    if best_val is not None:
+        logger.set(**{"val/best_loss": best_val})
     return best_val, new_best
 
 

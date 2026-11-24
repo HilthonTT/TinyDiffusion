@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,7 +24,7 @@ from tinydiffusion.training import train as train_module
 from tinydiffusion.training.config import TrainConfig
 from tinydiffusion.training.ema import EMA
 from tinydiffusion.training.interrupt import InterruptChoice, TrainingCancelled
-from tinydiffusion.utils.tracking import METRICS_FILENAME
+from tinydiffusion.utils.tracking import METRICS_FILENAME, null_logger
 
 
 def _patch_loader(monkeypatch, factory):
@@ -1316,3 +1317,105 @@ def test_only_the_main_rank_replays_the_checkpoint_rng(tiny_cfg, tmp_path):
     own_stream = torch.rand(4)
     assert not torch.equal(restore(True), own_stream)
     assert torch.equal(restore(False), own_stream)
+
+
+def _scoring_run(cfg):
+    """Just enough of a :class:`~tinydiffusion.training.loop.Run` for score_epoch."""
+    return SimpleNamespace(cfg=cfg, diffusion=None, ema=SimpleNamespace(module=None))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_score_never_becomes_the_best(tiny_cfg, monkeypatch, bad):
+    """A diverged epoch scoring NaN must not claim best.pt and lock every later epoch out."""
+    scores = iter([bad, 0.5, 0.4])
+    monkeypatch.setattr(loop_module, "validation_loss", lambda *a, **k: next(scores))
+    run = _scoring_run(tiny_cfg)
+
+    with null_logger() as logger:
+        best, new = loop_module.score_epoch(run, logger, [], best_val=None)
+        assert (best, new) == (None, None)
+        best, new = loop_module.score_epoch(run, logger, [], best_val=best)
+        assert (best, new) == (0.5, 0.5)
+        best, new = loop_module.score_epoch(run, logger, [], best_val=best)
+        assert (best, new) == (0.4, 0.4)
+
+
+def test_a_non_finite_stored_best_does_not_block_a_real_one(tiny_cfg, monkeypatch):
+    """A checkpoint written before the check may carry a NaN best_val."""
+    monkeypatch.setattr(loop_module, "validation_loss", lambda *a, **k: 0.7)
+    with null_logger() as logger:
+        best, new = loop_module.score_epoch(
+            _scoring_run(tiny_cfg), logger, [], best_val=float("nan")
+        )
+    assert (best, new) == (0.7, 0.7)
+
+
+def test_a_non_finite_gradient_skips_the_step_without_a_scaler(tiny_cfg, tmp_path, monkeypatch):
+    """float32 has no scaler to skip an overflowed step, so the loop has to."""
+    good = torch.randn(4, 1, 16, 16)
+    poisoned = good.clone()
+    poisoned[0, 0, 0, 0] = float("nan")
+    labels = torch.zeros(4, dtype=torch.long)
+    cfg = dataclasses.replace(
+        tiny_cfg,
+        num_epochs=1,
+        num_classes=None,
+        lr_warmup=0,
+        grad_clip=1.0,
+        ema_decay=0.0,
+        ema_warmup=0,
+        val_every=0,
+        sample_every=0,
+    )
+
+    weight = _weight_after(cfg, [(poisoned, labels), (good, labels)], monkeypatch)
+
+    assert torch.isfinite(weight).all()
+    assert not torch.equal(weight, torch.full_like(weight, 0.5))  # the clean batch stepped
+    ckpt = ckpt_module.read_checkpoint(cfg.ckpt_dir / ckpt_module.LAST_CHECKPOINT)
+    assert ckpt["ema_step"] == 1
+    for state in ckpt["optim"]["state"].values():
+        assert all(torch.isfinite(v).all() for v in state.values() if torch.is_tensor(v))
+    assert _records(cfg)[0]["train/skipped_step"] == pytest.approx(0.5)
+
+
+def test_a_failed_save_leaves_the_old_checkpoint_and_no_tmp(tiny_cfg, tmp_path, monkeypatch):
+    diffusion = model_module.build_model(tiny_cfg)
+    ema = EMA(diffusion.net)
+    optim = torch.optim.AdamW(diffusion.net.parameters())
+    path = tmp_path / "last.pt"
+    path.write_bytes(b"old checkpoint")
+
+    def failing_save(obj, f):
+        f.write(b"half")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ckpt_module.torch, "save", failing_save)
+    with pytest.raises(OSError, match="disk full"):
+        ckpt_module.save_checkpoint(
+            path,
+            epoch=0,
+            diffusion=diffusion,
+            ema=ema,
+            optim=optim,
+            scaler=torch.amp.GradScaler("cpu", enabled=False),
+            cfg=tiny_cfg,
+        )
+
+    assert path.read_bytes() == b"old checkpoint"
+    assert set(tmp_path.iterdir()) == {path}
+
+
+def test_snapshot_pruning_orders_by_epoch_not_by_name(tmp_path):
+    """Past epoch 9999 the padding runs out and a name sort puts the newest first."""
+    for name in ("epoch_9998.pt", "epoch_9999.pt", "epoch_best.pt"):
+        (tmp_path / name).write_bytes(b"old")
+    last = tmp_path / "last.pt"
+    last.write_bytes(b"newest")
+
+    artifacts_module.snapshot_epoch(tmp_path, last, epoch=9999, keep=2)
+
+    kept = {p.name for p in tmp_path.glob("epoch_*.pt")}
+    # A file that is not a numbered snapshot is somebody else's, and is left alone.
+    assert kept == {"epoch_9999.pt", "epoch_10000.pt", "epoch_best.pt"}
+    assert (tmp_path / "epoch_10000.pt").read_bytes() == b"newest"

@@ -559,6 +559,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `1 - alpha_bar` cancelled near t=0 (coefficients off by up to 1.6e-4), cosine
   betas were off by up to 0.14%, and a beta below float32 epsilon made the
   first posterior variance NaN. A one-step schedule no longer crashes.
+- A NaN or infinite validation score can no longer become the best and freeze
+  `best.pt` for the rest of the run, and runs without a gradient scaler skip
+  an optimizer step whose gradient norm is non-finite instead of writing NaN
+  into AdamW's state.
+- Checkpoints are fsynced before the atomic rename, and a failed save no
+  longer leaves a `.tmp` behind. Snapshot pruning sorts epochs numerically and
+  leaves non-numbered `epoch_*.pt` files alone.
+- Config validation rejects NaN and infinity in float fields, linear betas
+  outside `0 < beta_start <= beta_end < 1`, and `num_classes <= 0` for folder
+  datasets.
 - 16-bit greyscale images are rescaled to 8 bits rather than clipped to white.
 - A folder dataset's FID reference cache is keyed on a fingerprint of its
   files, so adding or replacing images no longer serves stale statistics.

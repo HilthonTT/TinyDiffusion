@@ -52,7 +52,13 @@ def snapshot_epoch(ckpt_dir: Path, source: Path, *, epoch: int, keep: int) -> No
     if keep <= 0 or not source.is_file():
         return
     copy_checkpoint(source, ckpt_dir / f"epoch_{epoch + 1:04d}.pt")
-    snapshots = sorted(ckpt_dir.glob("epoch_*.pt"))
+    # Ordered by the epoch number, not the name: the zero padding runs out at
+    # epoch 9999, and past it "epoch_10000.pt" sorts before "epoch_9999.pt" —
+    # so a name sort would prune the newest snapshot and keep the oldest.
+    snapshots = sorted(
+        (p for p in ckpt_dir.glob("epoch_*.pt") if p.stem[len("epoch_") :].isdigit()),
+        key=lambda p: int(p.stem[len("epoch_") :]),
+    )
     for stale in snapshots[: max(len(snapshots) - keep, 0)]:
         stale.unlink(missing_ok=True)
 

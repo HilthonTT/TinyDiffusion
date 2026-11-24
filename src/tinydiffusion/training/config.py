@@ -1,5 +1,6 @@
 """Run configuration for MNIST training, and its TOML/checkpoint round-trip."""
 
+import math
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -275,6 +276,15 @@ class TrainConfig:
                 size or rate falls outside the range it has to lie in, or the
                 conditioning settings do not describe a trainable model.
         """
+        # TOML spells ``nan`` and ``inf`` as plain literals, and NaN slips past
+        # every range check below — ``nan < 0`` is False — so a NaN grad_clip
+        # or weight_decay would otherwise be accepted and poison every weight
+        # on the first optimiser step.
+        for item in fields(self):
+            value = getattr(self, item.name)
+            values = value if isinstance(value, tuple) else (value,)
+            if any(isinstance(v, float) and not math.isfinite(v) for v in values):
+                raise ValueError(f"{item.name} must be finite, got {value}")
         if self.folder_channels not in (1, 3):
             raise ValueError(f"folder_channels must be 1 or 3, got {self.folder_channels}")
         if not 0.0 <= self.folder_holdout < 1.0:
@@ -300,6 +310,14 @@ class TrainConfig:
             raise ValueError(f"num_timesteps must be positive, got {self.num_timesteps}")
         if self.schedule not in ("cosine", "linear"):
             raise ValueError(f"unknown schedule {self.schedule!r}, expected 'cosine' or 'linear'")
+        # Only the linear schedule reads these. A beta of 1 zeroes alpha_bar
+        # from that step on and a negative one makes it exceed 1, and neither
+        # fails until the loss comes back NaN.
+        if self.schedule == "linear" and not 0.0 < self.beta_start <= self.beta_end < 1.0:
+            raise ValueError(
+                f"the linear schedule needs 0 < beta_start <= beta_end < 1, got "
+                f"beta_start={self.beta_start}, beta_end={self.beta_end}"
+            )
         if not 1 <= self.sample_steps <= self.num_timesteps:
             raise ValueError(
                 f"sample_steps must lie in [1, {self.num_timesteps}], got {self.sample_steps}"
@@ -373,6 +391,13 @@ class TrainConfig:
                 model that will not learn the unconditional prediction it
                 needs.
         """
+        # A folder's spec takes its class count from this very field, so the
+        # match below cannot catch a zero or negative one there.
+        if self.num_classes is not None and self.num_classes < 1:
+            raise ValueError(
+                f"num_classes must be positive, got {self.num_classes}; leave it unset "
+                "to train unconditionally"
+            )
         if self.num_classes is not None and self.num_classes != spec.num_classes:
             raise ValueError(
                 f"num_classes={self.num_classes} does not match {spec.name}, which has "

@@ -183,3 +183,46 @@ def test_the_performance_settings_default_to_the_conservative_choice():
     cfg = TrainConfig()
     assert (cfg.compile, cfg.channels_last, cfg.grad_accum) == (False, False, 1)
     assert (cfg.amp_dtype, cfg.lr_schedule, cfg.weight_decay) == ("fp16", "constant", 0.0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"lr": float("nan")},
+        {"lr": float("inf")},
+        {"grad_clip": float("nan")},
+        {"weight_decay": float("nan")},
+        {"min_snr_gamma": float("nan")},
+        {"betas": (0.9, float("nan"))},
+    ],
+)
+def test_non_finite_values_are_rejected(overrides):
+    """NaN passes every ``x < 0`` range check, so it needs a check of its own."""
+    (name,) = overrides
+    with pytest.raises(ValueError, match=f"{name} must be finite"):
+        TrainConfig(**overrides)
+
+
+def test_a_nan_from_toml_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="grad_clip must be finite"):
+        load_config(write(tmp_path, "grad_clip = nan\n"))
+
+
+@pytest.mark.parametrize(
+    ("beta_start", "beta_end"),
+    [(0.0, 0.02), (-1e-4, 0.02), (1e-4, 1.0), (0.03, 0.02)],
+)
+def test_a_linear_schedule_rejects_betas_out_of_range(beta_start, beta_end):
+    with pytest.raises(ValueError, match="beta_start"):
+        TrainConfig(schedule="linear", beta_start=beta_start, beta_end=beta_end)
+
+
+def test_the_cosine_schedule_ignores_the_linear_betas():
+    TrainConfig(schedule="cosine", beta_start=0.0, beta_end=1.0)
+
+
+@pytest.mark.parametrize("num_classes", [0, -3])
+def test_a_folder_rejects_a_non_positive_class_count(num_classes):
+    """A folder's spec echoes num_classes back, so the dataset match cannot catch it."""
+    with pytest.raises(ValueError, match="num_classes must be positive"):
+        TrainConfig(dataset="folder", num_classes=num_classes)
